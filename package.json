@@ -5,7 +5,13 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "pm2:start": "pm2 start server.js --name admin-backend --env production",
+    "pm2:stop": "pm2 stop admin-backend",
+    "pm2:restart": "pm2 restart admin-backend",
+    "pm2:delete": "pm2 delete admin-backend",
+    "pm2:logs": "pm2 logs admin-backend",
+    "pm2:monit": "pm2 monit"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
