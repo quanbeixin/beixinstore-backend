@@ -9,10 +9,14 @@ dotenv.config({ path: path.resolve(__dirname, envFile) })
 const authRoutes = require('./routes/authRoutes')
 const testRoutes = require('./routes/testRoutes')
 const userRoutes = require('./routes/userRoutes')
+const optionRoutes = require('./routes/optionRoutes')
+const configRoutes = require('./routes/configRoutes')
+const orgRoutes = require('./routes/orgRoutes')
 
 const app = express()
 const PORT = process.env.PORT || 3000
 const HOST = process.env.HOST || '0.0.0.0'
+const LOG_OPTIONS_REQUESTS = process.env.LOG_OPTIONS_REQUESTS === 'true'
 
 const allowedOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:5173')
   .split(',')
@@ -44,12 +48,28 @@ app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`)
+  if (req.method === 'OPTIONS' && !LOG_OPTIONS_REQUESTS) {
+    next()
+    return
+  }
+
+  const startTime = Date.now()
+
+  res.on('finish', () => {
+    const costMs = Date.now() - startTime
+    console.log(
+      `[${new Date().toISOString()}] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${costMs}ms)`,
+    )
+  })
+
   next()
 })
 
 app.use('/api/auth', authRoutes)
 app.use('/api/users', userRoutes)
+app.use('/api/options', optionRoutes)
+app.use('/api/config', configRoutes)
+app.use('/api/org', orgRoutes)
 app.use('/api', testRoutes)
 
 app.get('/', (req, res) => {

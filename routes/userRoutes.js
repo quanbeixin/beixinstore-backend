@@ -1,24 +1,15 @@
-const express = require('express');
-const router = express.Router();
-const { getUsers, getUserById, createUser, updateUser, deleteUser } = require('../controllers/userController');
-const authMiddleware = require('../middleware/auth');
+﻿const express = require('express')
+const router = express.Router()
 
-// 所有用户接口都需要 JWT 验证
-router.use(authMiddleware);
+const { getUsers, getUserById, createUser, updateUser, deleteUser } = require('../controllers/userController')
+const authMiddleware = require('../middleware/auth')
 
-// GET  /api/users               - 获取用户列表（支持 ?page=1&pageSize=10&keyword=）
-router.get('/', getUsers);
+router.use(authMiddleware)
 
-// GET  /api/users/:id           - 获取单个用户信息
-router.get('/:id', getUserById);
+router.get('/', authMiddleware.requirePermission('user.view'), getUsers)
+router.get('/:id', authMiddleware.requirePermission('user.view'), getUserById)
+router.post('/', authMiddleware.requirePermission('user.create'), createUser)
+router.post('/:id/update', authMiddleware.requirePermission('user.update'), updateUser)
+router.post('/:id/delete', authMiddleware.requirePermission('user.delete'), deleteUser)
 
-// POST /api/users               - 创建新用户
-router.post('/', createUser);
-
-// POST /api/users/:id/update    - 更新用户信息（邮箱、部门、角色）
-router.post('/:id/update', updateUser);
-
-// POST /api/users/:id/delete    - 删除用户
-router.post('/:id/delete', deleteUser);
-
-module.exports = router;
+module.exports = router

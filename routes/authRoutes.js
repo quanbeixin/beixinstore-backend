@@ -1,15 +1,12 @@
-const express = require('express');
-const router = express.Router();
-const { register, login, getProfile } = require('../controllers/authController');
-const authMiddleware = require('../middleware/auth');
+﻿const express = require('express')
+const router = express.Router()
 
-// POST /api/auth/register - 用户注册
-router.post('/register', register);
+const { register, login, getProfile, getAccess } = require('../controllers/authController')
+const authMiddleware = require('../middleware/auth')
 
-// POST /api/auth/login - 用户登录
-router.post('/login', login);
+router.post('/register', register)
+router.post('/login', login)
+router.get('/profile', authMiddleware, getProfile)
+router.get('/access', authMiddleware, getAccess)
 
-// GET /api/auth/profile - 获取当前用户信息（需要 Token）
-router.get('/profile', authMiddleware, getProfile);
-
-module.exports = router;
+module.exports = router
