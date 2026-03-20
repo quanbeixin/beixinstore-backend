@@ -6,18 +6,8 @@ const DEMAND_PHASE_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED']
 const WORK_LOG_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE']
 const DEMAND_PHASE_DICT_KEY = 'demand_phase_type'
 const ISSUE_TYPE_DICT_KEY = 'issue_type'
+const OWNER_ESTIMATE_RULES = ['NONE', 'OPTIONAL', 'REQUIRED']
 const TRUE_LIKE_VALUES = new Set(['1', 'true', 'yes', 'y', 'on'])
-const FALLBACK_DEMAND_PHASES = [
-  { phase_key: 'COMPETITOR_RESEARCH', phase_name: 'Competitor Research', init_ratio: 0.08, sort_order: 10 },
-  { phase_key: 'PRODUCT_SOLUTION', phase_name: 'Product Solution', init_ratio: 0.12, sort_order: 20 },
-  { phase_key: 'DATA_ANALYSIS', phase_name: 'Data Analysis', init_ratio: 0.1, sort_order: 30 },
-  { phase_key: 'PRODUCT_PLANNING', phase_name: 'Product Planning', init_ratio: 0.12, sort_order: 40 },
-  { phase_key: 'PRODUCT_ACCEPTANCE', phase_name: 'Product Acceptance', init_ratio: 0.08, sort_order: 50 },
-  { phase_key: 'DEV', phase_name: 'Development', init_ratio: 0.3, sort_order: 60 },
-  { phase_key: 'TEST', phase_name: 'Testing', init_ratio: 0.1, sort_order: 70 },
-  { phase_key: 'BUG_FIX', phase_name: 'Bug Fix', init_ratio: 0.06, sort_order: 80 },
-  { phase_key: 'RELEASE_FOLLOWUP', phase_name: 'Release Follow-up', init_ratio: 0.04, sort_order: 90 },
-]
 
 const ITEM_TYPE_LOOKUP_SQL = `
   SELECT
@@ -32,7 +22,16 @@ const ITEM_TYPE_LOOKUP_SQL = `
       WHEN LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.requireDemand')), '')) IN ('1', 'true', 'yes', 'y', 'on')
         THEN 1
       ELSE 0
-    END AS require_demand
+    END AS require_demand,
+    CASE UPPER(COALESCE(
+      JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.owner_estimate_rule')),
+      JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.ownerEstimateRule')),
+      'NONE'
+    ))
+      WHEN 'OPTIONAL' THEN 'OPTIONAL'
+      WHEN 'REQUIRED' THEN 'REQUIRED'
+      ELSE 'NONE'
+    END AS owner_estimate_rule
   FROM config_dict_items i
   INNER JOIN config_dict_types t ON t.type_key = i.type_key
   WHERE i.type_key = '${ISSUE_TYPE_DICT_KEY}' AND t.enabled = 1
@@ -43,7 +42,8 @@ const ITEM_TYPE_LOOKUP_SQL = `
     w.name AS name,
     w.enabled AS enabled,
     w.sort_order AS sort_order,
-    w.require_demand AS require_demand
+    w.require_demand AS require_demand,
+    'NONE' AS owner_estimate_rule
   FROM work_item_types w
   WHERE NOT EXISTS (
     SELECT 1
@@ -52,6 +52,22 @@ const ITEM_TYPE_LOOKUP_SQL = `
     WHERE i2.type_key = '${ISSUE_TYPE_DICT_KEY}' AND t2.enabled = 1
   )
 `
+
+const PHASE_OWNER_DEPARTMENT_ID_SQL = `CAST(NULLIF(COALESCE(
+  JSON_UNQUOTE(JSON_EXTRACT(pdi.extra_json, '$.owner_department_id')),
+  JSON_UNQUOTE(JSON_EXTRACT(pdi.extra_json, '$.ownerDepartmentId')),
+  ''
+), '') AS UNSIGNED)`
+
+const PHASE_OWNER_ESTIMATE_REQUIRED_SQL = `CASE
+  WHEN LOWER(COALESCE(
+    JSON_UNQUOTE(JSON_EXTRACT(pdi.extra_json, '$.owner_estimate_required')),
+    JSON_UNQUOTE(JSON_EXTRACT(pdi.extra_json, '$.ownerEstimateRequired')),
+    ''
+  )) IN ('1', 'true', 'yes', 'y', 'on')
+    THEN 1
+  ELSE 0
+END`
 
 function normalizeStatus(value) {
   const status = String(value || 'TODO').trim().toUpperCase()
@@ -73,6 +89,10 @@ function normalizeDecimal(value, fallback = null) {
   const num = Number(value)
   if (!Number.isFinite(num)) return fallback
   return Number(num.toFixed(1))
+}
+
+function isMissingColumnError(err) {
+  return err && err.code === 'ER_BAD_FIELD_ERROR'
 }
 
 function parseExtraJson(raw) {
@@ -107,6 +127,22 @@ function parseRequireDemand(extraJson, fallback = 0) {
   return fallback
 }
 
+function normalizeOwnerEstimateRule(value, fallback = 'NONE') {
+  const rule = String(value || '').trim().toUpperCase()
+  if (OWNER_ESTIMATE_RULES.includes(rule)) return rule
+  return fallback
+}
+
+function parseOwnerEstimateRule(extraJson, fallback = 'NONE') {
+  if (!extraJson || typeof extraJson !== 'object') return fallback
+  const candidates = [extraJson.owner_estimate_rule, extraJson.ownerEstimateRule]
+  for (const item of candidates) {
+    if (item === undefined || item === null) continue
+    return normalizeOwnerEstimateRule(item, fallback)
+  }
+  return fallback
+}
+
 function mapIssueTypeDictRow(row) {
   const extraJson = parseExtraJson(row.extra_json)
   return {
@@ -114,6 +150,7 @@ function mapIssueTypeDictRow(row) {
     type_key: row.item_code,
     name: row.item_name,
     require_demand: parseRequireDemand(extraJson, 0),
+    owner_estimate_rule: parseOwnerEstimateRule(extraJson, 'NONE'),
     enabled: Number(row.enabled) === 1 ? 1 : 0,
     sort_order: Number(row.sort_order) || 0,
   }
@@ -138,132 +175,6 @@ async function syncDemandOwnerEstimateByPhases(conn, demandId) {
   return totalEstimate
 }
 
-function normalizeDemandPhaseStatusByDemandStatus(status) {
-  if (status === 'DONE') return 'DONE'
-  if (status === 'CANCELLED') return 'CANCELLED'
-  return 'TODO'
-}
-
-function parsePhaseInitRatio(extraJson, fallback = null) {
-  if (!extraJson || typeof extraJson !== 'object') return fallback
-  const candidates = [extraJson.init_ratio, extraJson.initRatio, extraJson.ratio]
-  for (const value of candidates) {
-    if (value === undefined || value === null || value === '') continue
-    const num = Number(value)
-    if (Number.isFinite(num) && num >= 0) return num
-  }
-  return fallback
-}
-
-async function listDemandPhaseTemplates(conn, { enabledOnly = true } = {}) {
-  const whereEnabled = enabledOnly ? 'AND i.enabled = 1' : ''
-  const [rows] = await conn.query(
-    `SELECT
-       i.item_code,
-       i.item_name,
-       i.sort_order,
-       i.extra_json
-     FROM config_dict_items i
-     INNER JOIN config_dict_types t ON t.type_key = i.type_key
-     WHERE i.type_key = ? AND t.enabled = 1 ${whereEnabled}
-     ORDER BY i.sort_order ASC, i.id ASC`,
-    [DEMAND_PHASE_DICT_KEY],
-  )
-
-  const templates = rows.map((row) => {
-    const extraJson = parseExtraJson(row.extra_json)
-    return {
-      phase_key: row.item_code,
-      phase_name: row.item_name,
-      sort_order: Number(row.sort_order) || 0,
-      init_ratio: parsePhaseInitRatio(extraJson, null),
-    }
-  })
-
-  if (templates.length > 0) return templates
-  return FALLBACK_DEMAND_PHASES
-}
-
-function normalizePhaseRatios(templates) {
-  if (!Array.isArray(templates) || templates.length === 0) return []
-
-  const raw = templates.map((item) => {
-    const num = Number(item.init_ratio)
-    return Number.isFinite(num) && num >= 0 ? num : null
-  })
-
-  const hasAnyRatio = raw.some((item) => item !== null)
-  if (!hasAnyRatio) {
-    const even = 1 / templates.length
-    return templates.map(() => even)
-  }
-
-  const sum = raw.reduce((acc, item) => acc + (item || 0), 0)
-  if (sum <= 0) {
-    const even = 1 / templates.length
-    return templates.map(() => even)
-  }
-
-  return raw.map((item) => (item || 0) / sum)
-}
-
-function buildDefaultDemandPhaseRows({ templates = [], ownerUserId = null, ownerEstimateHours = 0, demandStatus = 'TODO' }) {
-  const phaseStatus = normalizeDemandPhaseStatusByDemandStatus(demandStatus)
-  const safeTemplates = Array.isArray(templates) && templates.length > 0 ? templates : FALLBACK_DEMAND_PHASES
-  const ratios = normalizePhaseRatios(safeTemplates)
-  const totalEstimate = Number(ownerEstimateHours || 0)
-
-  let allocated = 0
-  return safeTemplates.map((item, index) => {
-    const estimate =
-      index === safeTemplates.length - 1
-        ? Number((totalEstimate - allocated).toFixed(1))
-        : Number((totalEstimate * ratios[index]).toFixed(1))
-
-    allocated += estimate
-
-    return {
-      phase_key: item.phase_key,
-      phase_name: item.phase_name,
-      owner_user_id: ownerUserId || null,
-      estimate_hours: estimate < 0 ? 0 : estimate,
-      status: phaseStatus,
-      sort_order: Number(item.sort_order) || 0,
-    }
-  })
-}
-
-async function seedDemandPhases(conn, { demandId, ownerUserId = null, ownerEstimateHours = 0, demandStatus = 'TODO' }) {
-  const templates = await listDemandPhaseTemplates(conn, { enabledOnly: true })
-  const rows = buildDefaultDemandPhaseRows({
-    templates,
-    ownerUserId,
-    ownerEstimateHours,
-    demandStatus,
-  })
-
-  for (const row of rows) {
-    await conn.query(
-      `INSERT INTO work_demand_phases (
-         demand_id, phase_key, phase_name, owner_user_id, estimate_hours, status, sort_order
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         phase_name = VALUES(phase_name),
-         sort_order = VALUES(sort_order),
-         owner_user_id = IFNULL(work_demand_phases.owner_user_id, VALUES(owner_user_id))`,
-      [
-        demandId,
-        row.phase_key,
-        row.phase_name,
-        row.owner_user_id,
-        row.estimate_hours,
-        row.status,
-        row.sort_order,
-      ],
-    )
-  }
-}
-
 async function generateDemandId(conn) {
   const [[row]] = await conn.query(
     `SELECT MAX(CAST(SUBSTRING(id, 4) AS UNSIGNED)) AS max_no
@@ -275,16 +186,125 @@ async function generateDemandId(conn) {
   return `REQ${String(nextNo).padStart(3, '0')}`
 }
 
-async function getTeamMemberIds(ownerUserId) {
+function normalizeUserIds(rows) {
+  return rows.map((row) => Number(row.id)).filter((id) => Number.isInteger(id) && id > 0)
+}
+
+async function listActiveUserIds() {
   const [rows] = await pool.query(
     `SELECT u.id
      FROM users u
-     WHERE u.department_id = (
-       SELECT department_id FROM users WHERE id = ?
-     )`,
-    [ownerUserId],
+     WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+     ORDER BY u.id ASC`,
   )
-  return rows.map((row) => row.id).filter((id) => Number.isInteger(Number(id)))
+  return normalizeUserIds(rows)
+}
+
+async function listManagedDepartmentRows(managerUserId) {
+  const [rows] = await pool.query(
+    `SELECT d.id, d.name
+     FROM departments d
+     WHERE d.manager_user_id = ?
+       AND COALESCE(d.enabled, 1) = 1
+     ORDER BY d.sort_order ASC, d.id ASC`,
+    [managerUserId],
+  )
+  return rows || []
+}
+
+async function resolveOwnerScope(ownerUserId, { isSuperAdmin = false } = {}) {
+  if (isSuperAdmin) {
+    const teamMemberIds = await listActiveUserIds()
+    return {
+      scope_type: 'ALL',
+      department_id: null,
+      department_name: null,
+      scope_label: '全部部门',
+      team_member_ids: teamMemberIds,
+      managed_department_ids: [],
+      managed_department_names: [],
+    }
+  }
+
+  const managedDepartments = await listManagedDepartmentRows(ownerUserId)
+  if (managedDepartments.length === 0) {
+    return {
+      scope_type: 'MANAGED_DEPARTMENTS',
+      department_id: null,
+      department_name: null,
+      scope_label: '未负责部门',
+      team_member_ids: [],
+      managed_department_ids: [],
+      managed_department_names: [],
+    }
+  }
+
+  const managedDepartmentIds = managedDepartments
+    .map((item) => Number(item.id))
+    .filter((id) => Number.isInteger(id) && id > 0)
+  const managedDepartmentNames = managedDepartments.map((item) => item.name).filter(Boolean)
+
+  const [rows] = await pool.query(
+    `SELECT u.id
+     FROM users u
+     WHERE u.department_id IN (?)
+       AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+     ORDER BY u.id ASC`,
+    [managedDepartmentIds],
+  )
+
+  const teamMemberIds = normalizeUserIds(rows)
+  const isSingleDepartment = managedDepartmentIds.length === 1
+  const departmentId = isSingleDepartment ? managedDepartmentIds[0] : null
+  const departmentName = isSingleDepartment ? managedDepartmentNames[0] || null : null
+
+  return {
+    scope_type: 'MANAGED_DEPARTMENTS',
+    department_id: departmentId,
+    department_name: departmentName,
+    scope_label: isSingleDepartment
+      ? departmentName || `部门#${departmentId}`
+      : `${managedDepartmentIds.length}个负责部门`,
+    team_member_ids: teamMemberIds,
+    managed_department_ids: managedDepartmentIds,
+    managed_department_names: managedDepartmentNames,
+  }
+}
+
+function isOwnerEstimateTargetRow(
+  row,
+  {
+    isSuperAdmin = false,
+    managedDepartmentIds = [],
+    teamMemberIds = [],
+  } = {},
+) {
+  const managedSet = new Set((managedDepartmentIds || []).map((id) => Number(id)))
+  const teamSet = new Set((teamMemberIds || []).map((id) => Number(id)))
+
+  const isDemandLinked = Boolean(row?.demand_id)
+  const hasPhaseKey = Boolean(String(row?.phase_key || '').trim())
+  const phaseOwnerDepartmentId = toPositiveInt(row?.phase_owner_department_id)
+  const phaseOwnerEstimateRequired = Number(row?.phase_owner_estimate_required || 0) === 1
+  const issueTypeOwnerEstimateRule = normalizeOwnerEstimateRule(row?.owner_estimate_rule, 'NONE')
+  const rowUserId = toPositiveInt(row?.user_id)
+
+  if (isDemandLinked && hasPhaseKey && phaseOwnerDepartmentId) {
+    if (!phaseOwnerEstimateRequired) return false
+    if (isSuperAdmin) return true
+    return managedSet.has(phaseOwnerDepartmentId)
+  }
+
+  if (isDemandLinked && hasPhaseKey) {
+    if (isSuperAdmin) return true
+    if (!rowUserId) return false
+    return teamSet.has(rowUserId)
+  }
+
+  if (issueTypeOwnerEstimateRule === 'NONE') return false
+  if (isSuperAdmin) return true
+  if (!rowUserId) return false
+  return teamSet.has(rowUserId)
 }
 
 const Work = {
@@ -292,6 +312,11 @@ const Work = {
   DEMAND_PRIORITIES,
   DEMAND_PHASE_STATUSES,
   WORK_LOG_STATUSES,
+
+  async isDepartmentManager(userId) {
+    const rows = await listManagedDepartmentRows(userId)
+    return rows.length > 0
+  },
 
   async listIssueTypeDictItems({ enabledOnly = true } = {}) {
     const whereEnabled = enabledOnly ? 'AND i.enabled = 1' : ''
@@ -348,11 +373,11 @@ const Work = {
     }
 
     const sql = enabledOnly
-      ? `SELECT id, type_key, name, require_demand, enabled, sort_order
+      ? `SELECT id, type_key, name, require_demand, enabled, sort_order, 'NONE' AS owner_estimate_rule
          FROM work_item_types
          WHERE enabled = 1
          ORDER BY sort_order ASC, id ASC`
-      : `SELECT id, type_key, name, require_demand, enabled, sort_order
+      : `SELECT id, type_key, name, require_demand, enabled, sort_order, 'NONE' AS owner_estimate_rule
          FROM work_item_types
          ORDER BY enabled DESC, sort_order ASC, id ASC`
 
@@ -372,7 +397,7 @@ const Work = {
     }
 
     const [rows] = await pool.query(
-      `SELECT id, type_key, name, require_demand, enabled, sort_order
+      `SELECT id, type_key, name, require_demand, enabled, sort_order, 'NONE' AS owner_estimate_rule
        FROM work_item_types
        WHERE id = ?`,
       [id],
@@ -582,42 +607,6 @@ const Work = {
     return rows
   },
 
-  async ensureDemandPhases(demandId) {
-    const conn = await pool.getConnection()
-    try {
-      await conn.beginTransaction()
-
-      const [demandRows] = await conn.query(
-        `SELECT id, owner_user_id, owner_estimate_hours, status
-         FROM work_demands
-         WHERE id = ?
-         LIMIT 1`,
-        [demandId],
-      )
-
-      const demand = demandRows[0]
-      if (!demand) {
-        await conn.commit()
-        return false
-      }
-
-      await seedDemandPhases(conn, {
-        demandId: demand.id,
-        ownerUserId: demand.owner_user_id,
-        ownerEstimateHours: normalizeDecimal(demand.owner_estimate_hours, 0),
-        demandStatus: demand.status,
-      })
-
-      await conn.commit()
-      return true
-    } catch (err) {
-      await conn.rollback()
-      throw err
-    } finally {
-      conn.release()
-    }
-  },
-
   async findDemandPhase(demandId, phaseKey) {
     const [rows] = await pool.query(
       `SELECT
@@ -711,13 +700,6 @@ const Work = {
           createdBy,
         ],
       )
-
-      await seedDemandPhases(conn, {
-        demandId: finalDemandId,
-        ownerUserId,
-        ownerEstimateHours: normalizeDecimal(ownerEstimateHours, 0),
-        demandStatus: normalizeStatus(status),
-      })
 
       await conn.commit()
       return finalDemandId
@@ -986,6 +968,66 @@ const Work = {
     return result.affectedRows
   },
 
+  async canManageLogByDepartmentOwner(ownerUserId, logId, { isSuperAdmin = false } = {}) {
+    if (isSuperAdmin) return true
+
+    const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin: false })
+    const teamMemberIds = Array.isArray(scope.team_member_ids) ? scope.team_member_ids : []
+    const managedDepartmentIds = Array.isArray(scope.managed_department_ids)
+      ? scope.managed_department_ids
+      : []
+    if (teamMemberIds.length === 0 && managedDepartmentIds.length === 0) return false
+
+    const [rows] = await pool.query(
+      `SELECT
+         l.id,
+         l.user_id,
+         l.demand_id,
+         l.phase_key,
+         COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule,
+         ${PHASE_OWNER_DEPARTMENT_ID_SQL} AS phase_owner_department_id,
+         ${PHASE_OWNER_ESTIMATE_REQUIRED_SQL} AS phase_owner_estimate_required
+       FROM work_logs l
+       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+       LEFT JOIN config_dict_items pdi
+         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+        AND pdi.item_code = l.phase_key
+       WHERE l.id = ?
+         AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
+       LIMIT 1`,
+      [logId],
+    )
+    if (rows.length === 0) return false
+
+    return isOwnerEstimateTargetRow(rows[0], {
+      isSuperAdmin: false,
+      managedDepartmentIds,
+      teamMemberIds,
+    })
+  },
+
+  async updateLogOwnerEstimate(logId, { ownerEstimateHours, ownerEstimatedBy }) {
+    try {
+      const [result] = await pool.query(
+        `UPDATE work_logs
+         SET
+           owner_estimate_hours = ?,
+           owner_estimated_by = ?,
+           owner_estimated_at = NOW()
+         WHERE id = ?`,
+        [normalizeDecimal(ownerEstimateHours, 0), ownerEstimatedBy || null, logId],
+      )
+      return result.affectedRows
+    } catch (err) {
+      if (isMissingColumnError(err)) {
+        const wrapped = new Error('owner_estimate_fields_missing')
+        wrapped.code = 'OWNER_ESTIMATE_FIELDS_MISSING'
+        throw wrapped
+      }
+      throw err
+    }
+  },
+
   async getMyWorkbench(userId) {
     const [[today]] = await pool.query(
       `SELECT
@@ -1064,151 +1106,313 @@ const Work = {
     }
   },
 
-  async getOwnerWorkbench(ownerUserId) {
-    const teamMemberIds = await getTeamMemberIds(ownerUserId)
-    const ids = teamMemberIds.length > 0 ? teamMemberIds : [ownerUserId]
+  async getOwnerWorkbench(ownerUserId, { isSuperAdmin = false } = {}) {
+    const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin })
+    const teamMemberIds = Array.isArray(scope.team_member_ids) ? scope.team_member_ids : []
+    const managedDepartmentIds = Array.isArray(scope.managed_department_ids)
+      ? scope.managed_department_ids
+      : []
 
-    const [[overview]] = await pool.query(
-      `SELECT
-         COUNT(*) AS team_size,
-         COUNT(DISTINCT CASE WHEN wl.log_date = CURDATE() THEN wl.user_id END) AS filled_users_today,
-         COALESCE(SUM(CASE WHEN wl.log_date = CURDATE() THEN wl.personal_estimate_hours ELSE 0 END), 0) AS total_personal_estimate_hours_today,
-         COALESCE(SUM(CASE WHEN wl.log_date = CURDATE() THEN wl.actual_hours ELSE 0 END), 0) AS total_actual_hours_today
-       FROM users u
-       LEFT JOIN work_logs wl ON wl.user_id = u.id
-       WHERE u.id IN (?)`,
-      [ids],
-    )
+    if (!isSuperAdmin && teamMemberIds.length === 0 && managedDepartmentIds.length === 0) {
+      return {
+        data_scope: {
+          scope_type: scope.scope_type,
+          scope_label: scope.scope_label,
+          department_id: scope.department_id,
+          department_name: scope.department_name,
+          team_member_count: 0,
+          managed_department_ids: managedDepartmentIds,
+          managed_department_names: scope.managed_department_names || [],
+        },
+        team_overview: {
+          team_size: 0,
+          filled_users_today: 0,
+          unfilled_users_today: 0,
+          total_personal_estimate_hours_today: 0,
+          total_actual_hours_today: 0,
+        },
+        no_fill_members: [],
+        owner_estimate_items: [],
+        owner_estimate_pending_count: 0,
+        demand_risks: [],
+        phase_risks: [],
+      }
+    }
 
-    const [noFillMembers] = await pool.query(
-      `SELECT
-         u.id,
-         u.username
-       FROM users u
-       LEFT JOIN (
-         SELECT DISTINCT user_id
-         FROM work_logs
-         WHERE log_date = CURDATE()
-       ) l ON l.user_id = u.id
-       WHERE u.id IN (?) AND l.user_id IS NULL
-       ORDER BY u.id ASC`,
-      [ids],
-    )
+    const defaultOverview = {
+      team_size: 0,
+      filled_users_today: 0,
+      total_personal_estimate_hours_today: 0,
+      total_actual_hours_today: 0,
+    }
+    let overview = defaultOverview
+    let noFillMembers = []
 
-    const [demandRisks] = await pool.query(
-      `SELECT
-         d.id,
-         d.name,
-         d.status,
-         d.priority,
-         d.owner_estimate_hours,
-         COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,
-         COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,
-         COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours,
-         ROUND(
-           COALESCE(ta.total_actual_hours, 0) +
-           COALESCE(lr.remaining_hours, 0) -
-           COALESCE(d.owner_estimate_hours, 0),
-           1
-         ) AS deviation_hours
-       FROM work_demands d
-       INNER JOIN users u ON u.id = d.owner_user_id
-       LEFT JOIN (
-         SELECT
-           demand_id,
-           SUM(personal_estimate_hours) AS total_personal_estimate_hours,
-           SUM(actual_hours) AS total_actual_hours
-         FROM work_logs
-         WHERE demand_id IS NOT NULL
-         GROUP BY demand_id
-       ) ta ON ta.demand_id = d.id
-       LEFT JOIN (
-         SELECT l1.demand_id, l1.remaining_hours
-         FROM work_logs l1
-         INNER JOIN (
-           SELECT demand_id, MAX(id) AS max_id
+    if (teamMemberIds.length > 0) {
+      const [[overviewRow]] = await pool.query(
+        `SELECT
+           COUNT(DISTINCT u.id) AS team_size,
+           COUNT(DISTINCT CASE WHEN wl.log_date = CURDATE() THEN wl.user_id END) AS filled_users_today,
+           COALESCE(SUM(CASE WHEN wl.log_date = CURDATE() THEN wl.personal_estimate_hours ELSE 0 END), 0) AS total_personal_estimate_hours_today,
+           COALESCE(SUM(CASE WHEN wl.log_date = CURDATE() THEN wl.actual_hours ELSE 0 END), 0) AS total_actual_hours_today
+         FROM users u
+         LEFT JOIN work_logs wl ON wl.user_id = u.id
+         WHERE u.id IN (?)`,
+        [teamMemberIds],
+      )
+      overview = overviewRow || defaultOverview
+
+      ;[noFillMembers] = await pool.query(
+        `SELECT
+           u.id,
+           u.username
+         FROM users u
+         LEFT JOIN (
+           SELECT DISTINCT user_id
+           FROM work_logs
+           WHERE log_date = CURDATE()
+         ) l ON l.user_id = u.id
+         WHERE u.id IN (?) AND l.user_id IS NULL
+         ORDER BY u.id ASC`,
+        [teamMemberIds],
+      )
+    }
+
+    let ownerEstimateItems = []
+    const ownerEstimateQueryConditions = [`COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'`]
+    const ownerEstimateQueryParams = []
+
+    if (!isSuperAdmin) {
+      const candidateConditions = []
+      if (teamMemberIds.length > 0) {
+        candidateConditions.push('l.user_id IN (?)')
+        ownerEstimateQueryParams.push(teamMemberIds)
+      }
+      if (managedDepartmentIds.length > 0) {
+        candidateConditions.push(`${PHASE_OWNER_DEPARTMENT_ID_SQL} IN (?)`)
+        ownerEstimateQueryParams.push(managedDepartmentIds)
+      }
+      if (candidateConditions.length === 0) {
+        candidateConditions.push('1 = 0')
+      }
+      ownerEstimateQueryConditions.push(`(${candidateConditions.join(' OR ')})`)
+    }
+
+    const ownerEstimateSql = `SELECT
+       l.id,
+       l.user_id,
+       u.username,
+       DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+       COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+       l.description,
+       l.personal_estimate_hours,
+       l.actual_hours,
+       l.owner_estimate_hours,
+       l.owner_estimated_by,
+       DATE_FORMAT(l.owner_estimated_at, '%Y-%m-%d %H:%i:%s') AS owner_estimated_at,
+       COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+       l.demand_id,
+       d.name AS demand_name,
+       l.phase_key,
+       COALESCE(p.phase_name, l.phase_key, '-') AS phase_name,
+       DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+       DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+       COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule,
+       ${PHASE_OWNER_DEPARTMENT_ID_SQL} AS phase_owner_department_id,
+       ${PHASE_OWNER_ESTIMATE_REQUIRED_SQL} AS phase_owner_estimate_required
+     FROM work_logs l
+     INNER JOIN users u ON u.id = l.user_id
+     LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+     LEFT JOIN work_demands d ON d.id = l.demand_id
+     LEFT JOIN work_demand_phases p ON p.demand_id = l.demand_id AND p.phase_key = l.phase_key
+     LEFT JOIN config_dict_items pdi
+       ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+      AND pdi.item_code = l.phase_key
+     WHERE ${ownerEstimateQueryConditions.join(' AND ')}
+     ORDER BY
+       CASE WHEN l.owner_estimate_hours IS NULL THEN 0 ELSE 1 END ASC,
+       l.updated_at DESC,
+       l.id DESC
+     LIMIT 400`
+
+    const ownerEstimateFallbackSql = `SELECT
+       l.id,
+       l.user_id,
+       u.username,
+       DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+       COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+       l.description,
+       l.personal_estimate_hours,
+       l.actual_hours,
+       NULL AS owner_estimate_hours,
+       NULL AS owner_estimated_by,
+       NULL AS owner_estimated_at,
+       COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+       l.demand_id,
+       d.name AS demand_name,
+       l.phase_key,
+       COALESCE(p.phase_name, l.phase_key, '-') AS phase_name,
+       DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+       DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+       COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule,
+       ${PHASE_OWNER_DEPARTMENT_ID_SQL} AS phase_owner_department_id,
+       ${PHASE_OWNER_ESTIMATE_REQUIRED_SQL} AS phase_owner_estimate_required
+     FROM work_logs l
+     INNER JOIN users u ON u.id = l.user_id
+     LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+     LEFT JOIN work_demands d ON d.id = l.demand_id
+     LEFT JOIN work_demand_phases p ON p.demand_id = l.demand_id AND p.phase_key = l.phase_key
+     LEFT JOIN config_dict_items pdi
+       ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+      AND pdi.item_code = l.phase_key
+     WHERE ${ownerEstimateQueryConditions.join(' AND ')}
+     ORDER BY l.updated_at DESC, l.id DESC
+     LIMIT 400`
+
+    try {
+      ;[ownerEstimateItems] = await pool.query(ownerEstimateSql, ownerEstimateQueryParams)
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+      ;[ownerEstimateItems] = await pool.query(ownerEstimateFallbackSql, ownerEstimateQueryParams)
+    }
+
+    ownerEstimateItems = ownerEstimateItems
+      .filter((row) =>
+        isOwnerEstimateTargetRow(row, {
+          isSuperAdmin,
+          managedDepartmentIds,
+          teamMemberIds,
+        }),
+      )
+      .slice(0, 120)
+
+    let demandRisks = []
+    let phaseRisks = []
+    if (teamMemberIds.length > 0) {
+      ;[demandRisks] = await pool.query(
+        `SELECT
+           d.id,
+           d.name,
+           d.status,
+           d.priority,
+           d.owner_estimate_hours,
+           COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,
+           COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,
+           COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours,
+           ROUND(
+             COALESCE(ta.total_actual_hours, 0) +
+             COALESCE(lr.remaining_hours, 0) -
+             COALESCE(d.owner_estimate_hours, 0),
+             1
+           ) AS deviation_hours
+         FROM work_demands d
+         INNER JOIN users u ON u.id = d.owner_user_id
+         LEFT JOIN (
+           SELECT
+             demand_id,
+             SUM(personal_estimate_hours) AS total_personal_estimate_hours,
+             SUM(actual_hours) AS total_actual_hours
            FROM work_logs
            WHERE demand_id IS NOT NULL
            GROUP BY demand_id
-         ) l2 ON l1.id = l2.max_id
-       ) lr ON lr.demand_id = d.id
-       WHERE u.id IN (?) AND d.status IN ('TODO', 'IN_PROGRESS')
-       ORDER BY deviation_hours DESC, d.updated_at DESC
-       LIMIT 20`,
-      [ids],
-    )
+         ) ta ON ta.demand_id = d.id
+         LEFT JOIN (
+           SELECT l1.demand_id, l1.remaining_hours
+           FROM work_logs l1
+           INNER JOIN (
+             SELECT demand_id, MAX(id) AS max_id
+             FROM work_logs
+             WHERE demand_id IS NOT NULL
+             GROUP BY demand_id
+           ) l2 ON l1.id = l2.max_id
+         ) lr ON lr.demand_id = d.id
+         WHERE u.id IN (?) AND d.status IN ('TODO', 'IN_PROGRESS')
+         ORDER BY deviation_hours DESC, d.updated_at DESC
+         LIMIT 20`,
+        [teamMemberIds],
+      )
 
-    const [phaseRisks] = await pool.query(
-      `SELECT
-         p.demand_id,
-         d.name AS demand_name,
-         p.phase_key,
-         p.phase_name,
-         p.status,
-         p.owner_user_id,
-         ou.username AS owner_name,
-         p.estimate_hours,
-         COALESCE(ta.personal_estimate_hours, 0) AS personal_estimate_hours,
-         COALESCE(ta.actual_hours, 0) AS actual_hours,
-         COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours,
-         ROUND(
-           COALESCE(ta.actual_hours, 0) +
-           COALESCE(lr.remaining_hours, 0) -
-           COALESCE(p.estimate_hours, 0),
-           1
-         ) AS deviation_hours,
-         CASE
-           WHEN COALESCE(p.estimate_hours, 0) <= 0 THEN NULL
-           ELSE ROUND(
-             (
-               COALESCE(ta.actual_hours, 0) +
-               COALESCE(lr.remaining_hours, 0) -
-               COALESCE(p.estimate_hours, 0)
-             ) / p.estimate_hours * 100,
+      ;[phaseRisks] = await pool.query(
+        `SELECT
+           p.demand_id,
+           d.name AS demand_name,
+           p.phase_key,
+           p.phase_name,
+           p.status,
+           p.owner_user_id,
+           ou.username AS owner_name,
+           p.estimate_hours,
+           COALESCE(ta.personal_estimate_hours, 0) AS personal_estimate_hours,
+           COALESCE(ta.actual_hours, 0) AS actual_hours,
+           COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours,
+           ROUND(
+             COALESCE(ta.actual_hours, 0) +
+             COALESCE(lr.remaining_hours, 0) -
+             COALESCE(p.estimate_hours, 0),
              1
-           )
-         END AS deviation_rate
-       FROM work_demand_phases p
-       INNER JOIN work_demands d ON d.id = p.demand_id
-       INNER JOIN users u ON u.id = d.owner_user_id
-       LEFT JOIN users ou ON ou.id = p.owner_user_id
-       LEFT JOIN (
-         SELECT
-           demand_id,
-           phase_key,
-           SUM(personal_estimate_hours) AS personal_estimate_hours,
-           SUM(actual_hours) AS actual_hours
-         FROM work_logs
-         WHERE demand_id IS NOT NULL AND phase_key IS NOT NULL AND phase_key <> ''
-         GROUP BY demand_id, phase_key
-       ) ta ON ta.demand_id = p.demand_id AND ta.phase_key = p.phase_key
-       LEFT JOIN (
-         SELECT l1.demand_id, l1.phase_key, l1.remaining_hours
-         FROM work_logs l1
-         INNER JOIN (
-           SELECT demand_id, phase_key, MAX(id) AS max_id
+           ) AS deviation_hours,
+           CASE
+             WHEN COALESCE(p.estimate_hours, 0) <= 0 THEN NULL
+             ELSE ROUND(
+               (
+                 COALESCE(ta.actual_hours, 0) +
+                 COALESCE(lr.remaining_hours, 0) -
+                 COALESCE(p.estimate_hours, 0)
+               ) / p.estimate_hours * 100,
+               1
+             )
+           END AS deviation_rate
+         FROM work_demand_phases p
+         INNER JOIN work_demands d ON d.id = p.demand_id
+         INNER JOIN users u ON u.id = d.owner_user_id
+         LEFT JOIN users ou ON ou.id = p.owner_user_id
+         LEFT JOIN (
+           SELECT
+             demand_id,
+             phase_key,
+             SUM(personal_estimate_hours) AS personal_estimate_hours,
+             SUM(actual_hours) AS actual_hours
            FROM work_logs
            WHERE demand_id IS NOT NULL AND phase_key IS NOT NULL AND phase_key <> ''
            GROUP BY demand_id, phase_key
-         ) l2 ON l1.id = l2.max_id
-       ) lr ON lr.demand_id = p.demand_id AND lr.phase_key = p.phase_key
-       WHERE u.id IN (?)
-         AND d.status IN ('TODO', 'IN_PROGRESS')
-         AND p.status IN ('TODO', 'IN_PROGRESS')
-         AND (
-           COALESCE(p.estimate_hours, 0) > 0
-           OR COALESCE(ta.actual_hours, 0) > 0
-           OR COALESCE(lr.remaining_hours, 0) > 0
-         )
-       ORDER BY deviation_hours DESC, d.updated_at DESC, p.sort_order ASC
-       LIMIT 30`,
-      [ids],
-    )
+         ) ta ON ta.demand_id = p.demand_id AND ta.phase_key = p.phase_key
+         LEFT JOIN (
+           SELECT l1.demand_id, l1.phase_key, l1.remaining_hours
+           FROM work_logs l1
+           INNER JOIN (
+             SELECT demand_id, phase_key, MAX(id) AS max_id
+             FROM work_logs
+             WHERE demand_id IS NOT NULL AND phase_key IS NOT NULL AND phase_key <> ''
+             GROUP BY demand_id, phase_key
+           ) l2 ON l1.id = l2.max_id
+         ) lr ON lr.demand_id = p.demand_id AND lr.phase_key = p.phase_key
+         WHERE u.id IN (?)
+           AND d.status IN ('TODO', 'IN_PROGRESS')
+           AND p.status IN ('TODO', 'IN_PROGRESS')
+           AND (
+             COALESCE(p.estimate_hours, 0) > 0
+             OR COALESCE(ta.actual_hours, 0) > 0
+             OR COALESCE(lr.remaining_hours, 0) > 0
+           )
+         ORDER BY deviation_hours DESC, d.updated_at DESC, p.sort_order ASC
+         LIMIT 30`,
+        [teamMemberIds],
+      )
+    }
 
     const teamSize = Number(overview?.team_size || 0)
     const filledUsersToday = Number(overview?.filled_users_today || 0)
 
     return {
+      data_scope: {
+        scope_type: scope.scope_type,
+        scope_label: scope.scope_label,
+        department_id: scope.department_id,
+        department_name: scope.department_name,
+        team_member_count: teamMemberIds.length,
+        managed_department_ids: managedDepartmentIds,
+        managed_department_names: scope.managed_department_names || [],
+      },
       team_overview: {
         team_size: teamSize,
         filled_users_today: filledUsersToday,
@@ -1217,13 +1421,15 @@ const Work = {
         total_actual_hours_today: Number(overview?.total_actual_hours_today || 0),
       },
       no_fill_members: noFillMembers,
+      owner_estimate_items: ownerEstimateItems,
+      owner_estimate_pending_count: ownerEstimateItems.filter((item) => item.owner_estimate_hours === null).length,
       demand_risks: demandRisks,
       phase_risks: phaseRisks,
     }
   },
 
-  async previewNoFillReminders(ownerUserId) {
-    const ownerWorkbench = await this.getOwnerWorkbench(ownerUserId)
+  async previewNoFillReminders(ownerUserId, { isSuperAdmin = false } = {}) {
+    const ownerWorkbench = await this.getOwnerWorkbench(ownerUserId, { isSuperAdmin })
     return {
       date: new Date().toISOString().slice(0, 10),
       total_members: ownerWorkbench.team_overview.team_size,

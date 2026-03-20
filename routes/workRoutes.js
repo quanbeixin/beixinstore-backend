@@ -13,6 +13,7 @@ const {
   listLogs,
   createLog,
   updateLog,
+  updateLogOwnerEstimate,
   getMyWorkbench,
   getOwnerWorkbench,
   sendNoFillReminders,
@@ -44,12 +45,21 @@ router.put(
 router.get('/logs', authMiddleware.requirePermission('worklog.view.self'), listLogs)
 router.post('/logs', authMiddleware.requirePermission('worklog.create'), createLog)
 router.put('/logs/:id', authMiddleware.requirePermission('worklog.update.self'), updateLog)
+router.put(
+  '/logs/:id/owner-estimate',
+  authMiddleware.requireAnyPermission(['workbench.view.owner', 'workbench.view.self']),
+  updateLogOwnerEstimate,
+)
 
 router.get('/workbench/me', authMiddleware.requirePermission('workbench.view.self'), getMyWorkbench)
-router.get('/workbench/owner', authMiddleware.requirePermission('workbench.view.owner'), getOwnerWorkbench)
+router.get(
+  '/workbench/owner',
+  authMiddleware.requireAnyPermission(['workbench.view.owner', 'workbench.view.self']),
+  getOwnerWorkbench,
+)
 router.post(
   '/reminders/no-fill',
-  authMiddleware.requirePermission('workbench.view.owner'),
+  authMiddleware.requireAnyPermission(['workbench.view.owner', 'workbench.view.self']),
   sendNoFillReminders,
 )
 

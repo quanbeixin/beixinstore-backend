@@ -1,9 +1,20 @@
 ﻿const bcrypt = require('bcryptjs')
 const User = require('../models/User')
+const Department = require('../models/Department')
 
 function normalizeStatusCode(value) {
   const normalized = typeof value === 'string' ? value.trim().toUpperCase() : ''
   return normalized || 'ACTIVE'
+}
+
+function normalizeOptionalId(value) {
+  const num = Number(value)
+  return Number.isInteger(num) && num > 0 ? num : null
+}
+
+function normalizeRoleIds(value) {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value.map((item) => Number(item)).filter((num) => Number.isInteger(num) && num > 0))]
 }
 
 // 获取用户列表（支持分页和关键字搜索）
@@ -58,6 +69,20 @@ const createUser = async (req, res) => {
   }
 
   try {
+    const departmentId = normalizeOptionalId(department_id)
+    if (department_id !== undefined && department_id !== null && department_id !== '' && !departmentId) {
+      return res.status(400).json({ success: false, message: 'department_id 无效' })
+    }
+
+    if (departmentId) {
+      const department = await Department.findById(departmentId)
+      if (!department) {
+        return res.status(400).json({ success: false, message: '部门不存在' })
+      }
+    }
+
+    const roleIds = normalizeRoleIds(role_ids)
+
     const existing = await User.findByUsername(username)
     if (existing) {
       return res.status(409).json({ success: false, message: '用户名已存在' })
@@ -68,18 +93,24 @@ const createUser = async (req, res) => {
       username,
       password: hashedPassword,
       email,
-      department_id,
+      department_id: departmentId,
       status_code: normalizeStatusCode(status_code),
     })
 
-    if (Array.isArray(role_ids) && role_ids.length > 0) {
-      await User.setRoles(userId, role_ids)
+    if (roleIds.length > 0) {
+      await User.setRoles(userId, roleIds)
     }
 
     const user = await User.findById(userId)
     return res.status(201).json({ success: true, message: '创建成功', data: user })
   } catch (err) {
     console.error('创建用户失败:', err)
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: '用户名已存在' })
+    }
+    if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.code === 'ER_ROW_IS_REFERENCED_2') {
+      return res.status(400).json({ success: false, message: '部门或角色数据无效，请刷新后重试' })
+    }
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -90,6 +121,20 @@ const updateUser = async (req, res) => {
   const { email, department_id, role_ids, status_code } = req.body
 
   try {
+    const departmentId = normalizeOptionalId(department_id)
+    if (department_id !== undefined && department_id !== null && department_id !== '' && !departmentId) {
+      return res.status(400).json({ success: false, message: 'department_id 无效' })
+    }
+
+    if (departmentId) {
+      const department = await Department.findById(departmentId)
+      if (!department) {
+        return res.status(400).json({ success: false, message: '部门不存在' })
+      }
+    }
+
+    const roleIds = normalizeRoleIds(role_ids)
+
     const user = await User.findById(id)
     if (!user) {
       return res.status(404).json({ success: false, message: '用户不存在' })
@@ -97,18 +142,21 @@ const updateUser = async (req, res) => {
 
     await User.update(id, {
       email,
-      department_id,
+      department_id: departmentId,
       status_code: normalizeStatusCode(status_code),
     })
 
     if (Array.isArray(role_ids)) {
-      await User.setRoles(id, role_ids)
+      await User.setRoles(id, roleIds)
     }
 
     const updated = await User.findById(id)
     return res.json({ success: true, message: '更新成功', data: updated })
   } catch (err) {
     console.error('更新用户失败:', err)
+    if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.code === 'ER_ROW_IS_REFERENCED_2') {
+      return res.status(400).json({ success: false, message: '部门或角色数据无效，请刷新后重试' })
+    }
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }

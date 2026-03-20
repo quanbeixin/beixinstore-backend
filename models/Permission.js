@@ -18,6 +18,26 @@ function normalizeRoleKey(rawKey, fallbackName = '') {
   return 'USER'
 }
 
+async function getManagedDepartmentIds(userId) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT d.id
+       FROM departments d
+       WHERE d.manager_user_id = ?
+         AND COALESCE(d.enabled, 1) = 1
+       ORDER BY d.id ASC`,
+      [userId],
+    )
+
+    return rows.map((row) => Number(row.id)).filter((id) => Number.isInteger(id) && id > 0)
+  } catch (err) {
+    if (isMissingTableError(err) || isMissingColumnError(err)) {
+      return []
+    }
+    throw err
+  }
+}
+
 const Permission = {
   async getUserRoles(userId) {
     try {
@@ -109,9 +129,11 @@ const Permission = {
   async getUserAccess(userId) {
     const roles = await this.getUserRoles(userId)
     const { codes, permissionReady } = await this.getUserPermissionCodes(userId)
+    const managedDepartmentIds = await getManagedDepartmentIds(userId)
 
     const roleKeys = [...new Set(roles.map((item) => item.role_key).filter(Boolean))]
     const isSuperAdmin = roleKeys.includes('SUPER_ADMIN')
+    const isDepartmentManager = managedDepartmentIds.length > 0
 
     return {
       user_id: Number(userId),
@@ -119,6 +141,8 @@ const Permission = {
       role_keys: roleKeys,
       role_names: roles.map((item) => item.name).filter(Boolean),
       is_super_admin: isSuperAdmin,
+      is_department_manager: isDepartmentManager,
+      managed_department_ids: managedDepartmentIds,
       permission_ready: permissionReady,
       permission_codes: isSuperAdmin ? ['*'] : codes,
     }

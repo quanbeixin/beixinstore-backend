@@ -4,20 +4,45 @@ function isMissingTableError(err) {
   return err && (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146)
 }
 
+function isMissingColumnError(err) {
+  return err && err.code === 'ER_BAD_FIELD_ERROR'
+}
+
 async function syncPrimaryDepartment(userId, departmentId) {
   try {
-    await pool.query('DELETE FROM user_departments WHERE user_id = ? AND is_primary = 1', [userId])
+    try {
+      await pool.query('DELETE FROM user_departments WHERE user_id = ? AND is_primary = 1', [userId])
+    } catch (err) {
+      if (isMissingColumnError(err)) {
+        await pool.query('DELETE FROM user_departments WHERE user_id = ?', [userId])
+      } else {
+        throw err
+      }
+    }
 
     if (!departmentId) return
 
-    await pool.query(
-      `INSERT INTO user_departments (user_id, department_id, is_primary)
-       VALUES (?, ?, 1)
-       ON DUPLICATE KEY UPDATE is_primary = VALUES(is_primary)`,
-      [userId, departmentId],
-    )
+    try {
+      await pool.query(
+        `INSERT INTO user_departments (user_id, department_id, is_primary)
+         VALUES (?, ?, 1)
+         ON DUPLICATE KEY UPDATE is_primary = VALUES(is_primary)`,
+        [userId, departmentId],
+      )
+    } catch (err) {
+      if (isMissingColumnError(err)) {
+        await pool.query(
+          `INSERT INTO user_departments (user_id, department_id)
+           VALUES (?, ?)
+           ON DUPLICATE KEY UPDATE user_id = VALUES(user_id)`,
+          [userId, departmentId],
+        )
+      } else {
+        throw err
+      }
+    }
   } catch (err) {
-    if (!isMissingTableError(err)) {
+    if (!isMissingTableError(err) && !isMissingColumnError(err)) {
       throw err
     }
   }
@@ -30,25 +55,49 @@ const User = {
   },
 
   findById: async (id) => {
-    const [rows] = await pool.query(
-      `SELECT
-         u.id,
-         u.username,
-         u.email,
-         u.department_id,
-         COALESCE(u.status_code, 'ACTIVE') AS status_code,
-         u.created_at,
-         d.name AS department_name,
-         GROUP_CONCAT(DISTINCT r.id) AS role_ids,
-         GROUP_CONCAT(DISTINCT r.name) AS role_names
-       FROM users u
-       LEFT JOIN departments d ON u.department_id = d.id
-       LEFT JOIN user_roles ur ON u.id = ur.user_id
-       LEFT JOIN roles r ON ur.role_id = r.id
-       WHERE u.id = ?
-       GROUP BY u.id`,
-      [id],
-    )
+    let rows
+    try {
+      ;[rows] = await pool.query(
+        `SELECT
+           u.id,
+           u.username,
+           u.email,
+           u.department_id,
+           COALESCE(u.status_code, 'ACTIVE') AS status_code,
+           u.created_at,
+           d.name AS department_name,
+           GROUP_CONCAT(DISTINCT r.id) AS role_ids,
+           GROUP_CONCAT(DISTINCT r.name) AS role_names
+         FROM users u
+         LEFT JOIN departments d ON u.department_id = d.id
+         LEFT JOIN user_roles ur ON u.id = ur.user_id
+         LEFT JOIN roles r ON ur.role_id = r.id
+         WHERE u.id = ?
+         GROUP BY u.id`,
+        [id],
+      )
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+      ;[rows] = await pool.query(
+        `SELECT
+           u.id,
+           u.username,
+           u.email,
+           u.department_id,
+           'ACTIVE' AS status_code,
+           u.created_at,
+           d.name AS department_name,
+           GROUP_CONCAT(DISTINCT r.id) AS role_ids,
+           GROUP_CONCAT(DISTINCT r.name) AS role_names
+         FROM users u
+         LEFT JOIN departments d ON u.department_id = d.id
+         LEFT JOIN user_roles ur ON u.id = ur.user_id
+         LEFT JOIN roles r ON ur.role_id = r.id
+         WHERE u.id = ?
+         GROUP BY u.id`,
+        [id],
+      )
+    }
     return rows[0] || null
   },
 
@@ -56,26 +105,51 @@ const User = {
     const offset = (page - 1) * pageSize
     const like = `%${keyword}%`
 
-    const [rows] = await pool.query(
-      `SELECT
-         u.id,
-         u.username,
-         u.email,
-         u.department_id,
-         COALESCE(u.status_code, 'ACTIVE') AS status_code,
-         u.created_at,
-         d.name AS department_name,
-         GROUP_CONCAT(DISTINCT r.name) AS role_names
-       FROM users u
-       LEFT JOIN departments d ON u.department_id = d.id
-       LEFT JOIN user_roles ur ON u.id = ur.user_id
-       LEFT JOIN roles r ON ur.role_id = r.id
-       WHERE u.username LIKE ? OR u.email LIKE ?
-       GROUP BY u.id
-       ORDER BY u.created_at DESC
-       LIMIT ? OFFSET ?`,
-      [like, like, pageSize, offset],
-    )
+    let rows
+    try {
+      ;[rows] = await pool.query(
+        `SELECT
+           u.id,
+           u.username,
+           u.email,
+           u.department_id,
+           COALESCE(u.status_code, 'ACTIVE') AS status_code,
+           u.created_at,
+           d.name AS department_name,
+           GROUP_CONCAT(DISTINCT r.name) AS role_names
+         FROM users u
+         LEFT JOIN departments d ON u.department_id = d.id
+         LEFT JOIN user_roles ur ON u.id = ur.user_id
+         LEFT JOIN roles r ON ur.role_id = r.id
+         WHERE u.username LIKE ? OR u.email LIKE ?
+         GROUP BY u.id
+         ORDER BY u.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [like, like, pageSize, offset],
+      )
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+      ;[rows] = await pool.query(
+        `SELECT
+           u.id,
+           u.username,
+           u.email,
+           u.department_id,
+           'ACTIVE' AS status_code,
+           u.created_at,
+           d.name AS department_name,
+           GROUP_CONCAT(DISTINCT r.name) AS role_names
+         FROM users u
+         LEFT JOIN departments d ON u.department_id = d.id
+         LEFT JOIN user_roles ur ON u.id = ur.user_id
+         LEFT JOIN roles r ON ur.role_id = r.id
+         WHERE u.username LIKE ? OR u.email LIKE ?
+         GROUP BY u.id
+         ORDER BY u.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [like, like, pageSize, offset],
+      )
+    }
 
     const [[{ total }]] = await pool.query(
       'SELECT COUNT(*) AS total FROM users WHERE username LIKE ? OR email LIKE ?',
@@ -86,10 +160,19 @@ const User = {
   },
 
   create: async ({ username, password, email = null, department_id = null, status_code = 'ACTIVE' }) => {
-    const [result] = await pool.query(
-      'INSERT INTO users (username, password, email, department_id, status_code) VALUES (?, ?, ?, ?, ?)',
-      [username, password, email, department_id, status_code],
-    )
+    let result
+    try {
+      ;[result] = await pool.query(
+        'INSERT INTO users (username, password, email, department_id, status_code) VALUES (?, ?, ?, ?, ?)',
+        [username, password, email, department_id, status_code],
+      )
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+      ;[result] = await pool.query(
+        'INSERT INTO users (username, password, email, department_id) VALUES (?, ?, ?, ?)',
+        [username, password, email, department_id],
+      )
+    }
 
     await syncPrimaryDepartment(result.insertId, department_id)
 
@@ -97,10 +180,19 @@ const User = {
   },
 
   update: async (id, { email, department_id, status_code = 'ACTIVE' }) => {
-    const [result] = await pool.query(
-      'UPDATE users SET email = ?, department_id = ?, status_code = ? WHERE id = ?',
-      [email, department_id, status_code, id],
-    )
+    let result
+    try {
+      ;[result] = await pool.query(
+        'UPDATE users SET email = ?, department_id = ?, status_code = ? WHERE id = ?',
+        [email, department_id, status_code, id],
+      )
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+      ;[result] = await pool.query(
+        'UPDATE users SET email = ?, department_id = ? WHERE id = ?',
+        [email, department_id, id],
+      )
+    }
 
     await syncPrimaryDepartment(id, department_id)
 

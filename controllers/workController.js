@@ -133,7 +133,6 @@ const listDemandPhases = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
-    await Work.ensureDemandPhases(demandId)
     const rows = await Work.listDemandPhases(demandId)
     return res.json({ success: true, data: rows })
   } catch (err) {
@@ -420,6 +419,14 @@ const listLogs = async (req, res) => {
 }
 
 const createLog = async (req, res) => {
+  if (
+    req.body.owner_estimate_hours !== undefined ||
+    req.body.owner_estimated_by !== undefined ||
+    req.body.owner_estimated_at !== undefined
+  ) {
+    return res.status(400).json({ success: false, message: '个人填报接口不允许写入负责人预估字段' })
+  }
+
   const logDate = normalizeDate(req.body.log_date)
   const itemTypeId = toPositiveInt(req.body.item_type_id)
   const description = normalizeText(req.body.description, 2000)
@@ -539,6 +546,14 @@ const updateLog = async (req, res) => {
   const id = toPositiveInt(req.params.id)
   if (!id) {
     return res.status(400).json({ success: false, message: '工作记录 ID 无效' })
+  }
+
+  if (
+    req.body.owner_estimate_hours !== undefined ||
+    req.body.owner_estimated_by !== undefined ||
+    req.body.owner_estimated_at !== undefined
+  ) {
+    return res.status(400).json({ success: false, message: '个人更新接口不允许写入负责人预估字段' })
   }
 
   try {
@@ -663,6 +678,66 @@ const updateLog = async (req, res) => {
   }
 }
 
+const updateLogOwnerEstimate = async (req, res) => {
+  const id = toPositiveInt(req.params.id)
+  if (!id) {
+    return res.status(400).json({ success: false, message: '工作记录 ID 无效' })
+  }
+
+  if (
+    req.body.personal_estimate_hours !== undefined ||
+    req.body.actual_hours !== undefined ||
+    req.body.remaining_hours !== undefined ||
+    req.body.expected_completion_date !== undefined ||
+    req.body.log_completed_at !== undefined ||
+    req.body.log_status !== undefined
+  ) {
+    return res.status(400).json({ success: false, message: '负责人预估接口仅允许更新 owner_estimate_hours' })
+  }
+
+  const ownerEstimateHours = normalizeHours(req.body.owner_estimate_hours, null)
+  if (ownerEstimateHours === null || ownerEstimateHours < 0) {
+    return res.status(400).json({ success: false, message: 'owner_estimate_hours 不能小于 0' })
+  }
+
+  try {
+    const existing = await Work.findLogById(id)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '工作记录不存在' })
+    }
+
+    const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    if (!isSuperAdmin) {
+      const isManager = await Work.isDepartmentManager(req.user.id)
+      if (!isManager) {
+        return res.status(403).json({ success: false, message: '仅部门负责人可维护 Owner 预估' })
+      }
+
+      const canManage = await Work.canManageLogByDepartmentOwner(req.user.id, id, { isSuperAdmin })
+      if (!canManage) {
+        return res.status(403).json({ success: false, message: '仅可维护所负责部门成员的事项预估' })
+      }
+    }
+
+    await Work.updateLogOwnerEstimate(id, {
+      ownerEstimateHours,
+      ownerEstimatedBy: req.user.id,
+    })
+
+    const updated = await Work.findLogById(id)
+    return res.json({ success: true, message: 'Owner 预估更新成功', data: updated })
+  } catch (err) {
+    if (err?.code === 'OWNER_ESTIMATE_FIELDS_MISSING') {
+      return res.status(500).json({
+        success: false,
+        message: '缺少 owner 预估字段，请先执行数据库补丁后重试',
+      })
+    }
+    console.error('更新 Owner 预估失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getMyWorkbench = async (req, res) => {
   try {
     const data = await Work.getMyWorkbench(req.user.id)
@@ -675,7 +750,17 @@ const getMyWorkbench = async (req, res) => {
 
 const getOwnerWorkbench = async (req, res) => {
   try {
-    const data = await Work.getOwnerWorkbench(req.user.id)
+    const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    if (!isSuperAdmin) {
+      const isManager = await Work.isDepartmentManager(req.user.id)
+      if (!isManager) {
+        return res.status(403).json({ success: false, message: '仅部门负责人可访问 Owner 工作台' })
+      }
+    }
+
+    const data = await Work.getOwnerWorkbench(req.user.id, {
+      isSuperAdmin,
+    })
     return res.json({ success: true, data })
   } catch (err) {
     console.error('获取 Owner 工作台失败:', err)
@@ -685,7 +770,17 @@ const getOwnerWorkbench = async (req, res) => {
 
 const sendNoFillReminders = async (req, res) => {
   try {
-    const data = await Work.previewNoFillReminders(req.user.id)
+    const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    if (!isSuperAdmin) {
+      const isManager = await Work.isDepartmentManager(req.user.id)
+      if (!isManager) {
+        return res.status(403).json({ success: false, message: '仅部门负责人可生成未填报提醒' })
+      }
+    }
+
+    const data = await Work.previewNoFillReminders(req.user.id, {
+      isSuperAdmin,
+    })
     return res.json({
       success: true,
       message: `已生成未填报提醒预览，共 ${data.no_fill_members.length} 人`,
@@ -708,6 +803,7 @@ module.exports = {
   listLogs,
   createLog,
   updateLog,
+  updateLogOwnerEstimate,
   getMyWorkbench,
   getOwnerWorkbench,
   sendNoFillReminders,
