@@ -12,6 +12,7 @@ const userRoutes = require('./routes/userRoutes')
 const optionRoutes = require('./routes/optionRoutes')
 const configRoutes = require('./routes/configRoutes')
 const orgRoutes = require('./routes/orgRoutes')
+const rbacRoutes = require('./routes/rbacRoutes')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -70,6 +71,7 @@ app.use('/api/users', userRoutes)
 app.use('/api/options', optionRoutes)
 app.use('/api/config', configRoutes)
 app.use('/api/org', orgRoutes)
+app.use('/api/rbac', rbacRoutes)
 app.use('/api', testRoutes)
 
 app.get('/', (req, res) => {
