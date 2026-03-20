@@ -27,6 +27,13 @@ function normalizePhaseKey(value) {
   return /^[A-Z][A-Z0-9_]{0,31}$/.test(key) ? key : ''
 }
 
+function normalizeBusinessGroupCode(value) {
+  if (value === undefined) return undefined
+  const code = String(value || '').trim().toUpperCase()
+  if (!code) return null
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : ''
+}
+
 function normalizeDate(value) {
   const str = String(value || '').trim()
   if (!str) return ''
@@ -87,6 +94,17 @@ const listWorkItemTypes = async (req, res) => {
   }
 }
 
+const listDemandPhaseTypes = async (req, res) => {
+  try {
+    const enabledOnly = toBool(req.query.enabled_only, true)
+    const rows = await Work.listDemandPhaseTypes({ enabledOnly })
+    return res.json({ success: true, data: rows })
+  } catch (err) {
+    console.error('获取需求阶段字典失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const createWorkItemType = async (req, res) => {
   const typeKey = normalizeText(req.body.type_key, 64).toUpperCase()
   const name = normalizeText(req.body.name, 64)
@@ -121,106 +139,19 @@ const createWorkItemType = async (req, res) => {
   }
 }
 
-const listDemandPhases = async (req, res) => {
-  const demandId = normalizeDemandId(req.params.id)
-  if (!demandId) {
-    return res.status(400).json({ success: false, message: '需求 ID 无效' })
-  }
-
-  try {
-    const demand = await Work.findDemandById(demandId)
-    if (!demand) {
-      return res.status(404).json({ success: false, message: '需求不存在' })
-    }
-
-    const rows = await Work.listDemandPhases(demandId)
-    return res.json({ success: true, data: rows })
-  } catch (err) {
-    console.error('获取需求阶段预算失败:', err)
-    return res.status(500).json({ success: false, message: '服务器错误' })
-  }
-}
-
-const batchSaveDemandPhases = async (req, res) => {
-  const demandId = normalizeDemandId(req.params.id)
-  if (!demandId) {
-    return res.status(400).json({ success: false, message: '需求 ID 无效' })
-  }
-
-  const phases = Array.isArray(req.body.phases) ? req.body.phases : []
-  if (phases.length === 0) {
-    return res.status(400).json({ success: false, message: 'phases 不能为空' })
-  }
-
-  try {
-    const demand = await Work.findDemandById(demandId)
-    if (!demand) {
-      return res.status(404).json({ success: false, message: '需求不存在' })
-    }
-
-    const keySet = new Set()
-    const normalizedPhases = []
-
-    for (let i = 0; i < phases.length; i += 1) {
-      const raw = phases[i] || {}
-      const phaseKey = normalizePhaseKey(raw.phase_key)
-      const phaseName = normalizeText(raw.phase_name, 64)
-      const ownerUserId = toPositiveInt(raw.owner_user_id)
-      const estimateHours = normalizeHours(raw.estimate_hours, 0)
-      const sortOrder = Number.isFinite(Number(raw.sort_order)) ? Number(raw.sort_order) : 0
-      const remark = normalizeText(raw.remark, 255)
-      const status = normalizeStatus(raw.status || 'TODO')
-
-      if (!phaseKey) {
-        return res.status(400).json({ success: false, message: `第 ${i + 1} 行 phase_key 无效` })
-      }
-      if (keySet.has(phaseKey)) {
-        return res.status(400).json({ success: false, message: `phase_key 重复：${phaseKey}` })
-      }
-      keySet.add(phaseKey)
-
-      if (!phaseName) {
-        return res.status(400).json({ success: false, message: `第 ${i + 1} 行 phase_name 不能为空` })
-      }
-      if (estimateHours === null || estimateHours < 0) {
-        return res.status(400).json({ success: false, message: `第 ${i + 1} 行 estimate_hours 不能小于 0` })
-      }
-
-      if (ownerUserId) {
-        const owner = await User.findById(ownerUserId)
-        if (!owner) {
-          return res.status(400).json({ success: false, message: `第 ${i + 1} 行 owner_user_id 不存在` })
-        }
-      }
-
-      normalizedPhases.push({
-        phase_key: phaseKey,
-        phase_name: phaseName,
-        owner_user_id: ownerUserId,
-        estimate_hours: estimateHours,
-        status: Work.DEMAND_PHASE_STATUSES.includes(status) ? status : 'TODO',
-        sort_order: sortOrder,
-        remark: remark || null,
-      })
-    }
-
-    await Work.batchUpsertDemandPhases(demandId, normalizedPhases)
-    const rows = await Work.listDemandPhases(demandId)
-    return res.json({ success: true, message: '阶段预算保存成功', data: rows })
-  } catch (err) {
-    console.error('保存需求阶段预算失败:', err)
-    return res.status(500).json({ success: false, message: '服务器错误' })
-  }
-}
-
 const listDemands = async (req, res) => {
   const page = toPositiveInt(req.query.page) || 1
   const pageSize = toPositiveInt(req.query.pageSize) || 10
   const keyword = normalizeText(req.query.keyword, 100)
   const status = normalizeStatus(req.query.status || '')
   const priority = normalizePriority(req.query.priority || '')
+  const businessGroupCode = normalizeBusinessGroupCode(req.query.business_group_code)
   const ownerUserId = toPositiveInt(req.query.owner_user_id)
   const mine = toBool(req.query.mine, false)
+
+  if (businessGroupCode === '') {
+    return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
+  }
 
   try {
     const { rows, total } = await Work.listDemands({
@@ -229,6 +160,7 @@ const listDemands = async (req, res) => {
       keyword,
       status: req.query.status ? status : '',
       priority: req.query.priority ? priority : '',
+      businessGroupCode: businessGroupCode || '',
       ownerUserId,
       mineUserId: mine ? req.user.id : null,
     })
@@ -252,6 +184,7 @@ const createDemand = async (req, res) => {
   const demandId = normalizeDemandId(req.body.id)
   const name = normalizeText(req.body.name, 200)
   const ownerUserId = toPositiveInt(req.body.owner_user_id)
+  const businessGroupCode = normalizeBusinessGroupCode(req.body.business_group_code)
   const status = normalizeStatus(req.body.status)
   const priority = normalizePriority(req.body.priority)
   const ownerEstimateHours = normalizeHours(req.body.owner_estimate_hours)
@@ -269,6 +202,10 @@ const createDemand = async (req, res) => {
     return res.status(400).json({ success: false, message: 'owner_user_id 无效' })
   }
 
+  if (businessGroupCode === '') {
+    return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
+  }
+
   if (ownerEstimateHours !== null && ownerEstimateHours < 0) {
     return res.status(400).json({ success: false, message: 'owner_estimate_hours 不能小于 0' })
   }
@@ -279,10 +216,18 @@ const createDemand = async (req, res) => {
       return res.status(400).json({ success: false, message: '负责人用户不存在' })
     }
 
+    if (businessGroupCode) {
+      const businessGroup = await Work.findBusinessGroupByCode(businessGroupCode, { enabledOnly: true })
+      if (!businessGroup) {
+        return res.status(400).json({ success: false, message: '业务组配置不存在或已停用' })
+      }
+    }
+
     const finalDemandId = await Work.createDemand({
       demandId,
       name,
       ownerUserId,
+      businessGroupCode,
       status,
       priority,
       ownerEstimateHours,
@@ -321,10 +266,13 @@ const updateDemand = async (req, res) => {
     const ownerUserId = toPositiveInt(req.body.owner_user_id) || existing.owner_user_id
     const status = req.body.status ? normalizeStatus(req.body.status) : existing.status
     const priority = req.body.priority ? normalizePriority(req.body.priority) : existing.priority
+    const parsedBusinessGroupCode = normalizeBusinessGroupCode(req.body.business_group_code)
     const ownerEstimateHours =
       req.body.owner_estimate_hours === undefined
         ? existing.owner_estimate_hours
         : normalizeHours(req.body.owner_estimate_hours)
+    const businessGroupCode =
+      parsedBusinessGroupCode === undefined ? existing.business_group_code : parsedBusinessGroupCode
     const description =
       req.body.description === undefined
         ? existing.description
@@ -339,6 +287,17 @@ const updateDemand = async (req, res) => {
       return res.status(400).json({ success: false, message: '负责人用户不存在' })
     }
 
+    if (parsedBusinessGroupCode === '') {
+      return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
+    }
+
+    if (parsedBusinessGroupCode !== undefined && businessGroupCode) {
+      const businessGroup = await Work.findBusinessGroupByCode(businessGroupCode, { enabledOnly: true })
+      if (!businessGroup) {
+        return res.status(400).json({ success: false, message: '业务组配置不存在或已停用' })
+      }
+    }
+
     if (ownerEstimateHours !== null && ownerEstimateHours < 0) {
       return res.status(400).json({ success: false, message: 'owner_estimate_hours 不能小于 0' })
     }
@@ -350,6 +309,7 @@ const updateDemand = async (req, res) => {
     await Work.updateDemand(demandId, {
       name,
       ownerUserId,
+      businessGroupCode,
       status,
       priority,
       ownerEstimateHours,
@@ -507,9 +467,9 @@ const createLog = async (req, res) => {
         return res.status(400).json({ success: false, message: '关联需求时必须选择阶段' })
       }
 
-      const phase = await Work.findDemandPhase(demandId, phaseKey)
+      const phase = await Work.findDemandPhaseTypeByKey(phaseKey)
       if (!phase) {
-        return res.status(400).json({ success: false, message: '所选阶段不存在或未配置' })
+        return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
       }
     } else {
       phaseKey = null
@@ -648,9 +608,9 @@ const updateLog = async (req, res) => {
         return res.status(400).json({ success: false, message: '关联需求时必须选择阶段' })
       }
 
-      const phase = await Work.findDemandPhase(demandId, phaseKey)
+      const phase = await Work.findDemandPhaseTypeByKey(phaseKey)
       if (!phase) {
-        return res.status(400).json({ success: false, message: '所选阶段不存在或未配置' })
+        return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
       }
     } else {
       phaseKey = null
@@ -794,9 +754,8 @@ const sendNoFillReminders = async (req, res) => {
 
 module.exports = {
   listWorkItemTypes,
+  listDemandPhaseTypes,
   createWorkItemType,
-  listDemandPhases,
-  batchSaveDemandPhases,
   listDemands,
   createDemand,
   updateDemand,

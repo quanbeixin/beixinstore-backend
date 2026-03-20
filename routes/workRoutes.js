@@ -4,9 +4,8 @@ const router = express.Router()
 const authMiddleware = require('../middleware/auth')
 const {
   listWorkItemTypes,
+  listDemandPhaseTypes,
   createWorkItemType,
-  listDemandPhases,
-  batchSaveDemandPhases,
   listDemands,
   createDemand,
   updateDemand,
@@ -26,21 +25,16 @@ router.get(
   authMiddleware.requireAnyPermission(['worklog.view.self', 'demand.view']),
   listWorkItemTypes,
 )
+router.get(
+  '/phase-types',
+  authMiddleware.requireAnyPermission(['worklog.view.self', 'demand.view']),
+  listDemandPhaseTypes,
+)
 router.post('/item-types', authMiddleware.requirePermission('demand.manage'), createWorkItemType)
 
 router.get('/demands', authMiddleware.requirePermission('demand.view'), listDemands)
 router.post('/demands', authMiddleware.requirePermission('demand.manage'), createDemand)
 router.put('/demands/:id', authMiddleware.requirePermission('demand.manage'), updateDemand)
-router.get(
-  '/demands/:id/phases',
-  authMiddleware.requireAnyPermission(['demand.phase.view', 'demand.view']),
-  listDemandPhases,
-)
-router.put(
-  '/demands/:id/phases/batch',
-  authMiddleware.requirePermission('demand.phase.manage'),
-  batchSaveDemandPhases,
-)
 
 router.get('/logs', authMiddleware.requirePermission('worklog.view.self'), listLogs)
 router.post('/logs', authMiddleware.requirePermission('worklog.create'), createLog)

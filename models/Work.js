@@ -2,10 +2,10 @@
 
 const DEMAND_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED']
 const DEMAND_PRIORITIES = ['P0', 'P1', 'P2', 'P3']
-const DEMAND_PHASE_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED']
 const WORK_LOG_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE']
 const DEMAND_PHASE_DICT_KEY = 'demand_phase_type'
 const ISSUE_TYPE_DICT_KEY = 'issue_type'
+const BUSINESS_GROUP_DICT_KEY = 'business_group'
 const OWNER_ESTIMATE_RULES = ['NONE', 'OPTIONAL', 'REQUIRED']
 const TRUE_LIKE_VALUES = new Set(['1', 'true', 'yes', 'y', 'on'])
 
@@ -156,25 +156,6 @@ function mapIssueTypeDictRow(row) {
   }
 }
 
-async function syncDemandOwnerEstimateByPhases(conn, demandId) {
-  const [[sumRow]] = await conn.query(
-    `SELECT ROUND(COALESCE(SUM(estimate_hours), 0), 1) AS total_estimate
-     FROM work_demand_phases
-     WHERE demand_id = ?`,
-    [demandId],
-  )
-
-  const totalEstimate = Number(sumRow?.total_estimate || 0)
-  await conn.query(
-    `UPDATE work_demands
-     SET owner_estimate_hours = ?
-     WHERE id = ?`,
-    [totalEstimate, demandId],
-  )
-
-  return totalEstimate
-}
-
 async function generateDemandId(conn) {
   const [[row]] = await conn.query(
     `SELECT MAX(CAST(SUBSTRING(id, 4) AS UNSIGNED)) AS max_no
@@ -310,7 +291,6 @@ function isOwnerEstimateTargetRow(
 const Work = {
   DEMAND_STATUSES,
   DEMAND_PRIORITIES,
-  DEMAND_PHASE_STATUSES,
   WORK_LOG_STATUSES,
 
   async isDepartmentManager(userId) {
@@ -366,6 +346,48 @@ const Work = {
     return Number(row?.total || 0) > 0
   },
 
+  async findBusinessGroupByCode(code, { enabledOnly = true } = {}) {
+    const whereEnabled = enabledOnly ? 'AND i.enabled = 1' : ''
+    const [rows] = await pool.query(
+      `SELECT
+         i.id,
+         i.item_code,
+         i.item_name,
+         i.enabled,
+         i.sort_order
+       FROM config_dict_items i
+       INNER JOIN config_dict_types t ON t.type_key = i.type_key
+       WHERE i.type_key = ?
+         AND i.item_code = ?
+         AND t.enabled = 1
+         ${whereEnabled}
+       LIMIT 1`,
+      [BUSINESS_GROUP_DICT_KEY, code],
+    )
+    return rows[0] || null
+  },
+
+  async findDemandPhaseTypeByKey(phaseKey, { enabledOnly = true } = {}) {
+    const whereEnabled = enabledOnly ? 'AND i.enabled = 1' : ''
+    const [rows] = await pool.query(
+      `SELECT
+         i.id,
+         i.item_code,
+         i.item_name,
+         i.enabled,
+         i.sort_order
+       FROM config_dict_items i
+       INNER JOIN config_dict_types t ON t.type_key = i.type_key
+       WHERE i.type_key = ?
+         AND i.item_code = ?
+         AND t.enabled = 1
+         ${whereEnabled}
+       LIMIT 1`,
+      [DEMAND_PHASE_DICT_KEY, phaseKey],
+    )
+    return rows[0] || null
+  },
+
   async listItemTypes({ enabledOnly = true } = {}) {
     const dictRows = await this.listIssueTypeDictItems({ enabledOnly })
     if (dictRows.length > 0) {
@@ -382,6 +404,23 @@ const Work = {
          ORDER BY enabled DESC, sort_order ASC, id ASC`
 
     const [rows] = await pool.query(sql)
+    return rows
+  },
+
+  async listDemandPhaseTypes({ enabledOnly = true } = {}) {
+    const whereEnabled = enabledOnly ? 'AND i.enabled = 1' : ''
+    const [rows] = await pool.query(
+      `SELECT
+         i.item_code AS phase_key,
+         i.item_name AS phase_name,
+         i.sort_order,
+         i.enabled
+       FROM config_dict_items i
+       INNER JOIN config_dict_types t ON t.type_key = i.type_key
+       WHERE i.type_key = ? AND t.enabled = 1 ${whereEnabled}
+       ORDER BY i.sort_order ASC, i.id ASC`,
+      [DEMAND_PHASE_DICT_KEY],
+    )
     return rows
   },
 
@@ -420,6 +459,7 @@ const Work = {
     keyword = '',
     status = '',
     priority = '',
+    businessGroupCode = '',
     ownerUserId = null,
     mineUserId = null,
   } = {}) {
@@ -440,6 +480,11 @@ const Work = {
     if (priority) {
       conditions.push('d.priority = ?')
       params.push(normalizePriority(priority))
+    }
+
+    if (businessGroupCode) {
+      conditions.push('d.business_group_code = ?')
+      params.push(businessGroupCode)
     }
 
     if (ownerUserId) {
@@ -463,6 +508,8 @@ const Work = {
         d.name,
         d.owner_user_id,
         u.username AS owner_name,
+        d.business_group_code,
+        bg.item_name AS business_group_name,
         d.status,
         d.priority,
         d.owner_estimate_hours,
@@ -480,6 +527,9 @@ const Work = {
         END AS deviation_hours
       FROM work_demands d
       LEFT JOIN users u ON u.id = d.owner_user_id
+      LEFT JOIN config_dict_items bg
+        ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
+       AND bg.item_code = d.business_group_code
       LEFT JOIN (
         SELECT
           demand_id,
@@ -528,6 +578,8 @@ const Work = {
          d.name,
          d.owner_user_id,
          u.username AS owner_name,
+         d.business_group_code,
+         bg.item_name AS business_group_name,
          d.status,
          d.priority,
          d.owner_estimate_hours,
@@ -538,142 +590,20 @@ const Work = {
          d.completed_at
        FROM work_demands d
        LEFT JOIN users u ON u.id = d.owner_user_id
+       LEFT JOIN config_dict_items bg
+         ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
+        AND bg.item_code = d.business_group_code
        WHERE d.id = ?`,
       [id],
     )
     return rows[0] || null
   },
 
-  async listDemandPhases(demandId) {
-    const [rows] = await pool.query(
-      `SELECT
-         p.id,
-         p.demand_id,
-         p.phase_key,
-         COALESCE(di.item_name, p.phase_name) AS phase_name,
-         p.owner_user_id,
-         u.username AS owner_name,
-         p.estimate_hours,
-         p.status,
-         COALESCE(di.sort_order, p.sort_order) AS sort_order,
-         p.started_at,
-         p.completed_at,
-         p.remark,
-         p.created_at,
-         p.updated_at,
-         COALESCE(ta.personal_estimate_hours, 0) AS personal_estimate_hours,
-         COALESCE(ta.actual_hours, 0) AS actual_hours,
-         COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours,
-         ROUND(COALESCE(ta.actual_hours, 0) + COALESCE(lr.remaining_hours, 0) - COALESCE(p.estimate_hours, 0), 1) AS deviation_hours
-       FROM work_demand_phases p
-       LEFT JOIN config_dict_items di
-         ON di.type_key = '${DEMAND_PHASE_DICT_KEY}'
-        AND di.item_code = p.phase_key
-        AND di.enabled = 1
-       LEFT JOIN users u ON u.id = p.owner_user_id
-       LEFT JOIN (
-         SELECT
-           demand_id,
-           phase_key,
-           SUM(personal_estimate_hours) AS personal_estimate_hours,
-           SUM(actual_hours) AS actual_hours
-         FROM work_logs
-         WHERE demand_id IS NOT NULL AND phase_key IS NOT NULL AND phase_key <> ''
-         GROUP BY demand_id, phase_key
-       ) ta ON ta.demand_id = p.demand_id AND ta.phase_key = p.phase_key
-       LEFT JOIN (
-         SELECT l1.demand_id, l1.phase_key, l1.remaining_hours
-         FROM work_logs l1
-         INNER JOIN (
-           SELECT demand_id, phase_key, MAX(id) AS max_id
-           FROM work_logs
-           WHERE demand_id IS NOT NULL AND phase_key IS NOT NULL AND phase_key <> ''
-           GROUP BY demand_id, phase_key
-         ) l2 ON l1.id = l2.max_id
-       ) lr ON lr.demand_id = p.demand_id AND lr.phase_key = p.phase_key
-       WHERE p.demand_id = ?
-         AND (
-           di.id IS NOT NULL
-           OR EXISTS (
-             SELECT 1
-             FROM work_logs wl
-             WHERE wl.demand_id = p.demand_id
-               AND wl.phase_key = p.phase_key
-           )
-         )
-       ORDER BY COALESCE(di.sort_order, p.sort_order) ASC, p.id ASC`,
-      [demandId],
-    )
-    return rows
-  },
-
-  async findDemandPhase(demandId, phaseKey) {
-    const [rows] = await pool.query(
-      `SELECT
-         id,
-         demand_id,
-         phase_key,
-         phase_name,
-         owner_user_id,
-         estimate_hours,
-         status,
-         sort_order,
-         started_at,
-         completed_at,
-         remark,
-         created_at,
-         updated_at
-       FROM work_demand_phases
-       WHERE demand_id = ? AND phase_key = ?
-       LIMIT 1`,
-      [demandId, phaseKey],
-    )
-    return rows[0] || null
-  },
-
-  async batchUpsertDemandPhases(demandId, phases = []) {
-    const conn = await pool.getConnection()
-    try {
-      await conn.beginTransaction()
-      for (const phase of phases) {
-        await conn.query(
-          `INSERT INTO work_demand_phases (
-             demand_id, phase_key, phase_name, owner_user_id, estimate_hours, status, sort_order, remark
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE
-             phase_name = VALUES(phase_name),
-             owner_user_id = VALUES(owner_user_id),
-             estimate_hours = VALUES(estimate_hours),
-             status = VALUES(status),
-             sort_order = VALUES(sort_order),
-             remark = VALUES(remark)`,
-          [
-            demandId,
-            phase.phase_key,
-            phase.phase_name,
-            phase.owner_user_id || null,
-            normalizeDecimal(phase.estimate_hours, 0),
-            phase.status,
-            Number(phase.sort_order) || 0,
-            phase.remark || null,
-          ],
-        )
-      }
-
-      await syncDemandOwnerEstimateByPhases(conn, demandId)
-      await conn.commit()
-    } catch (err) {
-      await conn.rollback()
-      throw err
-    } finally {
-      conn.release()
-    }
-  },
-
   async createDemand({
     demandId = '',
     name,
     ownerUserId,
+    businessGroupCode = null,
     status = 'TODO',
     priority = 'P2',
     ownerEstimateHours = null,
@@ -687,12 +617,13 @@ const Work = {
       const finalDemandId = demandId || (await generateDemandId(conn))
       await conn.query(
         `INSERT INTO work_demands (
-          id, name, owner_user_id, status, priority, owner_estimate_hours, description, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, name, owner_user_id, business_group_code, status, priority, owner_estimate_hours, description, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           finalDemandId,
           name,
           ownerUserId,
+          businessGroupCode || null,
           normalizeStatus(status),
           normalizePriority(priority),
           normalizeDecimal(ownerEstimateHours),
@@ -713,13 +644,23 @@ const Work = {
 
   async updateDemand(
     demandId,
-    { name, ownerUserId, status, priority, ownerEstimateHours, description, completedAt },
+    {
+      name,
+      ownerUserId,
+      businessGroupCode = null,
+      status,
+      priority,
+      ownerEstimateHours,
+      description,
+      completedAt,
+    },
   ) {
     const [result] = await pool.query(
       `UPDATE work_demands
        SET
          name = ?,
          owner_user_id = ?,
+         business_group_code = ?,
          status = ?,
          priority = ?,
          owner_estimate_hours = ?,
@@ -729,6 +670,7 @@ const Work = {
       [
         name,
         ownerUserId,
+        businessGroupCode || null,
         normalizeStatus(status),
         normalizePriority(priority),
         normalizeDecimal(ownerEstimateHours),
@@ -820,7 +762,7 @@ const Work = {
         l.phase_key,
         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
         DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
-        COALESCE(p.phase_name, l.phase_key, '-') AS phase_name,
+        COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
         d.name AS demand_name,
         l.created_at,
         l.updated_at
@@ -828,7 +770,9 @@ const Work = {
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
-      LEFT JOIN work_demand_phases p ON p.demand_id = l.demand_id AND p.phase_key = l.phase_key
+      LEFT JOIN config_dict_items pdi
+        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+       AND pdi.item_code = l.phase_key
       WHERE ${whereSql}
       ORDER BY l.log_date DESC, l.id DESC
       LIMIT ? OFFSET ?`
@@ -1056,11 +1000,13 @@ const Work = {
          l.demand_id,
          d.name AS demand_name,
          l.phase_key,
-         COALESCE(p.phase_name, l.phase_key, '-') AS phase_name
+         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name
        FROM work_logs l
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
        LEFT JOIN work_demands d ON d.id = l.demand_id
-       LEFT JOIN work_demand_phases p ON p.demand_id = l.demand_id AND p.phase_key = l.phase_key
+       LEFT JOIN config_dict_items pdi
+         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+        AND pdi.item_code = l.phase_key
        WHERE l.user_id = ?
          AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
        ORDER BY
@@ -1214,7 +1160,7 @@ const Work = {
        l.demand_id,
        d.name AS demand_name,
        l.phase_key,
-       COALESCE(p.phase_name, l.phase_key, '-') AS phase_name,
+       COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
        COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule,
@@ -1224,7 +1170,6 @@ const Work = {
      INNER JOIN users u ON u.id = l.user_id
      LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
      LEFT JOIN work_demands d ON d.id = l.demand_id
-     LEFT JOIN work_demand_phases p ON p.demand_id = l.demand_id AND p.phase_key = l.phase_key
      LEFT JOIN config_dict_items pdi
        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
       AND pdi.item_code = l.phase_key
@@ -1251,7 +1196,7 @@ const Work = {
        l.demand_id,
        d.name AS demand_name,
        l.phase_key,
-       COALESCE(p.phase_name, l.phase_key, '-') AS phase_name,
+       COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
        COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule,
@@ -1261,7 +1206,6 @@ const Work = {
      INNER JOIN users u ON u.id = l.user_id
      LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
      LEFT JOIN work_demands d ON d.id = l.demand_id
-     LEFT JOIN work_demand_phases p ON p.demand_id = l.demand_id AND p.phase_key = l.phase_key
      LEFT JOIN config_dict_items pdi
        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
       AND pdi.item_code = l.phase_key
@@ -1286,120 +1230,6 @@ const Work = {
       )
       .slice(0, 120)
 
-    let demandRisks = []
-    let phaseRisks = []
-    if (teamMemberIds.length > 0) {
-      ;[demandRisks] = await pool.query(
-        `SELECT
-           d.id,
-           d.name,
-           d.status,
-           d.priority,
-           d.owner_estimate_hours,
-           COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,
-           COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,
-           COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours,
-           ROUND(
-             COALESCE(ta.total_actual_hours, 0) +
-             COALESCE(lr.remaining_hours, 0) -
-             COALESCE(d.owner_estimate_hours, 0),
-             1
-           ) AS deviation_hours
-         FROM work_demands d
-         INNER JOIN users u ON u.id = d.owner_user_id
-         LEFT JOIN (
-           SELECT
-             demand_id,
-             SUM(personal_estimate_hours) AS total_personal_estimate_hours,
-             SUM(actual_hours) AS total_actual_hours
-           FROM work_logs
-           WHERE demand_id IS NOT NULL
-           GROUP BY demand_id
-         ) ta ON ta.demand_id = d.id
-         LEFT JOIN (
-           SELECT l1.demand_id, l1.remaining_hours
-           FROM work_logs l1
-           INNER JOIN (
-             SELECT demand_id, MAX(id) AS max_id
-             FROM work_logs
-             WHERE demand_id IS NOT NULL
-             GROUP BY demand_id
-           ) l2 ON l1.id = l2.max_id
-         ) lr ON lr.demand_id = d.id
-         WHERE u.id IN (?) AND d.status IN ('TODO', 'IN_PROGRESS')
-         ORDER BY deviation_hours DESC, d.updated_at DESC
-         LIMIT 20`,
-        [teamMemberIds],
-      )
-
-      ;[phaseRisks] = await pool.query(
-        `SELECT
-           p.demand_id,
-           d.name AS demand_name,
-           p.phase_key,
-           p.phase_name,
-           p.status,
-           p.owner_user_id,
-           ou.username AS owner_name,
-           p.estimate_hours,
-           COALESCE(ta.personal_estimate_hours, 0) AS personal_estimate_hours,
-           COALESCE(ta.actual_hours, 0) AS actual_hours,
-           COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours,
-           ROUND(
-             COALESCE(ta.actual_hours, 0) +
-             COALESCE(lr.remaining_hours, 0) -
-             COALESCE(p.estimate_hours, 0),
-             1
-           ) AS deviation_hours,
-           CASE
-             WHEN COALESCE(p.estimate_hours, 0) <= 0 THEN NULL
-             ELSE ROUND(
-               (
-                 COALESCE(ta.actual_hours, 0) +
-                 COALESCE(lr.remaining_hours, 0) -
-                 COALESCE(p.estimate_hours, 0)
-               ) / p.estimate_hours * 100,
-               1
-             )
-           END AS deviation_rate
-         FROM work_demand_phases p
-         INNER JOIN work_demands d ON d.id = p.demand_id
-         INNER JOIN users u ON u.id = d.owner_user_id
-         LEFT JOIN users ou ON ou.id = p.owner_user_id
-         LEFT JOIN (
-           SELECT
-             demand_id,
-             phase_key,
-             SUM(personal_estimate_hours) AS personal_estimate_hours,
-             SUM(actual_hours) AS actual_hours
-           FROM work_logs
-           WHERE demand_id IS NOT NULL AND phase_key IS NOT NULL AND phase_key <> ''
-           GROUP BY demand_id, phase_key
-         ) ta ON ta.demand_id = p.demand_id AND ta.phase_key = p.phase_key
-         LEFT JOIN (
-           SELECT l1.demand_id, l1.phase_key, l1.remaining_hours
-           FROM work_logs l1
-           INNER JOIN (
-             SELECT demand_id, phase_key, MAX(id) AS max_id
-             FROM work_logs
-             WHERE demand_id IS NOT NULL AND phase_key IS NOT NULL AND phase_key <> ''
-             GROUP BY demand_id, phase_key
-           ) l2 ON l1.id = l2.max_id
-         ) lr ON lr.demand_id = p.demand_id AND lr.phase_key = p.phase_key
-         WHERE u.id IN (?)
-           AND d.status IN ('TODO', 'IN_PROGRESS')
-           AND p.status IN ('TODO', 'IN_PROGRESS')
-           AND (
-             COALESCE(p.estimate_hours, 0) > 0
-             OR COALESCE(ta.actual_hours, 0) > 0
-             OR COALESCE(lr.remaining_hours, 0) > 0
-           )
-         ORDER BY deviation_hours DESC, d.updated_at DESC, p.sort_order ASC
-         LIMIT 30`,
-        [teamMemberIds],
-      )
-    }
-
     const teamSize = Number(overview?.team_size || 0)
     const filledUsersToday = Number(overview?.filled_users_today || 0)
 
@@ -1423,8 +1253,8 @@ const Work = {
       no_fill_members: noFillMembers,
       owner_estimate_items: ownerEstimateItems,
       owner_estimate_pending_count: ownerEstimateItems.filter((item) => item.owner_estimate_hours === null).length,
-      demand_risks: demandRisks,
-      phase_risks: phaseRisks,
+      demand_risks: [],
+      phase_risks: [],
     }
   },
 
