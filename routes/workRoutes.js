@@ -16,6 +16,7 @@ const {
   updateLogOwnerEstimate,
   getMyWorkbench,
   getOwnerWorkbench,
+  getMorningStandupBoard,
   sendNoFillReminders,
 } = require('../controllers/workController')
 
@@ -48,6 +49,7 @@ router.put(
 )
 
 router.get('/workbench/me', authMiddleware.requirePermission('workbench.view.self'), getMyWorkbench)
+router.get('/workbench/morning', getMorningStandupBoard)
 router.get(
   '/workbench/owner',
   authMiddleware.requireAnyPermission(['workbench.view.owner', 'workbench.view.self']),

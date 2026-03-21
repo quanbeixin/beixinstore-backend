@@ -193,6 +193,53 @@ async function listManagedDepartmentRows(managerUserId) {
   return rows || []
 }
 
+async function findUserDepartmentRow(userId) {
+  const [rows] = await pool.query(
+    `SELECT d.id, d.name
+     FROM users u
+     LEFT JOIN departments d ON d.id = u.department_id
+     WHERE u.id = ?
+     LIMIT 1`,
+    [userId],
+  )
+
+  const row = rows[0] || null
+  const departmentId = toPositiveInt(row?.id)
+  if (!departmentId) return null
+  return {
+    id: departmentId,
+    name: row?.name || `部门#${departmentId}`,
+  }
+}
+
+async function listEnabledDepartments() {
+  const [rows] = await pool.query(
+    `SELECT d.id, d.name
+     FROM departments d
+     WHERE COALESCE(d.enabled, 1) = 1
+     ORDER BY d.sort_order ASC, d.id ASC`,
+  )
+  return (rows || []).map((row) => ({
+    id: Number(row.id),
+    name: row.name || `部门#${Number(row.id)}`,
+  }))
+}
+
+function buildMorningTabKey(departmentId) {
+  const id = toPositiveInt(departmentId)
+  return id ? `dept-${id}` : ''
+}
+
+function parseMorningTabKey(tabKey) {
+  const raw = String(tabKey || '').trim().toLowerCase()
+  if (raw === 'all') return { type: 'ALL', departmentId: null }
+  if (!raw.startsWith('dept-')) return { type: 'UNKNOWN', departmentId: null }
+
+  const departmentId = toPositiveInt(raw.slice(5))
+  if (!departmentId) return { type: 'UNKNOWN', departmentId: null }
+  return { type: 'DEPARTMENT', departmentId }
+}
+
 async function resolveOwnerScope(ownerUserId, { isSuperAdmin = false } = {}) {
   if (isSuperAdmin) {
     const teamMemberIds = await listActiveUserIds()
@@ -1096,6 +1143,333 @@ const Work = {
       },
       active_items: activeItems,
       recent_logs: recentLogs,
+    }
+  },
+
+  async getMorningStandupBoard(
+    viewerUserId,
+    {
+      canViewAll = false,
+      targetDepartmentId = null,
+      tabKey = '',
+    } = {},
+  ) {
+    const viewerDepartment = await findUserDepartmentRow(viewerUserId)
+    const allEnabledDepartments = await listEnabledDepartments()
+    const allEnabledDepartmentIds = allEnabledDepartments.map((item) => Number(item.id))
+
+    const requestedDepartmentId = toPositiveInt(targetDepartmentId)
+    const parsedTab = parseMorningTabKey(tabKey)
+
+    let currentMode = canViewAll ? 'ALL' : 'DEPARTMENT'
+    let currentDepartmentId = null
+
+    if (canViewAll) {
+      if (parsedTab.type === 'DEPARTMENT') {
+        currentMode = 'DEPARTMENT'
+        currentDepartmentId = parsedTab.departmentId
+      } else if (requestedDepartmentId) {
+        currentMode = 'DEPARTMENT'
+        currentDepartmentId = requestedDepartmentId
+      } else if (parsedTab.type === 'ALL') {
+        currentMode = 'ALL'
+      } else {
+        currentMode = 'ALL'
+      }
+
+      if (currentMode === 'DEPARTMENT' && !allEnabledDepartmentIds.includes(currentDepartmentId)) {
+        currentMode = 'ALL'
+        currentDepartmentId = null
+      }
+    } else {
+      currentMode = 'DEPARTMENT'
+      if (parsedTab.type === 'DEPARTMENT' && allEnabledDepartmentIds.includes(parsedTab.departmentId)) {
+        currentDepartmentId = parsedTab.departmentId
+      } else if (requestedDepartmentId && allEnabledDepartmentIds.includes(requestedDepartmentId)) {
+        currentDepartmentId = requestedDepartmentId
+      } else if (viewerDepartment?.id && allEnabledDepartmentIds.includes(viewerDepartment.id)) {
+        currentDepartmentId = viewerDepartment.id
+      } else {
+        currentDepartmentId = allEnabledDepartmentIds[0] || null
+      }
+    }
+
+    const tabs = []
+    if (canViewAll) {
+      tabs.push({
+        key: 'all',
+        label: '全部',
+        department_id: null,
+        is_all: true,
+      })
+      allEnabledDepartments.forEach((item) => {
+        tabs.push({
+          key: buildMorningTabKey(item.id),
+          label: item.name,
+          department_id: item.id,
+          is_all: false,
+        })
+      })
+    } else {
+      allEnabledDepartments.forEach((item) => {
+        tabs.push({
+          key: buildMorningTabKey(item.id),
+          label: item.name,
+          department_id: item.id,
+          is_all: false,
+        })
+      })
+    }
+
+    const defaultTabKey = canViewAll
+      ? 'all'
+      : viewerDepartment?.id && allEnabledDepartmentIds.includes(viewerDepartment.id)
+        ? buildMorningTabKey(viewerDepartment.id)
+        : tabs[0]?.key || ''
+    const currentTabKey = currentMode === 'ALL' ? 'all' : buildMorningTabKey(currentDepartmentId)
+
+    let scopedDepartmentIds = []
+    if (currentMode === 'ALL') {
+      scopedDepartmentIds = allEnabledDepartmentIds
+    } else if (currentDepartmentId) {
+      scopedDepartmentIds = [currentDepartmentId]
+    }
+
+    const emptyPayload = {
+      tabs,
+      default_tab_key: defaultTabKey,
+      current_tab_key: currentTabKey || defaultTabKey,
+      view_scope: {
+        mode: currentMode,
+        department_id: currentMode === 'DEPARTMENT' ? currentDepartmentId : null,
+        department_name:
+          currentMode === 'DEPARTMENT'
+            ? (tabs.find((item) => item.department_id === currentDepartmentId)?.label || null)
+            : '全部部门',
+        department_ids: scopedDepartmentIds,
+      },
+      summary: {
+        team_size: 0,
+        filled_users_today: 0,
+        unfilled_users_today: 0,
+        active_item_count: 0,
+        overdue_item_count: 0,
+        due_today_item_count: 0,
+      },
+      focus_summary: {
+        overdue_count: 0,
+        due_today_count: 0,
+        active_count: 0,
+        unfilled_count: 0,
+      },
+      focus_items: [],
+      members: [],
+      no_fill_members: [],
+    }
+
+    if (scopedDepartmentIds.length === 0) {
+      return emptyPayload
+    }
+
+    const [memberRows] = await pool.query(
+      `SELECT
+         u.id AS user_id,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+         u.department_id,
+         COALESCE(d.name, CONCAT('部门#', u.department_id)) AS department_name
+       FROM users u
+       LEFT JOIN departments d ON d.id = u.department_id
+       WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+         AND u.department_id IN (?)
+       ORDER BY u.department_id ASC, u.id ASC`,
+      [scopedDepartmentIds],
+    )
+
+    const userIds = memberRows
+      .map((row) => Number(row.user_id))
+      .filter((id) => Number.isInteger(id) && id > 0)
+
+    if (userIds.length === 0) {
+      return emptyPayload
+    }
+
+    const [filledRows] = await pool.query(
+      `SELECT DISTINCT wl.user_id
+       FROM work_logs wl
+       WHERE wl.log_date = CURDATE()
+         AND wl.user_id IN (?)`,
+      [userIds],
+    )
+    const filledSet = new Set(
+      filledRows.map((row) => Number(row.user_id)).filter((id) => Number.isInteger(id) && id > 0),
+    )
+
+    const [activeItemRows] = await pool.query(
+      `SELECT
+         l.id,
+         l.user_id,
+         DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+         COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+         l.description,
+         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+         DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+         l.demand_id,
+         d.name AS demand_name,
+         d.priority AS demand_priority,
+         l.phase_key,
+         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name
+       FROM work_logs l
+       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+       LEFT JOIN work_demands d ON d.id = l.demand_id
+       LEFT JOIN config_dict_items pdi
+         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+        AND pdi.item_code = l.phase_key
+       WHERE l.user_id IN (?)
+         AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
+       ORDER BY
+         l.user_id ASC,
+         CASE COALESCE(l.log_status, 'IN_PROGRESS')
+           WHEN 'TODO' THEN 0
+           WHEN 'IN_PROGRESS' THEN 1
+           ELSE 2
+         END ASC,
+         CASE WHEN l.expected_completion_date IS NULL THEN 1 ELSE 0 END ASC,
+         l.expected_completion_date ASC,
+         l.updated_at DESC,
+         l.id DESC
+       LIMIT 4000`,
+      [userIds],
+    )
+
+    const activeItemsByUser = new Map()
+    activeItemRows.forEach((row) => {
+      const userId = Number(row.user_id)
+      if (!activeItemsByUser.has(userId)) {
+        activeItemsByUser.set(userId, [])
+      }
+      activeItemsByUser.get(userId).push(row)
+    })
+
+    const [[todayRow]] = await pool.query(`SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today_date`)
+    const todayDate = String(todayRow?.today_date || '')
+    let activeItemCount = 0
+    let overdueItemCount = 0
+    let dueTodayItemCount = 0
+
+    const members = memberRows.map((row) => {
+      const userId = Number(row.user_id)
+      const activeItems = activeItemsByUser.get(userId) || []
+      activeItemCount += activeItems.length
+      activeItems.forEach((item) => {
+        const expectedDate = String(item.expected_completion_date || '').trim()
+        if (!expectedDate) return
+        if (expectedDate < todayDate) overdueItemCount += 1
+        if (expectedDate === todayDate) dueTodayItemCount += 1
+      })
+
+      return {
+        user_id: userId,
+        username: row.username,
+        department_id: Number(row.department_id),
+        department_name: row.department_name,
+        today_filled: filledSet.has(userId),
+        active_item_count: activeItems.length,
+        active_items: activeItems,
+      }
+    })
+
+    const filledUsersToday = members.filter((item) => item.today_filled).length
+    const noFillMembers = members
+      .filter((item) => !item.today_filled)
+      .map((item) => ({ id: item.user_id, username: item.username }))
+
+    const usernameById = new Map(
+      members.map((item) => [Number(item.user_id), item.username || `用户${Number(item.user_id)}`]),
+    )
+    const focusLevelRank = {
+      OVERDUE: 0,
+      DUE_TODAY: 1,
+      NORMAL: 2,
+    }
+    const priorityRank = {
+      P0: 0,
+      P1: 1,
+      P2: 2,
+      P3: 3,
+    }
+    const focusItems = (activeItemRows || [])
+      .map((item) => {
+        const expectedDate = String(item.expected_completion_date || '').trim()
+        const focusLevel = expectedDate
+          ? expectedDate < todayDate
+            ? 'OVERDUE'
+            : expectedDate === todayDate
+              ? 'DUE_TODAY'
+              : 'NORMAL'
+          : 'NORMAL'
+        const demandPriority = String(item.demand_priority || '').trim().toUpperCase()
+        return {
+          id: Number(item.id),
+          user_id: Number(item.user_id),
+          username: usernameById.get(Number(item.user_id)) || `用户${Number(item.user_id)}`,
+          item_type_name: item.item_type_name || '-',
+          demand_id: item.demand_id || null,
+          demand_name: item.demand_name || item.demand_id || '-',
+          phase_name: item.phase_name || '-',
+          log_status: item.log_status || 'IN_PROGRESS',
+          expected_completion_date: expectedDate || null,
+          demand_priority: demandPriority && priorityRank[demandPriority] !== undefined ? demandPriority : null,
+          focus_level: focusLevel,
+          description: item.description || '',
+        }
+      })
+      .sort((a, b) => {
+        const levelDiff = (focusLevelRank[a.focus_level] || 9) - (focusLevelRank[b.focus_level] || 9)
+        if (levelDiff !== 0) return levelDiff
+
+        const priorityA = a.demand_priority ? priorityRank[a.demand_priority] : 99
+        const priorityB = b.demand_priority ? priorityRank[b.demand_priority] : 99
+        if (priorityA !== priorityB) return priorityA - priorityB
+
+        const dateA = a.expected_completion_date || '9999-12-31'
+        const dateB = b.expected_completion_date || '9999-12-31'
+        if (dateA !== dateB) return dateA.localeCompare(dateB)
+
+        return Number(b.id || 0) - Number(a.id || 0)
+      })
+      .slice(0, 200)
+
+    return {
+      tabs,
+      default_tab_key: defaultTabKey,
+      current_tab_key: currentTabKey || defaultTabKey,
+      view_scope: {
+        mode: currentMode,
+        department_id: currentMode === 'DEPARTMENT' ? currentDepartmentId : null,
+        department_name:
+          currentMode === 'DEPARTMENT'
+            ? (tabs.find((item) => item.department_id === currentDepartmentId)?.label || null)
+            : '全部部门',
+        department_ids: scopedDepartmentIds,
+      },
+      summary: {
+        team_size: members.length,
+        filled_users_today: filledUsersToday,
+        unfilled_users_today: Math.max(members.length - filledUsersToday, 0),
+        active_item_count: activeItemCount,
+        overdue_item_count: overdueItemCount,
+        due_today_item_count: dueTodayItemCount,
+      },
+      focus_summary: {
+        overdue_count: overdueItemCount,
+        due_today_count: dueTodayItemCount,
+        active_count: activeItemCount,
+        unfilled_count: Math.max(members.length - filledUsersToday, 0),
+      },
+      focus_items: focusItems,
+      members,
+      no_fill_members: noFillMembers,
     }
   },
 

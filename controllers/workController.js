@@ -877,6 +877,26 @@ const getOwnerWorkbench = async (req, res) => {
   }
 }
 
+const getMorningStandupBoard = async (req, res) => {
+  try {
+    const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    const isAdmin = hasRole(req, 'ADMIN')
+    const canViewAll = isSuperAdmin || isAdmin
+    const targetDepartmentId = toPositiveInt(req.query.department_id)
+    const tabKey = normalizeText(req.query.tab_key, 32)
+
+    const data = await Work.getMorningStandupBoard(req.user.id, {
+      canViewAll,
+      targetDepartmentId,
+      tabKey,
+    })
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取晨会看板失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const sendNoFillReminders = async (req, res) => {
   try {
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
@@ -915,5 +935,6 @@ module.exports = {
   updateLogOwnerEstimate,
   getMyWorkbench,
   getOwnerWorkbench,
+  getMorningStandupBoard,
   sendNoFillReminders,
 }
