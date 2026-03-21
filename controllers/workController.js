@@ -60,6 +60,13 @@ function normalizePriority(value) {
   return Work.DEMAND_PRIORITIES.includes(priority) ? priority : 'P2'
 }
 
+function normalizePriorityOrder(value) {
+  const order = String(value || '').trim().toLowerCase()
+  if (!order) return ''
+  if (order === 'asc' || order === 'desc') return order
+  return ''
+}
+
 function normalizeLogStatus(value) {
   const status = String(value || 'IN_PROGRESS').trim().toUpperCase()
   return Work.WORK_LOG_STATUSES.includes(status) ? status : 'IN_PROGRESS'
@@ -81,6 +88,23 @@ function hasPermission(req, code) {
   if (access.is_super_admin) return true
   const codes = Array.isArray(access.permission_codes) ? access.permission_codes : []
   return codes.includes(code)
+}
+
+function hasRole(req, roleKey) {
+  const access = req.userAccess || {}
+  if (access.is_super_admin) return true
+  const roleKeys = Array.isArray(access.role_keys) ? access.role_keys : []
+  return roleKeys.includes(String(roleKey || '').trim().toUpperCase())
+}
+
+function canTransferDemandOwner(req) {
+  return hasPermission(req, 'demand.transfer_owner') || hasRole(req, 'ADMIN')
+}
+
+function canEditDemand(req, demand) {
+  if (!demand) return false
+  if (canTransferDemandOwner(req)) return true
+  return Number(req.user?.id) === Number(demand.owner_user_id)
 }
 
 const listWorkItemTypes = async (req, res) => {
@@ -145,12 +169,45 @@ const listDemands = async (req, res) => {
   const keyword = normalizeText(req.query.keyword, 100)
   const status = normalizeStatus(req.query.status || '')
   const priority = normalizePriority(req.query.priority || '')
+  const priorityOrderRaw = req.query.priority_order
+  const priorityOrder = normalizePriorityOrder(priorityOrderRaw)
   const businessGroupCode = normalizeBusinessGroupCode(req.query.business_group_code)
   const ownerUserId = toPositiveInt(req.query.owner_user_id)
+  const updatedStartDateRaw = req.query.updated_start_date
+  const updatedEndDateRaw = req.query.updated_end_date
+  const updatedStartDate = normalizeDate(updatedStartDateRaw)
+  const updatedEndDate = normalizeDate(updatedEndDateRaw)
   const mine = toBool(req.query.mine, false)
 
   if (businessGroupCode === '') {
     return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
+  }
+  if (
+    priorityOrderRaw !== undefined &&
+    priorityOrderRaw !== null &&
+    String(priorityOrderRaw).trim() !== '' &&
+    !priorityOrder
+  ) {
+    return res.status(400).json({ success: false, message: 'priority_order 仅支持 asc 或 desc' })
+  }
+  if (
+    updatedStartDateRaw !== undefined &&
+    updatedStartDateRaw !== null &&
+    String(updatedStartDateRaw).trim() !== '' &&
+    !updatedStartDate
+  ) {
+    return res.status(400).json({ success: false, message: 'updated_start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (
+    updatedEndDateRaw !== undefined &&
+    updatedEndDateRaw !== null &&
+    String(updatedEndDateRaw).trim() !== '' &&
+    !updatedEndDate
+  ) {
+    return res.status(400).json({ success: false, message: 'updated_end_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (updatedStartDate && updatedEndDate && updatedStartDate > updatedEndDate) {
+    return res.status(400).json({ success: false, message: '更新时间范围不合法：开始日期不能大于结束日期' })
   }
 
   try {
@@ -160,8 +217,11 @@ const listDemands = async (req, res) => {
       keyword,
       status: req.query.status ? status : '',
       priority: req.query.priority ? priority : '',
+      priorityOrder: priorityOrder || '',
       businessGroupCode: businessGroupCode || '',
       ownerUserId,
+      updatedStartDate: updatedStartDate || '',
+      updatedEndDate: updatedEndDate || '',
       mineUserId: mine ? req.user.id : null,
     })
 
@@ -183,11 +243,17 @@ const listDemands = async (req, res) => {
 const createDemand = async (req, res) => {
   const demandId = normalizeDemandId(req.body.id)
   const name = normalizeText(req.body.name, 200)
-  const ownerUserId = toPositiveInt(req.body.owner_user_id)
+  const ownerUserIdRaw = req.body.owner_user_id
+  const parsedOwnerUserId = toPositiveInt(ownerUserIdRaw)
+  const ownerUserId =
+    ownerUserIdRaw === undefined || ownerUserIdRaw === null || ownerUserIdRaw === ''
+      ? toPositiveInt(req.user?.id)
+      : parsedOwnerUserId
   const businessGroupCode = normalizeBusinessGroupCode(req.body.business_group_code)
+  const expectedReleaseDateRaw = req.body.expected_release_date
+  const expectedReleaseDate = normalizeDate(expectedReleaseDateRaw)
   const status = normalizeStatus(req.body.status)
   const priority = normalizePriority(req.body.priority)
-  const ownerEstimateHours = normalizeHours(req.body.owner_estimate_hours)
   const description = normalizeText(req.body.description, 2000)
 
   if (demandId && !/^REQ\d{3,}$/.test(demandId)) {
@@ -198,6 +264,10 @@ const createDemand = async (req, res) => {
     return res.status(400).json({ success: false, message: '需求名称不能为空' })
   }
 
+  if (ownerUserIdRaw !== undefined && ownerUserIdRaw !== null && ownerUserIdRaw !== '' && !parsedOwnerUserId) {
+    return res.status(400).json({ success: false, message: 'owner_user_id 无效' })
+  }
+
   if (!ownerUserId) {
     return res.status(400).json({ success: false, message: 'owner_user_id 无效' })
   }
@@ -205,9 +275,17 @@ const createDemand = async (req, res) => {
   if (businessGroupCode === '') {
     return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
   }
+  if (
+    expectedReleaseDateRaw !== undefined &&
+    expectedReleaseDateRaw !== null &&
+    String(expectedReleaseDateRaw).trim() !== '' &&
+    !expectedReleaseDate
+  ) {
+    return res.status(400).json({ success: false, message: 'expected_release_date 格式错误，需为 YYYY-MM-DD' })
+  }
 
-  if (ownerEstimateHours !== null && ownerEstimateHours < 0) {
-    return res.status(400).json({ success: false, message: 'owner_estimate_hours 不能小于 0' })
+  if (req.body.owner_estimate_hours !== undefined) {
+    return res.status(400).json({ success: false, message: '需求池接口不允许传 owner_estimate_hours' })
   }
 
   try {
@@ -228,9 +306,9 @@ const createDemand = async (req, res) => {
       name,
       ownerUserId,
       businessGroupCode,
+      expectedReleaseDate: expectedReleaseDate || null,
       status,
       priority,
-      ownerEstimateHours,
       description,
       createdBy: req.user.id,
     })
@@ -262,17 +340,48 @@ const updateDemand = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
+    if (!canEditDemand(req, existing)) {
+      return res.status(403).json({ success: false, message: '仅需求负责人或管理员可修改需求' })
+    }
+
+    if (req.body.owner_estimate_hours !== undefined) {
+      return res.status(400).json({ success: false, message: '需求池接口不允许传 owner_estimate_hours' })
+    }
+
+    const canTransferOwner = canTransferDemandOwner(req)
+    const parsedOwnerUserId =
+      req.body.owner_user_id === undefined ? undefined : toPositiveInt(req.body.owner_user_id)
+    if (req.body.owner_user_id !== undefined && !parsedOwnerUserId) {
+      return res.status(400).json({ success: false, message: 'owner_user_id 无效' })
+    }
+    if (
+      parsedOwnerUserId !== undefined &&
+      Number(parsedOwnerUserId) !== Number(existing.owner_user_id) &&
+      !canTransferOwner
+    ) {
+      return res.status(403).json({ success: false, message: '仅管理员可转交需求负责人' })
+    }
+
     const name = normalizeText(req.body.name, 200) || existing.name
-    const ownerUserId = toPositiveInt(req.body.owner_user_id) || existing.owner_user_id
+    const ownerUserId = parsedOwnerUserId === undefined ? existing.owner_user_id : parsedOwnerUserId
     const status = req.body.status ? normalizeStatus(req.body.status) : existing.status
     const priority = req.body.priority ? normalizePriority(req.body.priority) : existing.priority
     const parsedBusinessGroupCode = normalizeBusinessGroupCode(req.body.business_group_code)
-    const ownerEstimateHours =
-      req.body.owner_estimate_hours === undefined
-        ? existing.owner_estimate_hours
-        : normalizeHours(req.body.owner_estimate_hours)
     const businessGroupCode =
       parsedBusinessGroupCode === undefined ? existing.business_group_code : parsedBusinessGroupCode
+    let expectedReleaseDate = existing.expected_release_date || null
+    if (req.body.expected_release_date !== undefined) {
+      const raw = req.body.expected_release_date
+      if (raw === null || String(raw).trim() === '') {
+        expectedReleaseDate = null
+      } else {
+        const normalized = normalizeDate(raw)
+        if (!normalized) {
+          return res.status(400).json({ success: false, message: 'expected_release_date 格式错误，需为 YYYY-MM-DD' })
+        }
+        expectedReleaseDate = normalized
+      }
+    }
     const description =
       req.body.description === undefined
         ? existing.description
@@ -298,10 +407,6 @@ const updateDemand = async (req, res) => {
       }
     }
 
-    if (ownerEstimateHours !== null && ownerEstimateHours < 0) {
-      return res.status(400).json({ success: false, message: 'owner_estimate_hours 不能小于 0' })
-    }
-
     const completedAt = isDemandOpen(status)
       ? null
       : req.body.completed_at || existing.completed_at || new Date()
@@ -310,9 +415,9 @@ const updateDemand = async (req, res) => {
       name,
       ownerUserId,
       businessGroupCode,
+      expectedReleaseDate,
       status,
       priority,
-      ownerEstimateHours,
       description,
       completedAt,
     })
@@ -321,6 +426,50 @@ const updateDemand = async (req, res) => {
     return res.json({ success: true, message: '需求更新成功', data: updated })
   } catch (err) {
     console.error('更新需求失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const deleteDemand = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  if (!canTransferDemandOwner(req)) {
+    return res.status(403).json({ success: false, message: '仅管理员可删除需求' })
+  }
+
+  try {
+    const existing = await Work.findDemandById(demandId)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const result = await Work.deleteDemand(demandId)
+    if (result.mode === 'ARCHIVED') {
+      return res.json({
+        success: true,
+        message: `需求已归档（存在 ${result.related_log_count} 条关联工作记录，未做物理删除）`,
+        data: {
+          demand_id: demandId,
+          mode: result.mode,
+          related_log_count: result.related_log_count,
+        },
+      })
+    }
+
+    return res.json({
+      success: true,
+      message: '需求已删除',
+      data: {
+        demand_id: demandId,
+        mode: result.mode,
+        related_log_count: result.related_log_count,
+      },
+    })
+  } catch (err) {
+    console.error('删除需求失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -759,6 +908,7 @@ module.exports = {
   listDemands,
   createDemand,
   updateDemand,
+  deleteDemand,
   listLogs,
   createLog,
   updateLog,

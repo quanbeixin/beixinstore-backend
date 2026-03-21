@@ -9,6 +9,7 @@ const {
   listDemands,
   createDemand,
   updateDemand,
+  deleteDemand,
   listLogs,
   createLog,
   updateLog,
@@ -34,7 +35,8 @@ router.post('/item-types', authMiddleware.requirePermission('demand.manage'), cr
 
 router.get('/demands', authMiddleware.requirePermission('demand.view'), listDemands)
 router.post('/demands', authMiddleware.requirePermission('demand.manage'), createDemand)
-router.put('/demands/:id', authMiddleware.requirePermission('demand.manage'), updateDemand)
+router.put('/demands/:id', authMiddleware.requirePermission('demand.view'), updateDemand)
+router.delete('/demands/:id', authMiddleware.requirePermission('demand.view'), deleteDemand)
 
 router.get('/logs', authMiddleware.requirePermission('worklog.view.self'), listLogs)
 router.post('/logs', authMiddleware.requirePermission('worklog.create'), createLog)

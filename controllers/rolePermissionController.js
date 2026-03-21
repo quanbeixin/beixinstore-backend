@@ -19,6 +19,17 @@ function normalizeRoleKeys(value) {
   return [...new Set(value.map((item) => String(item || '').trim()).filter(Boolean))]
 }
 
+function normalizeDepartmentIds(value) {
+  if (!Array.isArray(value)) return []
+  return [
+    ...new Set(
+      value
+        .map((item) => toPositiveInt(item))
+        .filter((item) => Number.isInteger(item) && item > 0),
+    ),
+  ]
+}
+
 function normalizeScopeType(value, fallback = 'ALL') {
   const raw = String(value || fallback).trim().toUpperCase()
   return RolePermission.MENU_SCOPE_TYPES[raw] ? raw : fallback
@@ -140,6 +151,9 @@ const updateMenuVisibilityRule = async (req, res) => {
   const menuKey = normalizeMenuKey(req.body.menu_key)
   const roleKeys = normalizeRoleKeys(req.body.role_keys)
   const departmentId = toPositiveInt(req.body.department_id)
+  const payloadDepartmentIds = normalizeDepartmentIds(req.body.department_ids)
+  const departmentIds =
+    payloadDepartmentIds.length > 0 ? payloadDepartmentIds : normalizeDepartmentIds([departmentId])
 
   // Backward compatibility:
   // old payload only had role_keys. role_keys present => ROLE, otherwise ALL.
@@ -158,6 +172,7 @@ const updateMenuVisibilityRule = async (req, res) => {
     const savedRule = await RolePermission.setMenuVisibilityRule(menuKey, {
       scope_type: scopeType,
       department_id: departmentId,
+      department_ids: departmentIds,
       role_keys: roleKeys,
     })
 

@@ -29,6 +29,17 @@ function normalizeRoleKeys(value) {
   return [...new Set(value.map((item) => String(item || '').trim()).filter(Boolean))]
 }
 
+function normalizeDepartmentIds(value) {
+  if (!Array.isArray(value)) return []
+  return [
+    ...new Set(
+      value
+        .map((item) => toPositiveInt(item))
+        .filter((item) => Number.isInteger(item) && item > 0),
+    ),
+  ]
+}
+
 function normalizeScopeType(value) {
   const scopeType = String(value || MENU_SCOPE_TYPES.ALL).trim().toUpperCase()
   return MENU_SCOPE_SET.has(scopeType) ? scopeType : MENU_SCOPE_TYPES.ALL
@@ -43,6 +54,23 @@ function parseRoleKeysJson(value) {
     try {
       const parsed = JSON.parse(value)
       return normalizeRoleKeys(parsed)
+    } catch {
+      return []
+    }
+  }
+
+  return []
+}
+
+function parseDepartmentIdsJson(value) {
+  if (Array.isArray(value)) {
+    return normalizeDepartmentIds(value)
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return normalizeDepartmentIds(parsed)
     } catch {
       return []
     }
@@ -83,6 +111,7 @@ async function ensureMenuVisibilityTable() {
       menu_key VARCHAR(128) NOT NULL,
       scope_type VARCHAR(32) NOT NULL DEFAULT 'ALL',
       department_id INT DEFAULT NULL,
+      department_ids_json JSON DEFAULT NULL,
       role_keys_json JSON DEFAULT NULL,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       PRIMARY KEY (menu_key),
@@ -102,6 +131,12 @@ async function ensureMenuVisibilityTable() {
 
   if (!(await columnExists('menu_visibility_rules', 'role_keys_json'))) {
     await pool.query('ALTER TABLE menu_visibility_rules ADD COLUMN role_keys_json JSON NULL AFTER department_id')
+  }
+
+  if (!(await columnExists('menu_visibility_rules', 'department_ids_json'))) {
+    await pool.query(
+      'ALTER TABLE menu_visibility_rules ADD COLUMN department_ids_json JSON NULL AFTER department_id',
+    )
   }
 
   if (!(await indexExists('menu_visibility_rules', 'idx_scope_dept'))) {
@@ -243,17 +278,26 @@ const RolePermission = {
     await ensureMenuVisibilityTable()
 
     const [rows] = await pool.query(
-      `SELECT menu_key, scope_type, department_id, role_keys_json
+      `SELECT menu_key, scope_type, department_id, department_ids_json, role_keys_json
        FROM menu_visibility_rules
        ORDER BY menu_key ASC`,
     )
 
-    return rows.map((row) => ({
-      menu_key: String(row.menu_key || ''),
-      scope_type: normalizeScopeType(row.scope_type),
-      department_id: toPositiveInt(row.department_id),
-      role_keys: parseRoleKeysJson(row.role_keys_json),
-    }))
+    return rows.map((row) => {
+      const departmentIdsFromJson = parseDepartmentIdsJson(row.department_ids_json)
+      const departmentIds =
+        departmentIdsFromJson.length > 0
+          ? departmentIdsFromJson
+          : normalizeDepartmentIds([toPositiveInt(row.department_id)])
+
+      return {
+        menu_key: String(row.menu_key || ''),
+        scope_type: normalizeScopeType(row.scope_type),
+        department_id: departmentIds[0] || null,
+        department_ids: departmentIds,
+        role_keys: parseRoleKeysJson(row.role_keys_json),
+      }
+    })
   },
 
   async setMenuVisibilityRule(menuKey, payload = {}) {
@@ -262,7 +306,10 @@ const RolePermission = {
     const normalizedMenuKey = String(menuKey || '').trim()
     const scopeType = normalizeScopeType(payload.scope_type)
     const roleKeys = normalizeRoleKeys(payload.role_keys)
-    const departmentId = toPositiveInt(payload.department_id)
+    const payloadDepartmentIds = normalizeDepartmentIds(payload.department_ids)
+    const legacyDepartmentId = toPositiveInt(payload.department_id)
+    const departmentIds =
+      payloadDepartmentIds.length > 0 ? payloadDepartmentIds : normalizeDepartmentIds([legacyDepartmentId])
 
     if (!normalizedMenuKey) {
       const err = new Error('menu_key 不能为空')
@@ -276,6 +323,7 @@ const RolePermission = {
         menu_key: normalizedMenuKey,
         scope_type: MENU_SCOPE_TYPES.ALL,
         department_id: null,
+        department_ids: [],
         role_keys: [],
       }
     }
@@ -305,14 +353,23 @@ const RolePermission = {
     }
 
     if (scopeType === MENU_SCOPE_TYPES.DEPT_MEMBERS || scopeType === MENU_SCOPE_TYPES.DEPT_MANAGERS) {
-      if (!departmentId) {
+      if (departmentIds.length === 0) {
         const err = new Error(`${scopeType} 范围必须配置 department_id`)
         err.code = 'INVALID_DEPARTMENT_ID'
         throw err
       }
 
-      const [deptRows] = await pool.query('SELECT id FROM departments WHERE id = ? LIMIT 1', [departmentId])
-      if (deptRows.length === 0) {
+      const [deptRows] = await pool.query(
+        `SELECT id
+         FROM departments
+         WHERE id IN (${departmentIds.map(() => '?').join(',')})`,
+        departmentIds,
+      )
+      const foundDepartmentIdSet = new Set(
+        deptRows.map((row) => toPositiveInt(row.id)).filter((id) => Number.isInteger(id)),
+      )
+      const missingDepartmentIds = departmentIds.filter((id) => !foundDepartmentIdSet.has(id))
+      if (missingDepartmentIds.length > 0) {
         const err = new Error('部门不存在')
         err.code = 'INVALID_DEPARTMENT_ID'
         throw err
@@ -320,25 +377,35 @@ const RolePermission = {
     }
 
     const roleKeysJson = scopeType === MENU_SCOPE_TYPES.ROLE ? JSON.stringify(roleKeys) : null
+    const departmentIdsValue =
+      scopeType === MENU_SCOPE_TYPES.DEPT_MEMBERS || scopeType === MENU_SCOPE_TYPES.DEPT_MANAGERS
+        ? departmentIds
+        : []
     const departmentIdValue =
       scopeType === MENU_SCOPE_TYPES.DEPT_MEMBERS || scopeType === MENU_SCOPE_TYPES.DEPT_MANAGERS
-        ? departmentId
+        ? departmentIdsValue[0] || null
+        : null
+    const departmentIdsJson =
+      scopeType === MENU_SCOPE_TYPES.DEPT_MEMBERS || scopeType === MENU_SCOPE_TYPES.DEPT_MANAGERS
+        ? JSON.stringify(departmentIdsValue)
         : null
 
     await pool.query(
-      `INSERT INTO menu_visibility_rules (menu_key, scope_type, department_id, role_keys_json)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO menu_visibility_rules (menu_key, scope_type, department_id, department_ids_json, role_keys_json)
+       VALUES (?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          scope_type = VALUES(scope_type),
          department_id = VALUES(department_id),
+         department_ids_json = VALUES(department_ids_json),
          role_keys_json = VALUES(role_keys_json)`,
-      [normalizedMenuKey, scopeType, departmentIdValue, roleKeysJson],
+      [normalizedMenuKey, scopeType, departmentIdValue, departmentIdsJson, roleKeysJson],
     )
 
     return {
       menu_key: normalizedMenuKey,
       scope_type: scopeType,
       department_id: departmentIdValue,
+      department_ids: departmentIdsValue,
       role_keys: scopeType === MENU_SCOPE_TYPES.ROLE ? roleKeys : [],
     }
   },
@@ -392,13 +459,20 @@ const RolePermission = {
 
     rules.forEach((rule) => {
       let allowed = true
+      const ruleDepartmentIdSet = new Set(normalizeDepartmentIds(rule?.department_ids || [rule?.department_id]))
 
       if (rule.scope_type === MENU_SCOPE_TYPES.ROLE) {
         allowed = rule.role_keys.some((roleKey) => roleKeys.includes(roleKey))
       } else if (rule.scope_type === MENU_SCOPE_TYPES.DEPT_MEMBERS) {
-        allowed = Boolean(userDepartmentId) && userDepartmentId === rule.department_id
+        allowed = Boolean(userDepartmentId) && ruleDepartmentIdSet.has(userDepartmentId)
       } else if (rule.scope_type === MENU_SCOPE_TYPES.DEPT_MANAGERS) {
-        allowed = Boolean(rule.department_id) && managedDepartmentIdSet.has(rule.department_id)
+        allowed = false
+        for (const managedDepartmentId of managedDepartmentIdSet) {
+          if (ruleDepartmentIdSet.has(managedDepartmentId)) {
+            allowed = true
+            break
+          }
+        }
       }
 
       accessMap[rule.menu_key] = Boolean(allowed)

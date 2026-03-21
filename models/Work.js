@@ -459,8 +459,11 @@ const Work = {
     keyword = '',
     status = '',
     priority = '',
+    priorityOrder = '',
     businessGroupCode = '',
     ownerUserId = null,
+    updatedStartDate = '',
+    updatedEndDate = '',
     mineUserId = null,
   } = {}) {
     const offset = (page - 1) * pageSize
@@ -492,6 +495,16 @@ const Work = {
       params.push(ownerUserId)
     }
 
+    if (updatedStartDate) {
+      conditions.push('d.updated_at >= ?')
+      params.push(`${updatedStartDate} 00:00:00`)
+    }
+
+    if (updatedEndDate) {
+      conditions.push('d.updated_at < DATE_ADD(?, INTERVAL 1 DAY)')
+      params.push(updatedEndDate)
+    }
+
     if (mineUserId) {
       conditions.push(
         `(d.owner_user_id = ? OR EXISTS (
@@ -502,29 +515,26 @@ const Work = {
     }
 
     const whereSql = conditions.join(' AND ')
+    const normalizedPriorityOrder = String(priorityOrder || '').trim().toLowerCase() === 'desc' ? 'DESC' : 'ASC'
     const listSql = `
       SELECT
         d.id,
         d.name,
         d.owner_user_id,
-        u.username AS owner_name,
+        COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
         d.business_group_code,
         bg.item_name AS business_group_name,
+        DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
         d.status,
         d.priority,
-        d.owner_estimate_hours,
         d.description,
         d.created_by,
-        d.created_at,
-        d.updated_at,
-        d.completed_at,
+        DATE_FORMAT(d.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+        DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+        DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,
         COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,
         COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,
-        COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours,
-        CASE
-          WHEN d.owner_estimate_hours IS NULL THEN NULL
-          ELSE ROUND((COALESCE(ta.total_actual_hours, 0) + COALESCE(lr.remaining_hours, 0)) - d.owner_estimate_hours, 1)
-        END AS deviation_hours
+        COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours
       FROM work_demands d
       LEFT JOIN users u ON u.id = d.owner_user_id
       LEFT JOIN config_dict_items bg
@@ -556,7 +566,7 @@ const Work = {
           WHEN 'P1' THEN 1
           WHEN 'P2' THEN 2
           ELSE 3
-        END ASC,
+        END ${normalizedPriorityOrder},
         d.updated_at DESC
       LIMIT ? OFFSET ?`
 
@@ -577,17 +587,17 @@ const Work = {
          d.id,
          d.name,
          d.owner_user_id,
-         u.username AS owner_name,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
          d.business_group_code,
          bg.item_name AS business_group_name,
+         DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
          d.status,
          d.priority,
-         d.owner_estimate_hours,
          d.description,
          d.created_by,
-         d.created_at,
-         d.updated_at,
-         d.completed_at
+         DATE_FORMAT(d.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+         DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at
        FROM work_demands d
        LEFT JOIN users u ON u.id = d.owner_user_id
        LEFT JOIN config_dict_items bg
@@ -604,9 +614,9 @@ const Work = {
     name,
     ownerUserId,
     businessGroupCode = null,
+    expectedReleaseDate = null,
     status = 'TODO',
     priority = 'P2',
-    ownerEstimateHours = null,
     description = '',
     createdBy = null,
   }) {
@@ -617,16 +627,16 @@ const Work = {
       const finalDemandId = demandId || (await generateDemandId(conn))
       await conn.query(
         `INSERT INTO work_demands (
-          id, name, owner_user_id, business_group_code, status, priority, owner_estimate_hours, description, created_by
+          id, name, owner_user_id, business_group_code, expected_release_date, status, priority, description, created_by
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           finalDemandId,
           name,
           ownerUserId,
           businessGroupCode || null,
+          expectedReleaseDate || null,
           normalizeStatus(status),
           normalizePriority(priority),
-          normalizeDecimal(ownerEstimateHours),
           description || null,
           createdBy,
         ],
@@ -648,9 +658,9 @@ const Work = {
       name,
       ownerUserId,
       businessGroupCode = null,
+      expectedReleaseDate = null,
       status,
       priority,
-      ownerEstimateHours,
       description,
       completedAt,
     },
@@ -661,9 +671,9 @@ const Work = {
          name = ?,
          owner_user_id = ?,
          business_group_code = ?,
+         expected_release_date = ?,
          status = ?,
          priority = ?,
-         owner_estimate_hours = ?,
          description = ?,
          completed_at = ?
        WHERE id = ?`,
@@ -671,15 +681,52 @@ const Work = {
         name,
         ownerUserId,
         businessGroupCode || null,
+        expectedReleaseDate || null,
         normalizeStatus(status),
         normalizePriority(priority),
-        normalizeDecimal(ownerEstimateHours),
         description || null,
         completedAt || null,
         demandId,
       ],
     )
     return result.affectedRows
+  },
+
+  async countLogsByDemandId(demandId) {
+    const [[row]] = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM work_logs
+       WHERE demand_id = ?`,
+      [demandId],
+    )
+    return Number(row?.total || 0)
+  },
+
+  async deleteDemand(demandId) {
+    const relatedLogCount = await this.countLogsByDemandId(demandId)
+
+    if (relatedLogCount > 0) {
+      const [result] = await pool.query(
+        `UPDATE work_demands
+         SET
+           status = 'CANCELLED',
+           completed_at = COALESCE(completed_at, NOW())
+         WHERE id = ?`,
+        [demandId],
+      )
+      return {
+        mode: 'ARCHIVED',
+        affected_rows: Number(result?.affectedRows || 0),
+        related_log_count: relatedLogCount,
+      }
+    }
+
+    const [result] = await pool.query('DELETE FROM work_demands WHERE id = ?', [demandId])
+    return {
+      mode: 'DELETED',
+      affected_rows: Number(result?.affectedRows || 0),
+      related_log_count: 0,
+    }
   },
 
   async listLogs({
@@ -747,7 +794,7 @@ const Work = {
       SELECT
         l.id,
         l.user_id,
-        u.username,
+        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
         DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
         l.item_type_id,
         COALESCE(t.type_key, '-') AS item_type_key,
@@ -764,8 +811,8 @@ const Work = {
         DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
         d.name AS demand_name,
-        l.created_at,
-        l.updated_at
+        DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+        DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
@@ -805,8 +852,8 @@ const Work = {
          l.phase_key,
          DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
          DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
-         l.created_at,
-         l.updated_at
+         DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
        FROM work_logs l
        WHERE l.id = ?`,
       [id],
@@ -1111,7 +1158,7 @@ const Work = {
       ;[noFillMembers] = await pool.query(
         `SELECT
            u.id,
-           u.username
+           COALESCE(NULLIF(u.real_name, ''), u.username) AS username
          FROM users u
          LEFT JOIN (
            SELECT DISTINCT user_id
@@ -1147,7 +1194,7 @@ const Work = {
     const ownerEstimateSql = `SELECT
        l.id,
        l.user_id,
-       u.username,
+       COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
        DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
        COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
        l.description,
@@ -1183,7 +1230,7 @@ const Work = {
     const ownerEstimateFallbackSql = `SELECT
        l.id,
        l.user_id,
-       u.username,
+       COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
        DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
        COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
        l.description,

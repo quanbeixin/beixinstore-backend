@@ -17,15 +17,42 @@ function normalizeRoleIds(value) {
   return [...new Set(value.map((item) => Number(item)).filter((num) => Number.isInteger(num) && num > 0))]
 }
 
+function normalizeRealName(value) {
+  return String(value || '').trim().slice(0, 32)
+}
+
+function normalizeEmail(value) {
+  if (value === undefined) return undefined
+  const email = String(value || '').trim()
+  return email || null
+}
+
+function normalizeSortBy(value) {
+  const sortBy = String(value || '').trim().toLowerCase()
+  if (!sortBy) return 'real_name'
+  const allowList = new Set(['created_at', 'username', 'real_name'])
+  return allowList.has(sortBy) ? sortBy : 'real_name'
+}
+
+function normalizeSortOrder(value) {
+  const sortOrder = String(value || '').trim().toLowerCase()
+  if (sortOrder === 'asc' || sortOrder === 'desc') return sortOrder
+  return 'asc'
+}
+
 // 获取用户列表（支持分页和关键字搜索）
 const getUsers = async (req, res) => {
   const { page = 1, pageSize = 10, keyword = '' } = req.query
+  const sortBy = normalizeSortBy(req.query.sort_by)
+  const sortOrder = normalizeSortOrder(req.query.sort_order)
 
   try {
     const { rows, total } = await User.findAll({
       page: parseInt(page, 10),
       pageSize: parseInt(pageSize, 10),
       keyword,
+      sortBy,
+      sortOrder,
     })
 
     res.json({
@@ -63,12 +90,22 @@ const getUserById = async (req, res) => {
 // 创建新用户（POST /api/users）
 const createUser = async (req, res) => {
   const { username, password, email, department_id, role_ids, status_code } = req.body
+  const realName = normalizeRealName(req.body.real_name)
+  const normalizedEmail = normalizeEmail(email)
 
-  if (!username || !password) {
-    return res.status(400).json({ success: false, message: '用户名和密码不能为空' })
+  if (!username || !password || !realName) {
+    return res.status(400).json({ success: false, message: '用户名、真实姓名和密码不能为空' })
+  }
+
+  if (realName.length < 2 || realName.length > 32) {
+    return res.status(400).json({ success: false, message: '真实姓名长度需在 2-32 个字符之间' })
   }
 
   try {
+    if (normalizedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      return res.status(400).json({ success: false, message: '邮箱格式不正确' })
+    }
+
     const departmentId = normalizeOptionalId(department_id)
     if (department_id !== undefined && department_id !== null && department_id !== '' && !departmentId) {
       return res.status(400).json({ success: false, message: 'department_id 无效' })
@@ -87,12 +124,16 @@ const createUser = async (req, res) => {
     if (existing) {
       return res.status(409).json({ success: false, message: '用户名已存在' })
     }
+    if (normalizedEmail && (await User.isEmailTaken(normalizedEmail))) {
+      return res.status(409).json({ success: false, message: '邮箱已被占用' })
+    }
 
     const hashedPassword = await bcrypt.hash(password, 10)
     const userId = await User.create({
       username,
+      real_name: realName,
       password: hashedPassword,
-      email,
+      email: normalizedEmail,
       department_id: departmentId,
       status_code: normalizeStatusCode(status_code),
     })
@@ -119,6 +160,9 @@ const createUser = async (req, res) => {
 const updateUser = async (req, res) => {
   const { id } = req.params
   const { email, department_id, role_ids, status_code } = req.body
+  const realNameRaw = req.body.real_name
+  const realName = normalizeRealName(realNameRaw)
+  const normalizedEmail = normalizeEmail(email)
 
   try {
     const departmentId = normalizeOptionalId(department_id)
@@ -140,8 +184,25 @@ const updateUser = async (req, res) => {
       return res.status(404).json({ success: false, message: '用户不存在' })
     }
 
+    const nextEmail = normalizedEmail === undefined ? user.email || null : normalizedEmail
+    if (nextEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextEmail)) {
+      return res.status(400).json({ success: false, message: '邮箱格式不正确' })
+    }
+    if (nextEmail && nextEmail !== (user.email || null) && (await User.isEmailTaken(nextEmail, Number(id)))) {
+      return res.status(409).json({ success: false, message: '邮箱已被占用' })
+    }
+
+    const nextRealName = realNameRaw === undefined ? String(user.real_name || '').trim() : realName
+    if (!nextRealName) {
+      return res.status(400).json({ success: false, message: '真实姓名不能为空' })
+    }
+    if (nextRealName.length < 2 || nextRealName.length > 32) {
+      return res.status(400).json({ success: false, message: '真实姓名长度需在 2-32 个字符之间' })
+    }
+
     await User.update(id, {
-      email,
+      real_name: nextRealName,
+      email: nextEmail,
       department_id: departmentId,
       status_code: normalizeStatusCode(status_code),
     })
@@ -154,6 +215,9 @@ const updateUser = async (req, res) => {
     return res.json({ success: true, message: '更新成功', data: updated })
   } catch (err) {
     console.error('更新用户失败:', err)
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: '邮箱已被占用' })
+    }
     if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.code === 'ER_ROW_IS_REFERENCED_2') {
       return res.status(400).json({ success: false, message: '部门或角色数据无效，请刷新后重试' })
     }
