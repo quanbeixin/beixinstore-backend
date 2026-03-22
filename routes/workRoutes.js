@@ -14,6 +14,9 @@ const {
   createLog,
   updateLog,
   updateLogOwnerEstimate,
+  getInsightFilterOptions,
+  getDemandInsight,
+  getMemberInsight,
   getMyWorkbench,
   getOwnerWorkbench,
   getMorningStandupBoard,
@@ -47,6 +50,10 @@ router.put(
   authMiddleware.requireAnyPermission(['workbench.view.owner', 'workbench.view.self']),
   updateLogOwnerEstimate,
 )
+
+router.get('/insight/filters', getInsightFilterOptions)
+router.get('/insight/demand', getDemandInsight)
+router.get('/insight/member', getMemberInsight)
 
 router.get('/workbench/me', authMiddleware.requirePermission('workbench.view.self'), getMyWorkbench)
 router.get('/workbench/morning', getMorningStandupBoard)

@@ -50,6 +50,59 @@ function normalizeDateTime(value) {
   return ''
 }
 
+function formatDate(date) {
+  const d = new Date(date)
+  if (Number.isNaN(d.getTime())) return ''
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
+
+function addDays(date, days) {
+  const d = new Date(date)
+  if (Number.isNaN(d.getTime())) return null
+  d.setDate(d.getDate() + Number(days || 0))
+  return d
+}
+
+function resolveInsightDateRange(startRaw, endRaw) {
+  const startProvided = startRaw !== undefined && startRaw !== null && String(startRaw).trim() !== ''
+  const endProvided = endRaw !== undefined && endRaw !== null && String(endRaw).trim() !== ''
+  const normalizedStart = startProvided ? normalizeDate(startRaw) : ''
+  const normalizedEnd = endProvided ? normalizeDate(endRaw) : ''
+
+  if (startProvided && !normalizedStart) {
+    return { error: 'start_date 格式错误，需为 YYYY-MM-DD' }
+  }
+  if (endProvided && !normalizedEnd) {
+    return { error: 'end_date 格式错误，需为 YYYY-MM-DD' }
+  }
+
+  if (normalizedStart && normalizedEnd) {
+    if (normalizedStart > normalizedEnd) {
+      return { error: '时间范围不合法：start_date 不能大于 end_date' }
+    }
+    return { startDate: normalizedStart, endDate: normalizedEnd }
+  }
+
+  if (normalizedStart && !normalizedEnd) {
+    const derivedEnd = formatDate(addDays(new Date(normalizedStart), 30))
+    return { startDate: normalizedStart, endDate: derivedEnd || normalizedStart }
+  }
+
+  if (!normalizedStart && normalizedEnd) {
+    const derivedStart = formatDate(addDays(new Date(normalizedEnd), -30))
+    return { startDate: derivedStart || normalizedEnd, endDate: normalizedEnd }
+  }
+
+  const today = new Date()
+  return {
+    startDate: formatDate(addDays(today, -30)),
+    endDate: formatDate(today),
+  }
+}
+
 function normalizeStatus(value) {
   const status = String(value || 'TODO').trim().toUpperCase()
   return Work.DEMAND_STATUSES.includes(status) ? status : 'TODO'
@@ -105,6 +158,12 @@ function canEditDemand(req, demand) {
   if (!demand) return false
   if (canTransferDemandOwner(req)) return true
   return Number(req.user?.id) === Number(demand.owner_user_id)
+}
+
+function ensureSuperAdmin(req, res) {
+  if (req.userAccess?.is_super_admin) return true
+  res.status(403).json({ success: false, message: '仅超级管理员可访问效能总览' })
+  return false
 }
 
 const listWorkItemTypes = async (req, res) => {
@@ -847,6 +906,112 @@ const updateLogOwnerEstimate = async (req, res) => {
   }
 }
 
+const getInsightFilterOptions = async (req, res) => {
+  if (!ensureSuperAdmin(req, res)) return
+
+  try {
+    const data = await Work.getInsightFilterOptions()
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取效能筛选项失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getDemandInsight = async (req, res) => {
+  if (!ensureSuperAdmin(req, res)) return
+
+  const { startDate, endDate, error } = resolveInsightDateRange(req.query.start_date, req.query.end_date)
+  if (error) {
+    return res.status(400).json({ success: false, message: error })
+  }
+
+  const departmentId = toPositiveInt(req.query.department_id)
+  if (req.query.department_id !== undefined && req.query.department_id !== '' && !departmentId) {
+    return res.status(400).json({ success: false, message: 'department_id 无效' })
+  }
+
+  const ownerUserId = toPositiveInt(req.query.owner_user_id)
+  if (req.query.owner_user_id !== undefined && req.query.owner_user_id !== '' && !ownerUserId) {
+    return res.status(400).json({ success: false, message: 'owner_user_id 无效' })
+  }
+
+  const memberUserId = toPositiveInt(req.query.member_user_id)
+  if (req.query.member_user_id !== undefined && req.query.member_user_id !== '' && !memberUserId) {
+    return res.status(400).json({ success: false, message: 'member_user_id 无效' })
+  }
+
+  const businessGroupCode = normalizeBusinessGroupCode(req.query.business_group_code)
+  if (businessGroupCode === '') {
+    return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
+  }
+
+  const keyword = normalizeText(req.query.keyword, 100)
+
+  try {
+    const data = await Work.getDemandInsight({
+      startDate,
+      endDate,
+      departmentId,
+      businessGroupCode: businessGroupCode || '',
+      ownerUserId,
+      memberUserId,
+      keyword,
+    })
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取需求投入看板失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getMemberInsight = async (req, res) => {
+  if (!ensureSuperAdmin(req, res)) return
+
+  const { startDate, endDate, error } = resolveInsightDateRange(req.query.start_date, req.query.end_date)
+  if (error) {
+    return res.status(400).json({ success: false, message: error })
+  }
+
+  const departmentId = toPositiveInt(req.query.department_id)
+  if (req.query.department_id !== undefined && req.query.department_id !== '' && !departmentId) {
+    return res.status(400).json({ success: false, message: 'department_id 无效' })
+  }
+
+  const ownerUserId = toPositiveInt(req.query.owner_user_id)
+  if (req.query.owner_user_id !== undefined && req.query.owner_user_id !== '' && !ownerUserId) {
+    return res.status(400).json({ success: false, message: 'owner_user_id 无效' })
+  }
+
+  const memberUserId = toPositiveInt(req.query.member_user_id)
+  if (req.query.member_user_id !== undefined && req.query.member_user_id !== '' && !memberUserId) {
+    return res.status(400).json({ success: false, message: 'member_user_id 无效' })
+  }
+
+  const businessGroupCode = normalizeBusinessGroupCode(req.query.business_group_code)
+  if (businessGroupCode === '') {
+    return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
+  }
+
+  const keyword = normalizeText(req.query.keyword, 100)
+
+  try {
+    const data = await Work.getMemberInsight({
+      startDate,
+      endDate,
+      departmentId,
+      businessGroupCode: businessGroupCode || '',
+      ownerUserId,
+      memberUserId,
+      keyword,
+    })
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取成员工作节奏看板失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getMyWorkbench = async (req, res) => {
   try {
     const data = await Work.getMyWorkbench(req.user.id)
@@ -933,6 +1098,9 @@ module.exports = {
   createLog,
   updateLog,
   updateLogOwnerEstimate,
+  getInsightFilterOptions,
+  getDemandInsight,
+  getMemberInsight,
   getMyWorkbench,
   getOwnerWorkbench,
   getMorningStandupBoard,

@@ -335,6 +335,120 @@ function isOwnerEstimateTargetRow(
   return teamSet.has(rowUserId)
 }
 
+function toDecimal1(value) {
+  const num = Number(value || 0)
+  if (!Number.isFinite(num)) return 0
+  return Number(num.toFixed(1))
+}
+
+function toPercent2(value) {
+  const num = Number(value || 0)
+  if (!Number.isFinite(num)) return 0
+  return Number(num.toFixed(2))
+}
+
+function calcVarianceRate(actualHours, estimateHours) {
+  const actual = Number(actualHours || 0)
+  const estimate = Number(estimateHours || 0)
+  if (!Number.isFinite(actual) || !Number.isFinite(estimate) || estimate <= 0) return null
+  return toPercent2(((actual - estimate) / estimate) * 100)
+}
+
+function buildDemandInsightWhere({
+  startDate,
+  endDate,
+  departmentId = null,
+  businessGroupCode = '',
+  ownerUserId = null,
+  memberUserId = null,
+  keyword = '',
+} = {}) {
+  const conditions = [
+    'l.demand_id IS NOT NULL',
+    "COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'",
+    'l.log_date >= ?',
+    'l.log_date <= ?',
+  ]
+  const params = [startDate, endDate]
+
+  if (departmentId) {
+    conditions.push('u.department_id = ?')
+    params.push(departmentId)
+  }
+
+  if (businessGroupCode) {
+    conditions.push('d.business_group_code = ?')
+    params.push(businessGroupCode)
+  }
+
+  if (ownerUserId) {
+    conditions.push('d.owner_user_id = ?')
+    params.push(ownerUserId)
+  }
+
+  if (memberUserId) {
+    conditions.push('l.user_id = ?')
+    params.push(memberUserId)
+  }
+
+  if (keyword) {
+    conditions.push(
+      `(l.demand_id LIKE ? OR COALESCE(d.name, '') LIKE ? OR COALESCE(pdi.item_name, l.phase_key, '') LIKE ? OR COALESCE(NULLIF(u.real_name, ''), u.username) LIKE ?)`,
+    )
+    params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
+  }
+
+  return {
+    whereSql: conditions.join(' AND '),
+    params,
+  }
+}
+
+function buildMemberInsightWhere({
+  startDate,
+  endDate,
+  departmentId = null,
+  businessGroupCode = '',
+  ownerUserId = null,
+  memberUserId = null,
+  keyword = '',
+} = {}) {
+  const conditions = ["COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'", 'l.log_date >= ?', 'l.log_date <= ?']
+  const params = [startDate, endDate]
+
+  if (departmentId) {
+    conditions.push('u.department_id = ?')
+    params.push(departmentId)
+  }
+
+  if (businessGroupCode) {
+    conditions.push('d.business_group_code = ?')
+    params.push(businessGroupCode)
+  }
+
+  if (ownerUserId) {
+    conditions.push('d.owner_user_id = ?')
+    params.push(ownerUserId)
+  }
+
+  if (memberUserId) {
+    conditions.push('l.user_id = ?')
+    params.push(memberUserId)
+  }
+
+  if (keyword) {
+    conditions.push(
+      `(COALESCE(NULLIF(u.real_name, ''), u.username) LIKE ? OR COALESCE(d.name, '') LIKE ? OR COALESCE(l.demand_id, '') LIKE ? OR COALESCE(l.description, '') LIKE ?)`,
+    )
+    params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
+  }
+
+  return {
+    whereSql: conditions.join(' AND '),
+    params,
+  }
+}
+
 const Work = {
   DEMAND_STATUSES,
   DEMAND_PRIORITIES,
@@ -1676,6 +1790,558 @@ const Work = {
       owner_estimate_pending_count: ownerEstimateItems.filter((item) => item.owner_estimate_hours === null).length,
       demand_risks: [],
       phase_risks: [],
+    }
+  },
+
+  async getInsightFilterOptions() {
+    const [departmentRows] = await pool.query(
+      `SELECT
+         d.id,
+         d.name
+       FROM departments d
+       WHERE COALESCE(d.enabled, 1) = 1
+       ORDER BY d.sort_order ASC, d.id ASC`,
+    )
+
+    const [ownerRows] = await pool.query(
+      `SELECT
+         u.id,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+         u.department_id,
+         COALESCE(d.name, CONCAT('部门#', u.department_id)) AS department_name
+       FROM users u
+       LEFT JOIN departments d ON d.id = u.department_id
+       WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+       ORDER BY u.id ASC`,
+    )
+
+    const [businessGroupRows] = await pool.query(
+      `SELECT
+         i.item_code AS code,
+         i.item_name AS name
+       FROM config_dict_items i
+       INNER JOIN config_dict_types t ON t.type_key = i.type_key
+       WHERE i.type_key = ?
+         AND t.enabled = 1
+         AND i.enabled = 1
+       ORDER BY i.sort_order ASC, i.id ASC`,
+      [BUSINESS_GROUP_DICT_KEY],
+    )
+
+    return {
+      departments: (departmentRows || []).map((item) => ({
+        id: Number(item.id),
+        name: item.name || `部门#${Number(item.id)}`,
+      })),
+      owners: (ownerRows || []).map((item) => ({
+        id: Number(item.id),
+        username: item.username || `用户${Number(item.id)}`,
+        department_id: toPositiveInt(item.department_id),
+        department_name: item.department_name || '-',
+      })),
+      business_groups: (businessGroupRows || []).map((item) => ({
+        code: item.code,
+        name: item.name || item.code,
+      })),
+    }
+  },
+
+  async getDemandInsight({
+    startDate,
+    endDate,
+    departmentId = null,
+    businessGroupCode = '',
+    ownerUserId = null,
+    memberUserId = null,
+    keyword = '',
+  } = {}) {
+    const { whereSql, params } = buildDemandInsightWhere({
+      startDate,
+      endDate,
+      departmentId,
+      businessGroupCode,
+      ownerUserId,
+      memberUserId,
+      keyword,
+    })
+
+    const demandSql = `
+      SELECT
+        l.demand_id,
+        COALESCE(d.name, l.demand_id) AS demand_name,
+        d.owner_user_id,
+        COALESCE(NULLIF(ou.real_name, ''), ou.username) AS owner_name,
+        d.business_group_code,
+        bg.item_name AS business_group_name,
+        COUNT(DISTINCT l.user_id) AS member_count,
+        COUNT(DISTINCT COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__')) AS phase_count,
+        ROUND(COALESCE(SUM(COALESCE(l.owner_estimate_hours, 0)), 0), 1) AS total_owner_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - COALESCE(l.owner_estimate_hours, 0)), 0), 1) AS variance_owner_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS variance_personal_hours,
+        SUM(CASE WHEN l.owner_estimate_hours IS NULL THEN 1 ELSE 0 END) AS unestimated_item_count,
+        DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
+      FROM work_logs l
+      INNER JOIN users u ON u.id = l.user_id
+      LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN users ou ON ou.id = d.owner_user_id
+      LEFT JOIN config_dict_items bg
+        ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
+       AND bg.item_code = d.business_group_code
+      LEFT JOIN config_dict_items pdi
+        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+       AND pdi.item_code = l.phase_key
+      WHERE ${whereSql}
+      GROUP BY
+        l.demand_id,
+        d.name,
+        d.owner_user_id,
+        COALESCE(NULLIF(ou.real_name, ''), ou.username),
+        d.business_group_code,
+        bg.item_name
+      ORDER BY total_actual_hours DESC, l.demand_id ASC
+      LIMIT 400`
+
+    const phaseSql = `
+      SELECT
+        l.demand_id,
+        COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__') AS phase_key,
+        COALESCE(pdi.item_name, NULLIF(l.phase_key, ''), '未分阶段') AS phase_name,
+        COUNT(DISTINCT l.user_id) AS member_count,
+        ROUND(COALESCE(SUM(COALESCE(l.owner_estimate_hours, 0)), 0), 1) AS total_owner_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - COALESCE(l.owner_estimate_hours, 0)), 0), 1) AS variance_owner_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS variance_personal_hours,
+        DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
+      FROM work_logs l
+      INNER JOIN users u ON u.id = l.user_id
+      LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN config_dict_items pdi
+        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+       AND pdi.item_code = l.phase_key
+      WHERE ${whereSql}
+      GROUP BY
+        l.demand_id,
+        COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__'),
+        COALESCE(pdi.item_name, NULLIF(l.phase_key, ''), '未分阶段')
+      ORDER BY l.demand_id ASC, total_actual_hours DESC
+      LIMIT 4000`
+
+    const participantSql = `
+      SELECT
+        l.demand_id,
+        COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__') AS phase_key,
+        l.user_id,
+        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+        ROUND(COALESCE(SUM(COALESCE(l.owner_estimate_hours, 0)), 0), 1) AS owner_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS personal_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS actual_hours,
+        DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
+      FROM work_logs l
+      INNER JOIN users u ON u.id = l.user_id
+      LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN config_dict_items pdi
+        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+       AND pdi.item_code = l.phase_key
+      WHERE ${whereSql}
+      GROUP BY
+        l.demand_id,
+        COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__'),
+        l.user_id,
+        COALESCE(NULLIF(u.real_name, ''), u.username)
+      ORDER BY l.demand_id ASC, phase_key ASC, actual_hours DESC
+      LIMIT 8000`
+
+    const [demandRows, phaseRows, participantRows] = await Promise.all([
+      pool.query(demandSql, params).then((r) => r[0] || []),
+      pool.query(phaseSql, params).then((r) => r[0] || []),
+      pool.query(participantSql, params).then((r) => r[0] || []),
+    ])
+
+    const phaseMap = new Map()
+    ;(phaseRows || []).forEach((row) => {
+      const demandId = row.demand_id
+      const normalizedPhaseKey = row.phase_key === '__NO_PHASE__' ? '' : row.phase_key
+      const key = `${demandId}__${row.phase_key}`
+      phaseMap.set(key, {
+        demand_id: demandId,
+        phase_key: normalizedPhaseKey,
+        phase_name: row.phase_name || normalizedPhaseKey || '未分阶段',
+        member_count: Number(row.member_count || 0),
+        total_owner_estimate_hours: toDecimal1(row.total_owner_estimate_hours),
+        total_personal_estimate_hours: toDecimal1(row.total_personal_estimate_hours),
+        total_actual_hours: toDecimal1(row.total_actual_hours),
+        variance_owner_hours: toDecimal1(row.variance_owner_hours),
+        variance_personal_hours: toDecimal1(row.variance_personal_hours),
+        variance_owner_rate: calcVarianceRate(row.total_actual_hours, row.total_owner_estimate_hours),
+        variance_personal_rate: calcVarianceRate(row.total_actual_hours, row.total_personal_estimate_hours),
+        last_log_date: row.last_log_date || null,
+        participants: [],
+      })
+    })
+
+    ;(participantRows || []).forEach((row) => {
+      const key = `${row.demand_id}__${row.phase_key}`
+      if (!phaseMap.has(key)) return
+      phaseMap.get(key).participants.push({
+        user_id: Number(row.user_id),
+        username: row.username || `用户${Number(row.user_id)}`,
+        owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
+        personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
+        actual_hours: toDecimal1(row.actual_hours),
+        variance_owner_hours: toDecimal1(
+          Number(row.actual_hours || 0) - Number(row.owner_estimate_hours || 0),
+        ),
+        variance_personal_hours: toDecimal1(
+          Number(row.actual_hours || 0) - Number(row.personal_estimate_hours || 0),
+        ),
+        variance_owner_rate: calcVarianceRate(row.actual_hours, row.owner_estimate_hours),
+        variance_personal_rate: calcVarianceRate(row.actual_hours, row.personal_estimate_hours),
+        last_log_date: row.last_log_date || null,
+      })
+    })
+
+    const demandPhaseMap = new Map()
+    for (const phase of phaseMap.values()) {
+      if (!demandPhaseMap.has(phase.demand_id)) {
+        demandPhaseMap.set(phase.demand_id, [])
+      }
+      demandPhaseMap.get(phase.demand_id).push(phase)
+    }
+
+    const demandList = (demandRows || []).map((row) => {
+      const demandId = row.demand_id
+      const phases = demandPhaseMap.get(demandId) || []
+      return {
+        demand_id: demandId,
+        demand_name: row.demand_name || demandId,
+        owner_user_id: toPositiveInt(row.owner_user_id),
+        owner_name: row.owner_name || '-',
+        business_group_code: row.business_group_code || null,
+        business_group_name: row.business_group_name || row.business_group_code || '-',
+        member_count: Number(row.member_count || 0),
+        phase_count: Number(row.phase_count || 0),
+        total_owner_estimate_hours: toDecimal1(row.total_owner_estimate_hours),
+        total_personal_estimate_hours: toDecimal1(row.total_personal_estimate_hours),
+        total_actual_hours: toDecimal1(row.total_actual_hours),
+        variance_owner_hours: toDecimal1(row.variance_owner_hours),
+        variance_personal_hours: toDecimal1(row.variance_personal_hours),
+        variance_owner_rate: calcVarianceRate(row.total_actual_hours, row.total_owner_estimate_hours),
+        variance_personal_rate: calcVarianceRate(row.total_actual_hours, row.total_personal_estimate_hours),
+        unestimated_item_count: Number(row.unestimated_item_count || 0),
+        last_log_date: row.last_log_date || null,
+        phases,
+      }
+    })
+
+    const uniqueMemberSet = new Set()
+    ;(participantRows || []).forEach((item) => {
+      const id = Number(item.user_id)
+      if (Number.isInteger(id) && id > 0) uniqueMemberSet.add(id)
+    })
+
+    const totalOwnerEstimateHours = toDecimal1(
+      demandList.reduce((sum, item) => sum + Number(item.total_owner_estimate_hours || 0), 0),
+    )
+    const totalPersonalEstimateHours = toDecimal1(
+      demandList.reduce((sum, item) => sum + Number(item.total_personal_estimate_hours || 0), 0),
+    )
+    const totalActualHours = toDecimal1(
+      demandList.reduce((sum, item) => sum + Number(item.total_actual_hours || 0), 0),
+    )
+    const totalVarianceOwnerHours = toDecimal1(totalActualHours - totalOwnerEstimateHours)
+    const totalVariancePersonalHours = toDecimal1(totalActualHours - totalPersonalEstimateHours)
+    const totalUnestimatedItems = demandList.reduce(
+      (sum, item) => sum + Number(item.unestimated_item_count || 0),
+      0,
+    )
+
+    return {
+      filters: {
+        start_date: startDate,
+        end_date: endDate,
+        department_id: departmentId,
+        business_group_code: businessGroupCode || null,
+        owner_user_id: ownerUserId,
+        member_user_id: memberUserId,
+        keyword: keyword || '',
+      },
+      summary: {
+        demand_count: demandList.length,
+        phase_count: phaseMap.size,
+        participant_count: uniqueMemberSet.size,
+        total_owner_estimate_hours: totalOwnerEstimateHours,
+        total_personal_estimate_hours: totalPersonalEstimateHours,
+        total_actual_hours: totalActualHours,
+        variance_owner_hours: totalVarianceOwnerHours,
+        variance_personal_hours: totalVariancePersonalHours,
+        variance_owner_rate: calcVarianceRate(totalActualHours, totalOwnerEstimateHours),
+        variance_personal_rate: calcVarianceRate(totalActualHours, totalPersonalEstimateHours),
+        unestimated_item_count: totalUnestimatedItems,
+      },
+      demand_list: demandList,
+    }
+  },
+
+  async getMemberInsight({
+    startDate,
+    endDate,
+    departmentId = null,
+    businessGroupCode = '',
+    ownerUserId = null,
+    memberUserId = null,
+    keyword = '',
+  } = {}) {
+    const userConditions = [`COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'`]
+    const userParams = []
+    if (departmentId) {
+      userConditions.push('u.department_id = ?')
+      userParams.push(departmentId)
+    }
+    if (memberUserId) {
+      userConditions.push('u.id = ?')
+      userParams.push(memberUserId)
+    }
+
+    const userSql = `
+      SELECT
+        u.id AS user_id,
+        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+        u.department_id,
+        COALESCE(dep.name, CONCAT('部门#', u.department_id)) AS department_name
+      FROM users u
+      LEFT JOIN departments dep ON dep.id = u.department_id
+      WHERE ${userConditions.join(' AND ')}
+      ORDER BY u.id ASC
+      LIMIT 2000`
+
+    const [userRows] = await pool.query(userSql, userParams)
+    const scopedUserRows = Array.isArray(userRows) ? userRows : []
+    const scopedUserIds = scopedUserRows
+      .map((row) => Number(row.user_id))
+      .filter((id) => Number.isInteger(id) && id > 0)
+
+    if (scopedUserIds.length === 0) {
+      return {
+        filters: {
+          start_date: startDate,
+          end_date: endDate,
+          department_id: departmentId,
+          business_group_code: businessGroupCode || null,
+          owner_user_id: ownerUserId,
+          member_user_id: memberUserId,
+          keyword: keyword || '',
+        },
+        summary: {
+          member_count: 0,
+          total_filled_days: 0,
+          total_owner_estimate_hours: 0,
+          total_personal_estimate_hours: 0,
+          total_actual_hours: 0,
+          variance_owner_hours: 0,
+          variance_personal_hours: 0,
+          variance_owner_rate: null,
+          variance_personal_rate: null,
+          avg_actual_hours_per_day: 0,
+          avg_saturation_rate: 0,
+          overload_member_count: 0,
+          low_load_member_count: 0,
+          overload_day_count: 0,
+          low_load_day_count: 0,
+        },
+        member_list: [],
+      }
+    }
+
+    const logConditions = ['l.user_id IN (?)', 'l.log_date >= ?', 'l.log_date <= ?']
+    const logParams = [scopedUserIds, startDate, endDate]
+    if (businessGroupCode) {
+      logConditions.push('d.business_group_code = ?')
+      logParams.push(businessGroupCode)
+    }
+    if (ownerUserId) {
+      logConditions.push('d.owner_user_id = ?')
+      logParams.push(ownerUserId)
+    }
+    if (keyword) {
+      logConditions.push(
+        `(COALESCE(NULLIF(u.real_name, ''), u.username) LIKE ? OR COALESCE(d.name, '') LIKE ? OR COALESCE(l.demand_id, '') LIKE ? OR COALESCE(l.description, '') LIKE ?)`,
+      )
+      logParams.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
+    }
+
+    const logWhereSql = logConditions.join(' AND ')
+
+    const memberSql = `
+      SELECT
+        l.user_id,
+        COUNT(DISTINCT l.log_date) AS filled_days,
+        ROUND(COALESCE(SUM(COALESCE(l.owner_estimate_hours, 0)), 0), 1) AS total_owner_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
+        COUNT(DISTINCT COALESCE(l.demand_id, CONCAT('NO_DEMAND#', l.id))) AS item_scope_count,
+        COUNT(DISTINCT l.demand_id) AS demand_count,
+        SUM(CASE WHEN l.owner_estimate_hours IS NULL THEN 1 ELSE 0 END) AS unestimated_item_count,
+        DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
+      FROM work_logs l
+      INNER JOIN users u ON u.id = l.user_id
+      LEFT JOIN work_demands d ON d.id = l.demand_id
+      WHERE ${logWhereSql}
+      GROUP BY l.user_id
+      ORDER BY total_actual_hours DESC, l.user_id ASC
+      LIMIT 4000`
+
+    const dailySql = `
+      SELECT
+        l.user_id,
+        DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+        ROUND(COALESCE(SUM(COALESCE(l.owner_estimate_hours, 0)), 0), 1) AS owner_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS personal_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS actual_hours,
+        COUNT(*) AS log_count,
+        COUNT(DISTINCT l.demand_id) AS demand_count
+      FROM work_logs l
+      INNER JOIN users u ON u.id = l.user_id
+      LEFT JOIN work_demands d ON d.id = l.demand_id
+      WHERE ${logWhereSql}
+      GROUP BY l.user_id, DATE_FORMAT(l.log_date, '%Y-%m-%d')
+      ORDER BY l.user_id ASC, log_date ASC
+      LIMIT 20000`
+
+    const [memberRows, dailyRows] = await Promise.all([
+      pool.query(memberSql, logParams).then((r) => r[0] || []),
+      pool.query(dailySql, logParams).then((r) => r[0] || []),
+    ])
+
+    const memberAggByUser = new Map()
+    ;(memberRows || []).forEach((row) => {
+      memberAggByUser.set(Number(row.user_id), row)
+    })
+
+    const dailyByUser = new Map()
+    ;(dailyRows || []).forEach((row) => {
+      const userId = Number(row.user_id)
+      if (!dailyByUser.has(userId)) {
+        dailyByUser.set(userId, [])
+      }
+      const actualHours = Number(row.actual_hours || 0)
+      const ownerEstimateHours = Number(row.owner_estimate_hours || 0)
+      const personalEstimateHours = Number(row.personal_estimate_hours || 0)
+      dailyByUser.get(userId).push({
+        log_date: row.log_date,
+        owner_estimate_hours: toDecimal1(ownerEstimateHours),
+        personal_estimate_hours: toDecimal1(personalEstimateHours),
+        actual_hours: toDecimal1(actualHours),
+        log_count: Number(row.log_count || 0),
+        demand_count: Number(row.demand_count || 0),
+        variance_owner_hours: toDecimal1(actualHours - ownerEstimateHours),
+        variance_personal_hours: toDecimal1(actualHours - personalEstimateHours),
+        saturation_rate: toPercent2((actualHours / 8) * 100),
+      })
+    })
+
+    const normalizedKeyword = String(keyword || '').trim().toLowerCase()
+    const hasLogDimensionFilter = Boolean(businessGroupCode || ownerUserId)
+
+    const memberListBase = scopedUserRows.map((userRow) => {
+      const userId = Number(userRow.user_id)
+      const aggRow = memberAggByUser.get(userId) || {}
+      const filledDays = Number(aggRow.filled_days || 0)
+      const totalOwner = Number(aggRow.total_owner_estimate_hours || 0)
+      const totalPersonal = Number(aggRow.total_personal_estimate_hours || 0)
+      const totalActual = Number(aggRow.total_actual_hours || 0)
+      const capacityHours = filledDays * 8
+      const avgActualPerDay = filledDays > 0 ? totalActual / filledDays : 0
+      const avgSaturationRate = filledDays > 0 ? (totalActual / capacityHours) * 100 : 0
+      const dailyStats = dailyByUser.get(userId) || []
+      const overloadDays = dailyStats.filter((item) => Number(item.saturation_rate || 0) > 100).length
+      const lowLoadDays = dailyStats.filter((item) => Number(item.saturation_rate || 0) < 60).length
+
+      return {
+        user_id: userId,
+        username: userRow.username || `用户${userId}`,
+        department_id: toPositiveInt(userRow.department_id),
+        department_name: userRow.department_name || '-',
+        filled_days: filledDays,
+        demand_count: Number(aggRow.demand_count || 0),
+        item_scope_count: Number(aggRow.item_scope_count || 0),
+        total_owner_estimate_hours: toDecimal1(totalOwner),
+        total_personal_estimate_hours: toDecimal1(totalPersonal),
+        total_actual_hours: toDecimal1(totalActual),
+        variance_owner_hours: toDecimal1(totalActual - totalOwner),
+        variance_personal_hours: toDecimal1(totalActual - totalPersonal),
+        variance_owner_rate: calcVarianceRate(totalActual, totalOwner),
+        variance_personal_rate: calcVarianceRate(totalActual, totalPersonal),
+        avg_actual_hours_per_day: toDecimal1(avgActualPerDay),
+        avg_saturation_rate: toPercent2(avgSaturationRate),
+        overload_days: overloadDays,
+        low_load_days: lowLoadDays,
+        unestimated_item_count: Number(aggRow.unestimated_item_count || 0),
+        last_log_date: aggRow.last_log_date || null,
+        daily_stats: dailyStats,
+      }
+    })
+
+    let memberList = memberListBase
+    if (hasLogDimensionFilter) {
+      memberList = memberList.filter((item) => Number(item.filled_days || 0) > 0)
+    }
+    if (normalizedKeyword) {
+      memberList = memberList.filter((item) => {
+        const usernameHit = String(item.username || '').toLowerCase().includes(normalizedKeyword)
+        const departmentHit = String(item.department_name || '').toLowerCase().includes(normalizedKeyword)
+        const hasLogMatch = Number(item.filled_days || 0) > 0
+        return usernameHit || departmentHit || hasLogMatch
+      })
+    }
+
+    const totalFilledDays = memberList.reduce((sum, item) => sum + Number(item.filled_days || 0), 0)
+    const totalOwnerEstimateHours = toDecimal1(
+      memberList.reduce((sum, item) => sum + Number(item.total_owner_estimate_hours || 0), 0),
+    )
+    const totalPersonalEstimateHours = toDecimal1(
+      memberList.reduce((sum, item) => sum + Number(item.total_personal_estimate_hours || 0), 0),
+    )
+    const totalActualHours = toDecimal1(
+      memberList.reduce((sum, item) => sum + Number(item.total_actual_hours || 0), 0),
+    )
+    const overloadMemberCount = memberList.filter((item) => Number(item.avg_saturation_rate || 0) > 100).length
+    const lowLoadMemberCount = memberList.filter((item) => Number(item.avg_saturation_rate || 0) < 60).length
+    const overloadDayCount = memberList.reduce((sum, item) => sum + Number(item.overload_days || 0), 0)
+    const lowLoadDayCount = memberList.reduce((sum, item) => sum + Number(item.low_load_days || 0), 0)
+
+    return {
+      filters: {
+        start_date: startDate,
+        end_date: endDate,
+        department_id: departmentId,
+        business_group_code: businessGroupCode || null,
+        owner_user_id: ownerUserId,
+        member_user_id: memberUserId,
+        keyword: keyword || '',
+      },
+      summary: {
+        member_count: memberList.length,
+        total_filled_days: totalFilledDays,
+        total_owner_estimate_hours: totalOwnerEstimateHours,
+        total_personal_estimate_hours: totalPersonalEstimateHours,
+        total_actual_hours: totalActualHours,
+        variance_owner_hours: toDecimal1(totalActualHours - totalOwnerEstimateHours),
+        variance_personal_hours: toDecimal1(totalActualHours - totalPersonalEstimateHours),
+        variance_owner_rate: calcVarianceRate(totalActualHours, totalOwnerEstimateHours),
+        variance_personal_rate: calcVarianceRate(totalActualHours, totalPersonalEstimateHours),
+        avg_actual_hours_per_day:
+          totalFilledDays > 0 ? toDecimal1(totalActualHours / totalFilledDays) : 0,
+        avg_saturation_rate:
+          totalFilledDays > 0 ? toPercent2((totalActualHours / (totalFilledDays * 8)) * 100) : 0,
+        overload_member_count: overloadMemberCount,
+        low_load_member_count: lowLoadMemberCount,
+        overload_day_count: overloadDayCount,
+        low_load_day_count: lowLoadDayCount,
+      },
+      member_list: memberList,
     }
   },
 
