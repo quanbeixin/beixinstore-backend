@@ -18,6 +18,32 @@ function normalizeRoleKey(rawKey, fallbackName = '') {
   return 'USER'
 }
 
+const PERMISSION_ALIAS_MAP = Object.freeze({
+  'requirement.view': ['demand.view', 'demand.workflow.view'],
+  'requirement.create': ['demand.manage'],
+  'requirement.edit': ['demand.manage'],
+  'requirement.transition': ['demand.manage', 'demand.workflow.manage'],
+})
+
+function expandPermissionCodes(codes = []) {
+  const set = new Set(
+    (Array.isArray(codes) ? codes : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean),
+  )
+
+  Array.from(set).forEach((code) => {
+    const aliases = PERMISSION_ALIAS_MAP[code]
+    if (!Array.isArray(aliases)) return
+    aliases.forEach((alias) => {
+      const normalized = String(alias || '').trim()
+      if (normalized) set.add(normalized)
+    })
+  })
+
+  return Array.from(set)
+}
+
 async function getManagedDepartmentIds(userId) {
   try {
     const [rows] = await pool.query(
@@ -144,7 +170,7 @@ const Permission = {
       is_department_manager: isDepartmentManager,
       managed_department_ids: managedDepartmentIds,
       permission_ready: permissionReady,
-      permission_codes: isSuperAdmin ? ['*'] : codes,
+      permission_codes: isSuperAdmin ? ['*'] : expandPermissionCodes(codes),
     }
   },
 }
