@@ -13,6 +13,7 @@ const {
   deleteDemand,
   listLogs,
   createLog,
+  createOwnerAssignedLog,
   updateLog,
   deleteLog,
   updateLogOwnerEstimate,
@@ -69,6 +70,11 @@ router.post(
 
 router.get('/logs', authMiddleware.requirePermission('worklog.view.self'), listLogs)
 router.post('/logs', authMiddleware.requirePermission('worklog.create'), createLog)
+router.post(
+  '/logs/owner-assign',
+  authMiddleware.requireAnyPermission(['workbench.view.owner', 'workbench.view.self']),
+  createOwnerAssignedLog,
+)
 router.put('/logs/:id', authMiddleware.requirePermission('worklog.update.self'), updateLog)
 router.delete('/logs/:id', authMiddleware.requirePermission('worklog.update.self'), deleteLog)
 router.put(

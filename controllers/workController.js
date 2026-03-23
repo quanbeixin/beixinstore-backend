@@ -634,7 +634,9 @@ const createLog = async (req, res) => {
   if (
     req.body.owner_estimate_hours !== undefined ||
     req.body.owner_estimated_by !== undefined ||
-    req.body.owner_estimated_at !== undefined
+    req.body.owner_estimated_at !== undefined ||
+    req.body.assigned_by_user_id !== undefined ||
+    req.body.task_source !== undefined
   ) {
     return res.status(400).json({ success: false, message: '个人填报接口不允许写入负责人预估字段' })
   }
@@ -651,6 +653,8 @@ const createLog = async (req, res) => {
   const remainingHours = normalizeHours(req.body.remaining_hours, 0)
   const demandId = normalizeDemandId(req.body.demand_id)
   let phaseKey = normalizePhaseKey(req.body.phase_key)
+  const expectedStartDateRaw = req.body.expected_start_date
+  let expectedStartDate = normalizeDate(expectedStartDateRaw)
   const expectedCompletionDateRaw = req.body.expected_completion_date
   const expectedCompletionDate = normalizeDate(expectedCompletionDateRaw)
   const logStatus = normalizeLogStatus(req.body.log_status)
@@ -686,6 +690,15 @@ const createLog = async (req, res) => {
   }
 
   if (
+    expectedStartDateRaw !== undefined &&
+    expectedStartDateRaw !== null &&
+    String(expectedStartDateRaw).trim() !== '' &&
+    !expectedStartDate
+  ) {
+    return res.status(400).json({ success: false, message: 'expected_start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  if (
     expectedCompletionDateRaw !== undefined &&
     expectedCompletionDateRaw !== null &&
     String(expectedCompletionDateRaw).trim() !== '' &&
@@ -704,6 +717,10 @@ const createLog = async (req, res) => {
   }
 
   try {
+    if (!expectedStartDate) {
+      expectedStartDate = logDate
+    }
+
     const itemType = await Work.findItemTypeById(itemTypeId)
     if (!itemType || Number(itemType.enabled) === 0) {
       return res.status(400).json({ success: false, message: '事项类型不存在或已停用' })
@@ -741,8 +758,11 @@ const createLog = async (req, res) => {
       remainingHours,
       demandId,
       phaseKey,
+      expectedStartDate,
       expectedCompletionDate: expectedCompletionDate || null,
       logStatus,
+      taskSource: 'SELF',
+      assignedByUserId: null,
       logCompletedAt: logCompletedAt || null,
     })
 
@@ -753,6 +773,7 @@ const createLog = async (req, res) => {
         demandId,
         phaseKey,
         itemTypeKey: String(itemType.type_key || '').toUpperCase(),
+        taskSource: 'SELF',
         operatorUserId: req.user.id,
         previousStatus: null,
         nextStatus: logStatus,
@@ -778,6 +799,184 @@ const createLog = async (req, res) => {
   }
 }
 
+const createOwnerAssignedLog = async (req, res) => {
+  if (
+    req.body.owner_estimated_by !== undefined ||
+    req.body.owner_estimated_at !== undefined ||
+    req.body.assigned_by_user_id !== undefined ||
+    req.body.task_source !== undefined
+  ) {
+    return res.status(400).json({ success: false, message: 'Owner 指派接口不允许写入受限字段' })
+  }
+
+  const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+  if (!isSuperAdmin) {
+    const isManager = await Work.isDepartmentManager(req.user.id)
+    if (!isManager) {
+      return res.status(403).json({ success: false, message: '仅部门负责人可新增指派事项' })
+    }
+  }
+
+  const assigneeUserId = toPositiveInt(req.body.assignee_user_id)
+  if (!assigneeUserId) {
+    return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
+  }
+
+  const canAssign = await Work.canManageAssigneeByOwner(req.user.id, assigneeUserId, { isSuperAdmin })
+  if (!canAssign) {
+    return res.status(403).json({ success: false, message: '仅可指派给管理范围内成员' })
+  }
+
+  const logDateRaw = req.body.log_date
+  const logDate = normalizeDate(logDateRaw) || formatDate(new Date())
+  const itemTypeId = toPositiveInt(req.body.item_type_id)
+  const description = normalizeText(req.body.description, 2000)
+  const ownerEstimateHours = normalizeHours(
+    req.body.owner_estimate_hours,
+    normalizeHours(req.body.personal_estimate_hours, null),
+  )
+  const personalEstimateHours = ownerEstimateHours
+  let actualHours = normalizeHours(req.body.actual_hours, 0)
+  const remainingHours = normalizeHours(
+    req.body.remaining_hours,
+    personalEstimateHours !== null ? personalEstimateHours : 0,
+  )
+  const demandId = normalizeDemandId(req.body.demand_id)
+  let phaseKey = normalizePhaseKey(req.body.phase_key)
+  const expectedStartDateRaw = req.body.expected_start_date
+  let expectedStartDate = normalizeDate(expectedStartDateRaw)
+  const expectedCompletionDateRaw = req.body.expected_completion_date
+  const expectedCompletionDate = normalizeDate(expectedCompletionDateRaw)
+  const logStatus = normalizeLogStatus(req.body.log_status || 'TODO')
+  const logCompletedAtRaw = req.body.log_completed_at
+  const logCompletedAt = normalizeDateTime(logCompletedAtRaw)
+
+  if (!itemTypeId) {
+    return res.status(400).json({ success: false, message: 'item_type_id 无效' })
+  }
+
+  if (!description) {
+    return res.status(400).json({ success: false, message: '工作描述不能为空' })
+  }
+
+  if (ownerEstimateHours === null || ownerEstimateHours <= 0) {
+    return res.status(400).json({ success: false, message: 'owner_estimate_hours 必须大于 0' })
+  }
+
+  if (
+    expectedStartDateRaw !== undefined &&
+    expectedStartDateRaw !== null &&
+    String(expectedStartDateRaw).trim() !== '' &&
+    !expectedStartDate
+  ) {
+    return res.status(400).json({ success: false, message: 'expected_start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  if (
+    expectedCompletionDateRaw !== undefined &&
+    expectedCompletionDateRaw !== null &&
+    String(expectedCompletionDateRaw).trim() !== '' &&
+    !expectedCompletionDate
+  ) {
+    return res.status(400).json({ success: false, message: 'expected_completion_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  if (
+    logCompletedAtRaw !== undefined &&
+    logCompletedAtRaw !== null &&
+    String(logCompletedAtRaw).trim() !== '' &&
+    !logCompletedAt
+  ) {
+    return res.status(400).json({ success: false, message: 'log_completed_at 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm:ss' })
+  }
+
+  if (!expectedStartDate) {
+    expectedStartDate = logDate
+  }
+
+  if (logStatus === 'DONE' && Number(actualHours || 0) === 0) {
+    actualHours = personalEstimateHours
+  }
+  if (actualHours === null || actualHours < 0) {
+    return res.status(400).json({ success: false, message: 'actual_hours 不能小于 0' })
+  }
+  if (remainingHours === null || remainingHours < 0) {
+    return res.status(400).json({ success: false, message: 'remaining_hours 不能小于 0' })
+  }
+
+  try {
+    const itemType = await Work.findItemTypeById(itemTypeId)
+    if (!itemType || Number(itemType.enabled) === 0) {
+      return res.status(400).json({ success: false, message: '事项类型不存在或已停用' })
+    }
+
+    if (Number(itemType.require_demand) === 1 && !demandId) {
+      return res.status(400).json({ success: false, message: '当前事项类型必须关联需求' })
+    }
+
+    if (demandId) {
+      const demand = await Work.findDemandById(demandId)
+      if (!demand) {
+        return res.status(400).json({ success: false, message: '关联需求不存在' })
+      }
+
+      if (!phaseKey) {
+        return res.status(400).json({ success: false, message: '关联需求时必须选择阶段' })
+      }
+
+      const phase = await Work.findDemandPhaseTypeByKey(phaseKey)
+      if (!phase) {
+        return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
+      }
+    } else {
+      phaseKey = null
+    }
+
+    const id = await Work.createLog({
+      userId: assigneeUserId,
+      logDate,
+      itemTypeId,
+      description,
+      personalEstimateHours,
+      actualHours,
+      remainingHours,
+      logStatus,
+      taskSource: 'OWNER_ASSIGN',
+      demandId,
+      phaseKey,
+      assignedByUserId: req.user.id,
+      expectedStartDate,
+      expectedCompletionDate: expectedCompletionDate || null,
+      logCompletedAt: logCompletedAt || null,
+    })
+
+    try {
+      await Work.updateLogOwnerEstimate(id, {
+        ownerEstimateHours,
+        ownerEstimatedBy: req.user.id,
+      })
+    } catch (ownerEstimateErr) {
+      if (ownerEstimateErr?.code === 'OWNER_ESTIMATE_FIELDS_MISSING') {
+        return res.status(500).json({
+          success: false,
+          message: '缺少 owner 预估字段，请先执行数据库补丁后重试',
+        })
+      }
+      throw ownerEstimateErr
+    }
+
+    const created = await Work.findLogById(id)
+    return res.status(201).json({
+      success: true,
+      message: 'Owner 指派事项创建成功',
+      data: created,
+    })
+  } catch (err) {
+    console.error('创建 Owner 指派事项失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const updateLog = async (req, res) => {
   const id = toPositiveInt(req.params.id)
   if (!id) {
@@ -787,7 +986,9 @@ const updateLog = async (req, res) => {
   if (
     req.body.owner_estimate_hours !== undefined ||
     req.body.owner_estimated_by !== undefined ||
-    req.body.owner_estimated_at !== undefined
+    req.body.owner_estimated_at !== undefined ||
+    req.body.assigned_by_user_id !== undefined ||
+    req.body.task_source !== undefined
   ) {
     return res.status(400).json({ success: false, message: '个人更新接口不允许写入负责人预估字段' })
   }
@@ -824,6 +1025,16 @@ const updateLog = async (req, res) => {
       req.body.demand_id === undefined ? existing.demand_id : normalizeDemandId(req.body.demand_id)
     let phaseKey =
       req.body.phase_key === undefined ? normalizePhaseKey(existing.phase_key) : normalizePhaseKey(req.body.phase_key)
+    let expectedStartDate = existing.expected_start_date || null
+    if (req.body.expected_start_date !== undefined) {
+      const raw = req.body.expected_start_date
+      const normalized = normalizeDate(raw)
+      const hasValue = raw !== null && String(raw).trim() !== ''
+      if (hasValue && !normalized) {
+        return res.status(400).json({ success: false, message: 'expected_start_date 格式错误，需为 YYYY-MM-DD' })
+      }
+      expectedStartDate = normalized || null
+    }
     const logStatus =
       req.body.log_status === undefined ? normalizeLogStatus(existing.log_status) : normalizeLogStatus(req.body.log_status)
     let logCompletedAt = existing.log_completed_at || null
@@ -905,8 +1116,11 @@ const updateLog = async (req, res) => {
       remainingHours,
       demandId,
       phaseKey,
+      expectedStartDate,
       expectedCompletionDate,
       logStatus,
+      taskSource: existing.task_source || 'SELF',
+      assignedByUserId: existing.assigned_by_user_id || null,
       logCompletedAt,
     })
 
@@ -917,6 +1131,7 @@ const updateLog = async (req, res) => {
         demandId,
         phaseKey,
         itemTypeKey: String(itemType.type_key || '').toUpperCase(),
+        taskSource: existing.task_source || 'SELF',
         operatorUserId: req.user.id,
         previousStatus: existing.log_status,
         nextStatus: logStatus,
@@ -1205,10 +1420,20 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
   const assigneeUserId = toPositiveInt(req.body.assignee_user_id)
   const dueAtRaw = req.body.due_at
   const dueAt = normalizeDate(dueAtRaw)
+  const expectedStartDateRaw = req.body.expected_start_date
+  const expectedStartDate = normalizeDate(expectedStartDateRaw)
   const comment = normalizeText(req.body.comment, 500)
 
   if (!assigneeUserId) {
     return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
+  }
+  if (
+    expectedStartDateRaw !== undefined &&
+    expectedStartDateRaw !== null &&
+    String(expectedStartDateRaw).trim() !== '' &&
+    !expectedStartDate
+  ) {
+    return res.status(400).json({ success: false, message: 'expected_start_date 格式错误，需为 YYYY-MM-DD' })
   }
   if (
     dueAtRaw !== undefined &&
@@ -1235,6 +1460,7 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
       assigneeUserId,
       operatorUserId: req.user.id,
       dueAt,
+      expectedStartDate,
       comment,
     })
     return res.json({
@@ -1267,10 +1493,20 @@ const assignDemandWorkflowNode = async (req, res) => {
   const assigneeUserId = toPositiveInt(req.body.assignee_user_id)
   const dueAtRaw = req.body.due_at
   const dueAt = normalizeDate(dueAtRaw)
+  const expectedStartDateRaw = req.body.expected_start_date
+  const expectedStartDate = normalizeDate(expectedStartDateRaw)
   const comment = normalizeText(req.body.comment, 500)
 
   if (!assigneeUserId) {
     return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
+  }
+  if (
+    expectedStartDateRaw !== undefined &&
+    expectedStartDateRaw !== null &&
+    String(expectedStartDateRaw).trim() !== '' &&
+    !expectedStartDate
+  ) {
+    return res.status(400).json({ success: false, message: 'expected_start_date 格式错误，需为 YYYY-MM-DD' })
   }
   if (
     dueAtRaw !== undefined &&
@@ -1298,6 +1534,7 @@ const assignDemandWorkflowNode = async (req, res) => {
       assigneeUserId,
       operatorUserId: req.user.id,
       dueAt,
+      expectedStartDate,
       comment,
     })
     return res.json({
@@ -1463,6 +1700,7 @@ module.exports = {
   deleteDemand,
   listLogs,
   createLog,
+  createOwnerAssignedLog,
   updateLog,
   deleteLog,
   updateLogOwnerEstimate,

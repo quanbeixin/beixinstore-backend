@@ -3,6 +3,7 @@
 const DEMAND_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED']
 const DEMAND_PRIORITIES = ['P0', 'P1', 'P2', 'P3']
 const WORK_LOG_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE']
+const WORK_LOG_TASK_SOURCES = ['SELF', 'OWNER_ASSIGN', 'WORKFLOW_AUTO']
 const DEMAND_PHASE_DICT_KEY = 'demand_phase_type'
 const ISSUE_TYPE_DICT_KEY = 'issue_type'
 const BUSINESS_GROUP_DICT_KEY = 'business_group'
@@ -89,6 +90,11 @@ function normalizeDecimal(value, fallback = null) {
   const num = Number(value)
   if (!Number.isFinite(num)) return fallback
   return Number(num.toFixed(1))
+}
+
+function normalizeTaskSource(value, fallback = 'SELF') {
+  const source = String(value || fallback).trim().toUpperCase()
+  return WORK_LOG_TASK_SOURCES.includes(source) ? source : fallback
 }
 
 function isMissingColumnError(err) {
@@ -453,10 +459,29 @@ const Work = {
   DEMAND_STATUSES,
   DEMAND_PRIORITIES,
   WORK_LOG_STATUSES,
+  WORK_LOG_TASK_SOURCES,
 
   async isDepartmentManager(userId) {
     const rows = await listManagedDepartmentRows(userId)
     return rows.length > 0
+  },
+
+  async canManageAssigneeByOwner(ownerUserId, assigneeUserId, { isSuperAdmin = false } = {}) {
+    const targetUserId = toPositiveInt(assigneeUserId)
+    if (!targetUserId) return false
+    if (isSuperAdmin) return true
+
+    const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin: false })
+    const teamMemberIds = Array.isArray(scope.team_member_ids) ? scope.team_member_ids : []
+    if (teamMemberIds.includes(targetUserId)) return true
+
+    const managedDepartmentIds = Array.isArray(scope.managed_department_ids)
+      ? scope.managed_department_ids
+      : []
+    if (managedDepartmentIds.length === 0) return false
+
+    const targetDepartment = await findUserDepartmentRow(targetUserId)
+    return managedDepartmentIds.includes(Number(targetDepartment?.id))
   },
 
   async listIssueTypeDictItems({ enabledOnly = true } = {}) {
@@ -966,8 +991,12 @@ const Work = {
         l.actual_hours,
         l.remaining_hours,
         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+        COALESCE(l.task_source, 'SELF') AS task_source,
         l.demand_id,
         l.phase_key,
+        l.assigned_by_user_id,
+        COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
+        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
         DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
@@ -976,6 +1005,7 @@ const Work = {
         DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
+      LEFT JOIN users au ON au.id = l.assigned_by_user_id
       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
       LEFT JOIN config_dict_items pdi
@@ -1009,13 +1039,18 @@ const Work = {
          l.actual_hours,
          l.remaining_hours,
          COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+         COALESCE(l.task_source, 'SELF') AS task_source,
          l.demand_id,
          l.phase_key,
+         l.assigned_by_user_id,
+         COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
+         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
          DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
          DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
          DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
        FROM work_logs l
+       LEFT JOIN users au ON au.id = l.assigned_by_user_id
        WHERE l.id = ?`,
       [id],
     )
@@ -1031,15 +1066,18 @@ const Work = {
     actualHours,
     remainingHours,
     logStatus = 'IN_PROGRESS',
+    taskSource = 'SELF',
     demandId = null,
     phaseKey = null,
+    assignedByUserId = null,
+    expectedStartDate = null,
     expectedCompletionDate = null,
     logCompletedAt = null,
   }) {
     const [result] = await pool.query(
       `INSERT INTO work_logs (
-         user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, demand_id, phase_key, expected_completion_date, log_completed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END)`,
+         user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, task_source, demand_id, phase_key, assigned_by_user_id, expected_start_date, expected_completion_date, log_completed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END)`,
       [
         userId,
         logDate,
@@ -1051,8 +1089,11 @@ const Work = {
         WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
           ? String(logStatus).toUpperCase()
           : 'IN_PROGRESS',
+        normalizeTaskSource(taskSource, 'SELF'),
         demandId,
         phaseKey,
+        toPositiveInt(assignedByUserId),
+        expectedStartDate,
         expectedCompletionDate,
         WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
           ? String(logStatus).toUpperCase()
@@ -1073,8 +1114,11 @@ const Work = {
       actualHours,
       remainingHours,
       logStatus = 'IN_PROGRESS',
+      taskSource = 'SELF',
       demandId = null,
       phaseKey = null,
+      assignedByUserId = null,
+      expectedStartDate = null,
       expectedCompletionDate = null,
       logCompletedAt = null,
     },
@@ -1089,8 +1133,11 @@ const Work = {
          actual_hours = ?,
          remaining_hours = ?,
          log_status = ?,
+         task_source = ?,
          demand_id = ?,
          phase_key = ?,
+         assigned_by_user_id = ?,
+         expected_start_date = ?,
          expected_completion_date = ?,
          log_completed_at = CASE
            WHEN ? = 'DONE' THEN COALESCE(?, log_completed_at, NOW())
@@ -1107,8 +1154,11 @@ const Work = {
         WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
           ? String(logStatus).toUpperCase()
           : 'IN_PROGRESS',
+        normalizeTaskSource(taskSource, 'SELF'),
         demandId,
         phaseKey,
+        toPositiveInt(assignedByUserId),
+        expectedStartDate,
         expectedCompletionDate,
         WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
           ? String(logStatus).toUpperCase()
@@ -1208,6 +1258,10 @@ const Work = {
          l.actual_hours,
          l.remaining_hours,
          COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+         COALESCE(l.task_source, 'SELF') AS task_source,
+         l.assigned_by_user_id,
+         COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
+         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
          DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
          DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
          l.demand_id,
@@ -1216,6 +1270,7 @@ const Work = {
          COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name
        FROM work_logs l
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+       LEFT JOIN users au ON au.id = l.assigned_by_user_id
        LEFT JOIN work_demands d ON d.id = l.demand_id
        LEFT JOIN config_dict_items pdi
          ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
@@ -1431,6 +1486,7 @@ const Work = {
          COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
          l.description,
          COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
          DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
          DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
          l.demand_id,
@@ -1618,6 +1674,7 @@ const Work = {
           total_actual_hours_today: 0,
         },
         no_fill_members: [],
+        team_members: [],
         owner_estimate_items: [],
         owner_estimate_pending_count: 0,
         demand_risks: [],
@@ -1633,8 +1690,20 @@ const Work = {
     }
     let overview = defaultOverview
     let noFillMembers = []
+    let teamMembers = []
 
     if (teamMemberIds.length > 0) {
+      ;[teamMembers] = await pool.query(
+        `SELECT
+           u.id,
+           COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+           u.department_id
+         FROM users u
+         WHERE u.id IN (?)
+         ORDER BY u.id ASC`,
+        [teamMemberIds],
+      )
+
       const [[overviewRow]] = await pool.query(
         `SELECT
            COUNT(DISTINCT u.id) AS team_size,
@@ -1697,10 +1766,14 @@ const Work = {
        l.owner_estimated_by,
        DATE_FORMAT(l.owner_estimated_at, '%Y-%m-%d %H:%i:%s') AS owner_estimated_at,
        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+       COALESCE(l.task_source, 'SELF') AS task_source,
        l.demand_id,
        d.name AS demand_name,
        l.phase_key,
+       l.assigned_by_user_id,
+       COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
        COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
+       DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
        COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule,
@@ -1708,6 +1781,7 @@ const Work = {
        ${PHASE_OWNER_ESTIMATE_REQUIRED_SQL} AS phase_owner_estimate_required
      FROM work_logs l
      INNER JOIN users u ON u.id = l.user_id
+     LEFT JOIN users au ON au.id = l.assigned_by_user_id
      LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
      LEFT JOIN work_demands d ON d.id = l.demand_id
      LEFT JOIN config_dict_items pdi
@@ -1733,10 +1807,14 @@ const Work = {
        NULL AS owner_estimated_by,
        NULL AS owner_estimated_at,
        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+       COALESCE(l.task_source, 'SELF') AS task_source,
        l.demand_id,
        d.name AS demand_name,
        l.phase_key,
+       l.assigned_by_user_id,
+       COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
        COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
+       DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
        COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule,
@@ -1744,6 +1822,7 @@ const Work = {
        ${PHASE_OWNER_ESTIMATE_REQUIRED_SQL} AS phase_owner_estimate_required
      FROM work_logs l
      INNER JOIN users u ON u.id = l.user_id
+     LEFT JOIN users au ON au.id = l.assigned_by_user_id
      LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
      LEFT JOIN work_demands d ON d.id = l.demand_id
      LEFT JOIN config_dict_items pdi
@@ -1791,6 +1870,7 @@ const Work = {
         total_actual_hours_today: Number(overview?.total_actual_hours_today || 0),
       },
       no_fill_members: noFillMembers,
+      team_members: teamMembers,
       owner_estimate_items: ownerEstimateItems,
       owner_estimate_pending_count: ownerEstimateItems.filter((item) => item.owner_estimate_hours === null).length,
       demand_risks: [],

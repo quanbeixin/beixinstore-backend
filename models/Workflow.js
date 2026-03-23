@@ -240,6 +240,8 @@ async function createTaskForNode(
     nodeName,
     assigneeUserId,
     dueAt = null,
+    expectedStartDate = null,
+    assignedByUserId = null,
     createdBy = null,
     sourceType = 'SYSTEM',
     sourceId = null,
@@ -286,6 +288,8 @@ async function createTaskForNode(
     nodeName,
     assigneeUserId: normalizedAssignee,
     dueAt: normalizedDueAt,
+    expectedStartDate,
+    assignedByUserId,
   })
 
   return taskId
@@ -344,11 +348,22 @@ function buildAutoWorkLogDescription({ taskId, demandId, nodeName }) {
 
 async function ensureAutoWorkLogForTask(
   conn,
-  { taskId, demandId, phaseKey, nodeName, assigneeUserId, dueAt = null } = {},
+  {
+    taskId,
+    demandId,
+    phaseKey,
+    nodeName,
+    assigneeUserId,
+    dueAt = null,
+    expectedStartDate = null,
+    assignedByUserId = null,
+  } = {},
 ) {
   const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
   const normalizedPhaseKey = normalizeText(phaseKey, 64).toUpperCase()
   const normalizedAssignee = toPositiveInt(assigneeUserId)
+  const normalizedExpectedStartDate = normalizeDate(expectedStartDate)
+  const normalizedAssignedByUserId = toPositiveInt(assignedByUserId)
   if (!normalizedDemandId || !normalizedPhaseKey || !normalizedAssignee) return null
 
   const trackType = await resolveTrackItemType(conn)
@@ -378,12 +393,17 @@ async function ensureAutoWorkLogForTask(
        SET
          item_type_id = ?,
          description = ?,
+         task_source = 'WORKFLOW_AUTO',
+         assigned_by_user_id = COALESCE(?, assigned_by_user_id),
+         expected_start_date = COALESCE(?, expected_start_date, CURDATE()),
          expected_completion_date = COALESCE(?, expected_completion_date),
          updated_at = NOW()
        WHERE id = ?`,
       [
         itemTypeId,
         buildAutoWorkLogDescription({ taskId, demandId: normalizedDemandId, nodeName }),
+        normalizedAssignedByUserId,
+        normalizedExpectedStartDate,
         dueAt,
         existing.id,
       ],
@@ -401,17 +421,22 @@ async function ensureAutoWorkLogForTask(
        actual_hours,
        remaining_hours,
        log_status,
+       task_source,
        demand_id,
        phase_key,
+       assigned_by_user_id,
+       expected_start_date,
        expected_completion_date,
        log_completed_at
-     ) VALUES (?, CURDATE(), ?, ?, 1.0, 0.0, 1.0, 'TODO', ?, ?, ?, NULL)`,
+     ) VALUES (?, CURDATE(), ?, ?, 1.0, 0.0, 1.0, 'TODO', 'WORKFLOW_AUTO', ?, ?, ?, COALESCE(?, CURDATE()), ?, NULL)`,
     [
       normalizedAssignee,
       itemTypeId,
       buildAutoWorkLogDescription({ taskId, demandId: normalizedDemandId, nodeName }),
       normalizedDemandId,
       normalizedPhaseKey,
+      normalizedAssignedByUserId,
+      normalizedExpectedStartDate,
       dueAt,
     ],
   )
@@ -931,11 +956,19 @@ const Workflow = {
     }
   },
 
-  async assignCurrentNode({ demandId, assigneeUserId, operatorUserId, dueAt = null, comment = '' } = {}) {
+  async assignCurrentNode({
+    demandId,
+    assigneeUserId,
+    operatorUserId,
+    dueAt = null,
+    expectedStartDate = null,
+    comment = '',
+  } = {}) {
     const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
     const normalizedAssigneeUserId = toPositiveInt(assigneeUserId)
     const normalizedOperatorUserId = toPositiveInt(operatorUserId)
     const normalizedDueAt = normalizeDate(dueAt)
+    const normalizedExpectedStartDate = normalizeDate(expectedStartDate)
 
     if (!normalizedDemandId) {
       const err = new Error('demand_id_required')
@@ -1011,6 +1044,8 @@ const Workflow = {
         nodeName: currentNode.node_name_snapshot,
         assigneeUserId: normalizedAssigneeUserId,
         dueAt: normalizedDueAt,
+        expectedStartDate: normalizedExpectedStartDate,
+        assignedByUserId: normalizedOperatorUserId,
         createdBy: normalizedOperatorUserId,
         sourceType: 'ASSIGN',
         sourceId: currentNode.id,
@@ -1037,12 +1072,21 @@ const Workflow = {
     }
   },
 
-  async assignNode({ demandId, nodeKey, assigneeUserId, operatorUserId, dueAt = null, comment = '' } = {}) {
+  async assignNode({
+    demandId,
+    nodeKey,
+    assigneeUserId,
+    operatorUserId,
+    dueAt = null,
+    expectedStartDate = null,
+    comment = '',
+  } = {}) {
     const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
     const normalizedNodeKey = normalizeText(nodeKey, 64).toUpperCase()
     const normalizedAssigneeUserId = toPositiveInt(assigneeUserId)
     const normalizedOperatorUserId = toPositiveInt(operatorUserId)
     const normalizedDueAt = normalizeDate(dueAt)
+    const normalizedExpectedStartDate = normalizeDate(expectedStartDate)
 
     if (!normalizedDemandId) {
       const err = new Error('demand_id_required')
@@ -1133,6 +1177,8 @@ const Workflow = {
           nodeName: targetNode.node_name_snapshot,
           assigneeUserId: normalizedAssigneeUserId,
           dueAt: normalizedDueAt,
+          expectedStartDate: normalizedExpectedStartDate,
+          assignedByUserId: normalizedOperatorUserId,
           createdBy: normalizedOperatorUserId,
           sourceType: 'ASSIGN',
           sourceId: targetNode.id,
@@ -1146,6 +1192,8 @@ const Workflow = {
           nodeName: targetNode.node_name_snapshot,
           assigneeUserId: normalizedAssigneeUserId,
           dueAt: normalizedDueAt,
+          expectedStartDate: normalizedExpectedStartDate,
+          assignedByUserId: normalizedOperatorUserId,
         })
       }
 
@@ -1308,6 +1356,7 @@ const Workflow = {
     demandId,
     phaseKey,
     itemTypeKey,
+    taskSource,
     operatorUserId,
     previousStatus,
     nextStatus,
@@ -1317,6 +1366,7 @@ const Workflow = {
     const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
     const normalizedPhaseKey = normalizeText(phaseKey, 64).toUpperCase()
     const normalizedItemTypeKey = normalizeText(itemTypeKey, 64).toUpperCase()
+    const normalizedTaskSource = normalizeText(taskSource, 32).toUpperCase() || 'SELF'
     const normalizedOperatorUserId = toPositiveInt(operatorUserId)
     const normalizedLogId = toPositiveInt(logId)
 
@@ -1331,6 +1381,9 @@ const Workflow = {
     }
     if (!normalizedItemTypeKey || !TRACK_ITEM_TYPE_KEYS.has(normalizedItemTypeKey)) {
       return { triggered: false, reason: 'ITEM_TYPE_NOT_TRACKED' }
+    }
+    if (normalizedTaskSource === 'OWNER_ASSIGN') {
+      return { triggered: false, reason: 'OWNER_ASSIGN_SKIP_SYNC' }
     }
     if (!normalizedOperatorUserId) {
       return { triggered: false, reason: 'OPERATOR_INVALID' }
