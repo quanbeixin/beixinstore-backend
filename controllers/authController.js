@@ -138,6 +138,18 @@ const register = async (req, res) => {
       status_code: 'ACTIVE',
     })
 
+    try {
+      const defaultRoleId = await User.findDefaultRegisterRoleId()
+      if (!defaultRoleId) {
+        await User.delete(userId)
+        return res.status(500).json({ success: false, message: '系统未配置默认角色，请联系管理员' })
+      }
+      await User.setRoles(userId, [defaultRoleId])
+    } catch (roleErr) {
+      await User.delete(userId).catch(() => {})
+      throw roleErr
+    }
+
     return res.status(201).json({
       success: true,
       message: '注册成功，请登录',

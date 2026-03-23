@@ -354,6 +354,52 @@ const User = {
     }
   },
 
+  findDefaultRegisterRoleId: async () => {
+    // Preferred: explicit USER role_key.
+    try {
+      const [rows] = await pool.query(
+        `SELECT id
+         FROM roles
+         WHERE UPPER(COALESCE(role_key, '')) = 'USER'
+           AND COALESCE(enabled, 1) = 1
+         ORDER BY id ASC
+         LIMIT 1`,
+      )
+      if (rows[0]?.id) return Number(rows[0].id)
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+    }
+
+    // Fallback: conventional normal-user role names.
+    const [nameRows] = await pool.query(
+      `SELECT id
+       FROM roles
+       WHERE LOWER(TRIM(name)) IN ('user', 'normal user', 'member', 'staff')
+       ORDER BY id ASC
+       LIMIT 1`,
+    )
+    if (nameRows[0]?.id) return Number(nameRows[0].id)
+
+    // Fallback: lowest role level among enabled roles.
+    try {
+      const [rows] = await pool.query(
+        `SELECT id
+         FROM roles
+         WHERE COALESCE(enabled, 1) = 1
+         ORDER BY COALESCE(role_level, 0) ASC, id ASC
+         LIMIT 1`,
+      )
+      if (rows[0]?.id) return Number(rows[0].id)
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+    }
+
+    // Last fallback: first available role.
+    const [rows] = await pool.query('SELECT id FROM roles ORDER BY id ASC LIMIT 1')
+    if (rows[0]?.id) return Number(rows[0].id)
+    return null
+  },
+
   setRoles: async (userId, roleIds = []) => {
     await pool.query('DELETE FROM user_roles WHERE user_id = ?', [userId])
     if (roleIds.length === 0) return
