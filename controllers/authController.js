@@ -1,4 +1,4 @@
-const bcrypt = require('bcryptjs')
+﻿const bcrypt = require('bcryptjs')
 const User = require('../models/User')
 const Permission = require('../models/Permission')
 const UserPreference = require('../models/UserPreference')
@@ -10,9 +10,9 @@ function normalizeStatusCode(value) {
 }
 
 function getStatusBlockMessage(statusCode) {
-  if (statusCode === 'INACTIVE') return '账号未激活，请联系管理员'
-  if (statusCode === 'DISABLED') return '账号已停用，请联系管理员'
-  if (statusCode === 'LOCKED') return '账号已锁定，请联系管理员'
+  if (statusCode === 'INACTIVE') return '璐﹀彿鏈縺娲伙紝璇疯仈绯荤鐞嗗憳'
+  if (statusCode === 'DISABLED') return '璐﹀彿宸插仠鐢紝璇疯仈绯荤鐞嗗憳'
+  if (statusCode === 'LOCKED') return '璐﹀彿宸查攣瀹氾紝璇疯仈绯荤鐞嗗憳'
   return null
 }
 
@@ -94,45 +94,50 @@ function buildProfileResponse(user, preference) {
 
 const register = async (req, res) => {
   const { username, password, confirmPassword, email } = req.body
+  const realName = normalizeRealName(req.body.real_name)
 
-  if (!username || !password || !confirmPassword) {
-    return res.status(400).json({ success: false, message: '用户名、密码和确认密码不能为空' })
+  if (!username || !realName || !password || !confirmPassword) {
+    return res.status(400).json({ success: false, message: '用户名、真实姓名、密码和确认密码不能为空' })
+  }
+
+  if (realName.length < 2 || realName.length > 32) {
+    return res.status(400).json({ success: false, message: 'real_name length must be 2-32 characters' })
   }
 
   if (username.length < 3 || username.length > 20) {
-    return res.status(400).json({ success: false, message: '用户名长度必须在 3-20 个字符之间' })
+    return res.status(400).json({ success: false, message: '鐢ㄦ埛鍚嶉暱搴﹀繀椤诲湪 3-20 涓瓧绗︿箣闂?' })
   }
 
   if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-    return res.status(400).json({ success: false, message: '用户名只能包含字母、数字和下划线' })
+    return res.status(400).json({ success: false, message: '鐢ㄦ埛鍚嶅彧鑳藉寘鍚瓧姣嶃€佹暟瀛楀拰涓嬪垝绾?' })
   }
 
   if (password.length < 6) {
-    return res.status(400).json({ success: false, message: '密码长度至少 6 个字符' })
+    return res.status(400).json({ success: false, message: '瀵嗙爜闀垮害鑷冲皯 6 涓瓧绗?' })
   }
 
   if (password !== confirmPassword) {
-    return res.status(400).json({ success: false, message: '两次输入的密码不一致' })
+    return res.status(400).json({ success: false, message: '涓ゆ杈撳叆鐨勫瘑鐮佷笉涓€鑷?' })
   }
 
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ success: false, message: '邮箱格式不正确' })
+    return res.status(400).json({ success: false, message: '閭鏍煎紡涓嶆纭?' })
   }
 
   try {
     const existing = await User.findByUsername(username)
     if (existing) {
-      return res.status(409).json({ success: false, message: '用户名已存在' })
+      return res.status(409).json({ success: false, message: '鐢ㄦ埛鍚嶅凡瀛樺湪' })
     }
 
     if (email && (await User.isEmailTaken(email))) {
-      return res.status(409).json({ success: false, message: '邮箱已被占用' })
+      return res.status(409).json({ success: false, message: '閭宸茶鍗犵敤' })
     }
 
     const hashedPassword = await bcrypt.hash(password, 10)
     const userId = await User.create({
       username,
-      real_name: username,
+      real_name: realName,
       password: hashedPassword,
       email: email || null,
       status_code: 'ACTIVE',
@@ -142,7 +147,7 @@ const register = async (req, res) => {
       const defaultRoleId = await User.findDefaultRegisterRoleId()
       if (!defaultRoleId) {
         await User.delete(userId)
-        return res.status(500).json({ success: false, message: '系统未配置默认角色，请联系管理员' })
+        return res.status(500).json({ success: false, message: '绯荤粺鏈厤缃粯璁よ鑹诧紝璇疯仈绯荤鐞嗗憳' })
       }
       await User.setRoles(userId, [defaultRoleId])
     } catch (roleErr) {
@@ -152,15 +157,15 @@ const register = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: '注册成功，请登录',
-      data: { id: userId, username, email: email || null },
+      message: '娉ㄥ唽鎴愬姛锛岃鐧诲綍',
+      data: { id: userId, username, real_name: realName, email: email || null },
     })
   } catch (err) {
-    console.error('注册失败:', err)
+    console.error('娉ㄥ唽澶辫触:', err)
     if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ success: false, message: '用户名或邮箱已存在' })
+      return res.status(409).json({ success: false, message: '鐢ㄦ埛鍚嶆垨閭宸插瓨鍦?' })
     }
-    return res.status(500).json({ success: false, message: '服务器错误' })
+    return res.status(500).json({ success: false, message: '鏈嶅姟鍣ㄩ敊璇?' })
   }
 }
 
@@ -168,25 +173,25 @@ const login = async (req, res) => {
   const { username, password } = req.body
 
   if (!username || !password) {
-    return res.status(400).json({ success: false, message: '用户名和密码不能为空' })
+    return res.status(400).json({ success: false, message: '鐢ㄦ埛鍚嶅拰瀵嗙爜涓嶈兘涓虹┖' })
   }
 
   try {
     const user = await User.findByUsername(username)
     if (!user) {
-      return res.status(401).json({ success: false, message: '用户名或密码错误' })
+      return res.status(401).json({ success: false, message: '鐢ㄦ埛鍚嶆垨瀵嗙爜閿欒' })
     }
 
     const isMatch = await bcrypt.compare(password, user.password)
     if (!isMatch) {
-      return res.status(401).json({ success: false, message: '用户名或密码错误' })
+      return res.status(401).json({ success: false, message: '鐢ㄦ埛鍚嶆垨瀵嗙爜閿欒' })
     }
 
     const statusCode = normalizeStatusCode(user.status_code)
     if (statusCode !== 'ACTIVE') {
       return res.status(403).json({
         success: false,
-        message: getStatusBlockMessage(statusCode) || '账号状态异常，禁止登录',
+        message: getStatusBlockMessage(statusCode) || '璐﹀彿鐘舵€佸紓甯革紝绂佹鐧诲綍',
         data: { status_code: statusCode },
       })
     }
@@ -201,7 +206,7 @@ const login = async (req, res) => {
 
     return res.json({
       success: true,
-      message: '登录成功',
+      message: '鐧诲綍鎴愬姛',
       data: {
         token,
         user: {
@@ -214,8 +219,8 @@ const login = async (req, res) => {
       },
     })
   } catch (err) {
-    console.error('登录失败:', err)
-    return res.status(500).json({ success: false, message: '服务器错误' })
+    console.error('鐧诲綍澶辫触:', err)
+    return res.status(500).json({ success: false, message: '鏈嶅姟鍣ㄩ敊璇?' })
   }
 }
 
@@ -223,14 +228,14 @@ const getProfile = async (req, res) => {
   try {
     const user = await User.findById(req.user.id)
     if (!user) {
-      return res.status(404).json({ success: false, message: '用户不存在' })
+      return res.status(404).json({ success: false, message: '鐢ㄦ埛涓嶅瓨鍦?' })
     }
 
     const preference = await UserPreference.getByUserId(req.user.id)
     return res.json({ success: true, data: buildProfileResponse(user, preference) })
   } catch (err) {
-    console.error('获取用户信息失败:', err)
-    return res.status(500).json({ success: false, message: '服务器错误' })
+    console.error('鑾峰彇鐢ㄦ埛淇℃伅澶辫触:', err)
+    return res.status(500).json({ success: false, message: '鏈嶅姟鍣ㄩ敊璇?' })
   }
 }
 
@@ -240,19 +245,19 @@ const updateProfile = async (req, res) => {
   const mobile = normalizePhone(req.body.mobile)
 
   if (email !== undefined && email !== null && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ success: false, message: '邮箱格式不正确' })
+    return res.status(400).json({ success: false, message: '閭鏍煎紡涓嶆纭?' })
   }
   if (mobile !== undefined && mobile && !/^[0-9+\-\s]{6,20}$/.test(mobile)) {
-    return res.status(400).json({ success: false, message: '手机号格式不正确' })
+    return res.status(400).json({ success: false, message: '鎵嬫満鍙锋牸寮忎笉姝ｇ‘' })
   }
   if (realName !== undefined && (realName.length < 2 || realName.length > 32)) {
-    return res.status(400).json({ success: false, message: '真实姓名长度需在 2-32 个字符之间' })
+    return res.status(400).json({ success: false, message: '鐪熷疄濮撳悕闀垮害闇€鍦?2-32 涓瓧绗︿箣闂?' })
   }
 
   try {
     const existing = await User.findById(req.user.id)
     if (!existing) {
-      return res.status(404).json({ success: false, message: '用户不存在' })
+      return res.status(404).json({ success: false, message: '鐢ㄦ埛涓嶅瓨鍦?' })
     }
 
     const existingPreference = await UserPreference.getByUserId(req.user.id)
@@ -260,18 +265,18 @@ const updateProfile = async (req, res) => {
     const nextEmail = email === undefined ? existing.email || null : email
     const currentEmail = existing.email || null
     if (nextEmail && nextEmail !== currentEmail && (await User.isEmailTaken(nextEmail, req.user.id))) {
-      return res.status(409).json({ success: false, message: '邮箱已被占用' })
+      return res.status(409).json({ success: false, message: '閭宸茶鍗犵敤' })
     }
 
     const nextMobile = mobile === undefined ? existingPreference.mobile || '' : mobile
     const currentMobile = existingPreference.mobile || ''
     if (nextMobile && nextMobile !== currentMobile && (await UserPreference.isMobileTaken(nextMobile, req.user.id))) {
-      return res.status(409).json({ success: false, message: '手机号已被占用' })
+      return res.status(409).json({ success: false, message: '鎵嬫満鍙峰凡琚崰鐢?' })
     }
 
     const nextRealName = realName === undefined ? String(existing.real_name || '').trim() : realName
     if (!nextRealName) {
-      return res.status(400).json({ success: false, message: '真实姓名不能为空' })
+      return res.status(400).json({ success: false, message: '鐪熷疄濮撳悕涓嶈兘涓虹┖' })
     }
 
     await User.updateSelfProfile(req.user.id, { real_name: nextRealName, email: nextEmail })
@@ -281,15 +286,15 @@ const updateProfile = async (req, res) => {
     const updatedPreference = await UserPreference.getByUserId(req.user.id)
     return res.json({
       success: true,
-      message: '个人信息更新成功',
+      message: '涓汉淇℃伅鏇存柊鎴愬姛',
       data: buildProfileResponse(updatedUser, updatedPreference),
     })
   } catch (err) {
-    console.error('更新个人信息失败:', err)
+    console.error('鏇存柊涓汉淇℃伅澶辫触:', err)
     if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ success: false, message: '邮箱或手机号已被占用' })
+      return res.status(409).json({ success: false, message: '閭鎴栨墜鏈哄彿宸茶鍗犵敤' })
     }
-    return res.status(500).json({ success: false, message: '服务器错误' })
+    return res.status(500).json({ success: false, message: '鏈嶅姟鍣ㄩ敊璇?' })
   }
 }
 
@@ -299,32 +304,32 @@ const updatePassword = async (req, res) => {
   const confirmPassword = String(req.body.confirm_password || '')
 
   if (!oldPassword || !newPassword || !confirmPassword) {
-    return res.status(400).json({ success: false, message: '旧密码、新密码和确认密码不能为空' })
+    return res.status(400).json({ success: false, message: '鏃у瘑鐮併€佹柊瀵嗙爜鍜岀‘璁ゅ瘑鐮佷笉鑳戒负绌?' })
   }
   if (newPassword.length < 6) {
-    return res.status(400).json({ success: false, message: '新密码长度至少 6 个字符' })
+    return res.status(400).json({ success: false, message: '鏂板瘑鐮侀暱搴﹁嚦灏?6 涓瓧绗?' })
   }
   if (newPassword !== confirmPassword) {
-    return res.status(400).json({ success: false, message: '两次输入的新密码不一致' })
+    return res.status(400).json({ success: false, message: '涓ゆ杈撳叆鐨勬柊瀵嗙爜涓嶄竴鑷?' })
   }
 
   try {
     const authUser = await User.findAuthById(req.user.id)
     if (!authUser) {
-      return res.status(404).json({ success: false, message: '用户不存在' })
+      return res.status(404).json({ success: false, message: '鐢ㄦ埛涓嶅瓨鍦?' })
     }
 
     const matched = await bcrypt.compare(oldPassword, authUser.password)
     if (!matched) {
-      return res.status(400).json({ success: false, message: '旧密码不正确' })
+      return res.status(400).json({ success: false, message: '鏃у瘑鐮佷笉姝ｇ‘' })
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 10)
     await User.updatePasswordById(req.user.id, passwordHash)
-    return res.json({ success: true, message: '密码修改成功' })
+    return res.json({ success: true, message: '瀵嗙爜淇敼鎴愬姛' })
   } catch (err) {
-    console.error('修改密码失败:', err)
-    return res.status(500).json({ success: false, message: '服务器错误' })
+    console.error('淇敼瀵嗙爜澶辫触:', err)
+    return res.status(500).json({ success: false, message: '鏈嶅姟鍣ㄩ敊璇?' })
   }
 }
 
@@ -333,8 +338,8 @@ const getPreferences = async (req, res) => {
     const preferences = await UserPreference.getByUserId(req.user.id)
     return res.json({ success: true, data: preferences })
   } catch (err) {
-    console.error('获取个人偏好失败:', err)
-    return res.status(500).json({ success: false, message: '服务器错误' })
+    console.error('鑾峰彇涓汉鍋忓ソ澶辫触:', err)
+    return res.status(500).json({ success: false, message: '鏈嶅姟鍣ㄩ敊璇?' })
   }
 }
 
@@ -349,13 +354,13 @@ const updatePreferences = async (req, res) => {
   const compactDefault = rawCompactDefault === undefined ? undefined : toBoolInt(rawCompactDefault)
 
   if (rawDefaultHome !== undefined && !defaultHome) {
-    return res.status(400).json({ success: false, message: 'default_home 配置不合法' })
+    return res.status(400).json({ success: false, message: 'default_home 閰嶇疆涓嶅悎娉?' })
   }
   if (rawDateDisplayMode !== undefined && !dateDisplayMode) {
-    return res.status(400).json({ success: false, message: 'date_display_mode 配置不合法' })
+    return res.status(400).json({ success: false, message: 'date_display_mode 閰嶇疆涓嶅悎娉?' })
   }
   if (rawCompactDefault !== undefined && compactDefault === null) {
-    return res.status(400).json({ success: false, message: 'demand_list_compact_default 配置不合法' })
+    return res.status(400).json({ success: false, message: 'demand_list_compact_default 閰嶇疆涓嶅悎娉?' })
   }
 
   try {
@@ -371,8 +376,8 @@ const updatePreferences = async (req, res) => {
       data: preferences,
     })
   } catch (err) {
-    console.error('更新个人偏好失败:', err)
-    return res.status(500).json({ success: false, message: '服务器错误' })
+    console.error('鏇存柊涓汉鍋忓ソ澶辫触:', err)
+    return res.status(500).json({ success: false, message: '鏈嶅姟鍣ㄩ敊璇?' })
   }
 }
 
@@ -381,8 +386,8 @@ const getAccess = async (req, res) => {
     const access = req.userAccess || (await Permission.getUserAccess(req.user.id))
     return res.json({ success: true, data: access })
   } catch (err) {
-    console.error('获取访问权限失败:', err)
-    return res.status(500).json({ success: false, message: '服务器错误' })
+    console.error('鑾峰彇璁块棶鏉冮檺澶辫触:', err)
+    return res.status(500).json({ success: false, message: '鏈嶅姟鍣ㄩ敊璇?' })
   }
 }
 
@@ -396,3 +401,5 @@ module.exports = {
   updatePreferences,
   getAccess,
 }
+
+
