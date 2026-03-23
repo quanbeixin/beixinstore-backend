@@ -1120,6 +1120,11 @@ const Work = {
     return result.affectedRows
   },
 
+  async deleteLog(id) {
+    const [result] = await pool.query(`DELETE FROM work_logs WHERE id = ?`, [id])
+    return result.affectedRows
+  },
+
   async canManageLogByDepartmentOwner(ownerUserId, logId, { isSuperAdmin = false } = {}) {
     if (isSuperAdmin) return true
 

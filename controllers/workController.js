@@ -1,5 +1,6 @@
 ﻿const Work = require('../models/Work')
 const User = require('../models/User')
+const Workflow = require('../models/Workflow')
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -166,6 +167,10 @@ function ensureSuperAdmin(req, res) {
   return false
 }
 
+function isWorkflowTablesMissing(err) {
+  return err?.code === 'WORKFLOW_TABLES_MISSING'
+}
+
 const listWorkItemTypes = async (req, res) => {
   try {
     const enabledOnly = toBool(req.query.enabled_only, true)
@@ -299,6 +304,24 @@ const listDemands = async (req, res) => {
   }
 }
 
+const getDemandById = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    return res.json({ success: true, data: demand })
+  } catch (err) {
+    console.error('获取需求详情失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const createDemand = async (req, res) => {
   const demandId = normalizeDemandId(req.body.id)
   const name = normalizeText(req.body.name, 200)
@@ -372,11 +395,32 @@ const createDemand = async (req, res) => {
       createdBy: req.user.id,
     })
 
+    let workflow = null
+    let workflowInitWarning = ''
+    try {
+      workflow = await Workflow.initDemandWorkflow({
+        demandId: finalDemandId,
+        ownerUserId,
+        operatorUserId: req.user.id,
+      })
+    } catch (workflowErr) {
+      if (isWorkflowTablesMissing(workflowErr)) {
+        workflowInitWarning = '流程表尚未初始化，本次未自动创建流程实例'
+      } else {
+        workflowInitWarning = '流程实例初始化失败，请稍后重试或联系管理员'
+        console.error('需求创建后初始化流程失败:', workflowErr)
+      }
+    }
+
     const created = await Work.findDemandById(finalDemandId)
     return res.status(201).json({
       success: true,
-      message: '需求创建成功',
-      data: created,
+      message: workflowInitWarning ? `需求创建成功（${workflowInitWarning}）` : '需求创建成功',
+      data: {
+        ...created,
+        workflow,
+        workflow_init_warning: workflowInitWarning || null,
+      },
     })
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') {
@@ -603,7 +647,7 @@ const createLog = async (req, res) => {
     req.body.personal_estimate_hours,
     legacyActualHours !== null ? legacyActualHours : null,
   )
-  const actualHours = normalizeHours(req.body.actual_hours, 0)
+  let actualHours = normalizeHours(req.body.actual_hours, 0)
   const remainingHours = normalizeHours(req.body.remaining_hours, 0)
   const demandId = normalizeDemandId(req.body.demand_id)
   let phaseKey = normalizePhaseKey(req.body.phase_key)
@@ -627,6 +671,10 @@ const createLog = async (req, res) => {
 
   if (personalEstimateHours === null || personalEstimateHours <= 0) {
     return res.status(400).json({ success: false, message: 'personal_estimate_hours 必须大于 0' })
+  }
+
+  if (logStatus === 'DONE' && Number(actualHours || 0) === 0) {
+    actualHours = personalEstimateHours
   }
 
   if (actualHours === null || actualHours < 0) {
@@ -698,11 +746,31 @@ const createLog = async (req, res) => {
       logCompletedAt: logCompletedAt || null,
     })
 
+    let workflowSync = null
+    try {
+      workflowSync = await Workflow.syncFromWorkLogStatusChange({
+        logId: id,
+        demandId,
+        phaseKey,
+        itemTypeKey: String(itemType.type_key || '').toUpperCase(),
+        operatorUserId: req.user.id,
+        previousStatus: null,
+        nextStatus: logStatus,
+      })
+    } catch (workflowErr) {
+      if (!isWorkflowTablesMissing(workflowErr)) {
+        console.error('创建工作记录后同步流程状态失败:', workflowErr)
+      }
+    }
+
     const created = await Work.findLogById(id)
     return res.status(201).json({
       success: true,
       message: '工作记录创建成功',
-      data: created,
+      data: {
+        ...created,
+        workflow_sync: workflowSync,
+      },
     })
   } catch (err) {
     console.error('创建工作记录失败:', err)
@@ -744,10 +812,10 @@ const updateLog = async (req, res) => {
       req.body.personal_estimate_hours === undefined
         ? Number(existing.personal_estimate_hours ?? existing.actual_hours ?? 0)
         : normalizeHours(req.body.personal_estimate_hours, null)
-    const actualHours =
+    let actualHours =
       req.body.actual_hours === undefined
-        ? Number(existing.actual_hours)
-        : normalizeHours(req.body.actual_hours, null)
+        ? normalizeHours(existing.actual_hours, 0)
+        : normalizeHours(req.body.actual_hours, 0)
     const remainingHours =
       req.body.remaining_hours === undefined
         ? Number(existing.remaining_hours)
@@ -787,6 +855,10 @@ const updateLog = async (req, res) => {
 
     if (personalEstimateHours === null || personalEstimateHours < 0) {
       return res.status(400).json({ success: false, message: 'personal_estimate_hours 不能小于 0' })
+    }
+
+    if (logStatus === 'DONE' && Number(actualHours || 0) === 0) {
+      actualHours = personalEstimateHours
     }
 
     if (actualHours === null || actualHours < 0) {
@@ -838,10 +910,58 @@ const updateLog = async (req, res) => {
       logCompletedAt,
     })
 
+    let workflowSync = null
+    try {
+      workflowSync = await Workflow.syncFromWorkLogStatusChange({
+        logId: id,
+        demandId,
+        phaseKey,
+        itemTypeKey: String(itemType.type_key || '').toUpperCase(),
+        operatorUserId: req.user.id,
+        previousStatus: existing.log_status,
+        nextStatus: logStatus,
+      })
+    } catch (workflowErr) {
+      if (!isWorkflowTablesMissing(workflowErr)) {
+        console.error('更新工作记录后同步流程状态失败:', workflowErr)
+      }
+    }
+
     const updated = await Work.findLogById(id)
-    return res.json({ success: true, message: '工作记录更新成功', data: updated })
+    return res.json({
+      success: true,
+      message: '工作记录更新成功',
+      data: {
+        ...updated,
+        workflow_sync: workflowSync,
+      },
+    })
   } catch (err) {
     console.error('更新工作记录失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const deleteLog = async (req, res) => {
+  const id = toPositiveInt(req.params.id)
+  if (!id) {
+    return res.status(400).json({ success: false, message: '工作记录 ID 无效' })
+  }
+
+  try {
+    const existing = await Work.findLogById(id)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '工作记录不存在' })
+    }
+
+    if (Number(existing.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可删除自己的工作记录' })
+    }
+
+    await Work.deleteLog(id)
+    return res.json({ success: true, message: '工作记录已删除' })
+  } catch (err) {
+    console.error('删除工作记录失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -1012,10 +1132,256 @@ const getMemberInsight = async (req, res) => {
   }
 }
 
+const initDemandWorkflowInstance = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.initDemandWorkflow({
+      demandId,
+      ownerUserId: demand.owner_user_id,
+      operatorUserId: req.user.id,
+    })
+    return res.json({
+      success: true,
+      message: '需求流程实例已初始化',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'DEMAND_PHASE_DICT_EMPTY') {
+      return res.status(400).json({ success: false, message: '需求阶段字典为空，无法初始化流程' })
+    }
+    console.error('初始化需求流程失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getDemandWorkflow = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    let workflow = await Workflow.getDemandWorkflowByDemandId(demandId)
+    if (!workflow) {
+      workflow = await Workflow.initDemandWorkflow({
+        demandId,
+        ownerUserId: demand.owner_user_id,
+        operatorUserId: req.user.id,
+      })
+    }
+    return res.json({ success: true, data: workflow })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    console.error('获取需求流程失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const assignDemandWorkflowCurrentNode = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  const assigneeUserId = toPositiveInt(req.body.assignee_user_id)
+  const dueAtRaw = req.body.due_at
+  const dueAt = normalizeDate(dueAtRaw)
+  const comment = normalizeText(req.body.comment, 500)
+
+  if (!assigneeUserId) {
+    return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
+  }
+  if (
+    dueAtRaw !== undefined &&
+    dueAtRaw !== null &&
+    String(dueAtRaw).trim() !== '' &&
+    !dueAt
+  ) {
+    return res.status(400).json({ success: false, message: 'due_at 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const targetUser = await User.findById(assigneeUserId)
+    if (!targetUser) {
+      return res.status(400).json({ success: false, message: '指派目标用户不存在' })
+    }
+
+    const workflow = await Workflow.assignCurrentNode({
+      demandId,
+      assigneeUserId,
+      operatorUserId: req.user.id,
+      dueAt,
+      comment,
+    })
+    return res.json({
+      success: true,
+      message: '当前节点已指派并生成待办',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    console.error('指派需求流程节点失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const assignDemandWorkflowNode = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const nodeKey = normalizePhaseKey(req.params.nodeKey)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!nodeKey) {
+    return res.status(400).json({ success: false, message: '节点标识无效' })
+  }
+
+  const assigneeUserId = toPositiveInt(req.body.assignee_user_id)
+  const dueAtRaw = req.body.due_at
+  const dueAt = normalizeDate(dueAtRaw)
+  const comment = normalizeText(req.body.comment, 500)
+
+  if (!assigneeUserId) {
+    return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
+  }
+  if (
+    dueAtRaw !== undefined &&
+    dueAtRaw !== null &&
+    String(dueAtRaw).trim() !== '' &&
+    !dueAt
+  ) {
+    return res.status(400).json({ success: false, message: 'due_at 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const targetUser = await User.findById(assigneeUserId)
+    if (!targetUser) {
+      return res.status(400).json({ success: false, message: '指派目标用户不存在' })
+    }
+
+    const workflow = await Workflow.assignNode({
+      demandId,
+      nodeKey,
+      assigneeUserId,
+      operatorUserId: req.user.id,
+      dueAt,
+      comment,
+    })
+    return res.json({
+      success: true,
+      message: '节点已指派',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_NODE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程节点不存在' })
+    }
+    if (err?.code === 'WORKFLOW_NODE_CLOSED') {
+      return res.status(400).json({ success: false, message: '当前节点已关闭，无法指派' })
+    }
+    console.error('按节点指派需求流程失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const submitDemandWorkflowCurrentNode = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  const comment = normalizeText(req.body.comment, 500)
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.submitCurrentNode({
+      demandId,
+      operatorUserId: req.user.id,
+      comment,
+      sourceType: 'MANUAL',
+    })
+
+    return res.json({
+      success: true,
+      message: '当前节点已提交',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_NOT_ASSIGNEE') {
+      return res.status(403).json({ success: false, message: '当前节点仅负责人可提交' })
+    }
+    console.error('提交流程节点失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getMyWorkbench = async (req, res) => {
   try {
     const data = await Work.getMyWorkbench(req.user.id)
-    return res.json({ success: true, data })
+    let workflowTodos = []
+    try {
+      workflowTodos = await Workflow.listMyOpenTasks(req.user.id, { limit: 30 })
+    } catch (workflowErr) {
+      if (!isWorkflowTablesMissing(workflowErr)) {
+        console.error('获取流程待办失败:', workflowErr)
+      }
+    }
+
+    const payload = {
+      ...data,
+      workflow_todos: workflowTodos,
+      workflow_todo_count: workflowTodos.length,
+    }
+    return res.json({ success: true, data: payload })
   } catch (err) {
     console.error('获取个人工作台失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
@@ -1091,16 +1457,23 @@ module.exports = {
   listDemandPhaseTypes,
   createWorkItemType,
   listDemands,
+  getDemandById,
   createDemand,
   updateDemand,
   deleteDemand,
   listLogs,
   createLog,
   updateLog,
+  deleteLog,
   updateLogOwnerEstimate,
   getInsightFilterOptions,
   getDemandInsight,
   getMemberInsight,
+  initDemandWorkflowInstance,
+  getDemandWorkflow,
+  assignDemandWorkflowCurrentNode,
+  assignDemandWorkflowNode,
+  submitDemandWorkflowCurrentNode,
   getMyWorkbench,
   getOwnerWorkbench,
   getMorningStandupBoard,
