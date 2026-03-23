@@ -11,6 +11,8 @@ const {
   createDemand,
   updateDemand,
   deleteDemand,
+  listArchivedDemands,
+  purgeArchivedDemand,
   listLogs,
   createLog,
   createOwnerAssignedLog,
@@ -50,6 +52,8 @@ router.get('/demands/:id', authMiddleware.requirePermission('demand.view'), getD
 router.post('/demands', authMiddleware.requirePermission('demand.manage'), createDemand)
 router.put('/demands/:id', authMiddleware.requirePermission('demand.view'), updateDemand)
 router.delete('/demands/:id', authMiddleware.requirePermission('demand.view'), deleteDemand)
+router.get('/archive/demands', authMiddleware.requirePermission('archive.view'), listArchivedDemands)
+router.delete('/archive/demands/:id/purge', authMiddleware.requirePermission('archive.manage'), purgeArchivedDemand)
 router.post('/demands/:id/workflow/init', authMiddleware.requirePermission('demand.manage'), initDemandWorkflowInstance)
 router.get('/demands/:id/workflow', authMiddleware.requirePermission('demand.view'), getDemandWorkflow)
 router.post(

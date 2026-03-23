@@ -81,6 +81,7 @@ const User = {
         u.email,
         u.department_id,
         COALESCE(u.status_code, 'ACTIVE') AS status_code,
+        COALESCE(u.include_in_metrics, 1) AS include_in_metrics,
         u.created_at,
         u.last_login_at,
         d.name AS department_name,
@@ -101,6 +102,7 @@ const User = {
         u.email,
         u.department_id,
         'ACTIVE' AS status_code,
+        1 AS include_in_metrics,
         u.created_at,
         NULL AS last_login_at,
         d.name AS department_name,
@@ -144,6 +146,7 @@ const User = {
         u.email,
         u.department_id,
         COALESCE(u.status_code, 'ACTIVE') AS status_code,
+        COALESCE(u.include_in_metrics, 1) AS include_in_metrics,
         u.created_at,
         d.name AS department_name,
         GROUP_CONCAT(DISTINCT r.name) AS role_names
@@ -164,6 +167,7 @@ const User = {
         u.email,
         u.department_id,
         'ACTIVE' AS status_code,
+        1 AS include_in_metrics,
         u.created_at,
         d.name AS department_name,
         GROUP_CONCAT(DISTINCT r.name) AS role_names
@@ -204,13 +208,21 @@ const User = {
     return { rows, total }
   },
 
-  create: async ({ username, password, real_name = '', email = null, department_id = null, status_code = 'ACTIVE' }) => {
+  create: async ({
+    username,
+    password,
+    real_name = '',
+    email = null,
+    department_id = null,
+    status_code = 'ACTIVE',
+    include_in_metrics = 1,
+  }) => {
     let result
 
     try {
       ;[result] = await pool.query(
-        'INSERT INTO users (username, password, real_name, email, department_id, status_code) VALUES (?, ?, ?, ?, ?, ?)',
-        [username, password, real_name || null, email, department_id, status_code],
+        'INSERT INTO users (username, password, real_name, email, department_id, status_code, include_in_metrics) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [username, password, real_name || null, email, department_id, status_code, Number(include_in_metrics) === 1 ? 1 : 0],
       )
     } catch (err) {
       if (!isMissingColumnError(err)) throw err
@@ -244,13 +256,13 @@ const User = {
     return result.insertId
   },
 
-  update: async (id, { real_name = '', email, department_id, status_code = 'ACTIVE' }) => {
+  update: async (id, { real_name = '', email, department_id, status_code = 'ACTIVE', include_in_metrics = 1 }) => {
     let result
 
     try {
       ;[result] = await pool.query(
-        'UPDATE users SET real_name = ?, email = ?, department_id = ?, status_code = ? WHERE id = ?',
-        [real_name || null, email, department_id, status_code, id],
+        'UPDATE users SET real_name = ?, email = ?, department_id = ?, status_code = ?, include_in_metrics = ? WHERE id = ?',
+        [real_name || null, email, department_id, status_code, Number(include_in_metrics) === 1 ? 1 : 0, id],
       )
     } catch (err) {
       if (!isMissingColumnError(err)) throw err

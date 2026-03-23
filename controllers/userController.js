@@ -27,6 +27,17 @@ function normalizeEmail(value) {
   return email || null
 }
 
+function normalizeIncludeInMetrics(value, fallback = 1) {
+  if (value === undefined || value === null || value === '') return fallback
+  if (value === true || value === 1 || value === '1') return 1
+  if (value === false || value === 0 || value === '0') return 0
+
+  const normalized = String(value).trim().toLowerCase()
+  if (['true', 'yes', 'y', 'on'].includes(normalized)) return 1
+  if (['false', 'no', 'n', 'off'].includes(normalized)) return 0
+  return fallback
+}
+
 function normalizeSortBy(value) {
   const sortBy = String(value || '').trim().toLowerCase()
   if (!sortBy) return 'real_name'
@@ -89,7 +100,7 @@ const getUserById = async (req, res) => {
 
 // 创建新用户（POST /api/users）
 const createUser = async (req, res) => {
-  const { username, password, email, department_id, role_ids, status_code } = req.body
+  const { username, password, email, department_id, role_ids, status_code, include_in_metrics } = req.body
   const realName = normalizeRealName(req.body.real_name)
   const normalizedEmail = normalizeEmail(email)
 
@@ -136,6 +147,7 @@ const createUser = async (req, res) => {
       email: normalizedEmail,
       department_id: departmentId,
       status_code: normalizeStatusCode(status_code),
+      include_in_metrics: normalizeIncludeInMetrics(include_in_metrics, 1),
     })
 
     if (roleIds.length > 0) {
@@ -159,7 +171,7 @@ const createUser = async (req, res) => {
 // 通过 POST 更新用户信息（POST /api/users/:id/update）
 const updateUser = async (req, res) => {
   const { id } = req.params
-  const { email, department_id, role_ids, status_code } = req.body
+  const { email, department_id, role_ids, status_code, include_in_metrics } = req.body
   const realNameRaw = req.body.real_name
   const realName = normalizeRealName(realNameRaw)
   const normalizedEmail = normalizeEmail(email)
@@ -205,6 +217,10 @@ const updateUser = async (req, res) => {
       email: nextEmail,
       department_id: departmentId,
       status_code: normalizeStatusCode(status_code),
+      include_in_metrics: normalizeIncludeInMetrics(
+        include_in_metrics,
+        Number(user?.include_in_metrics ?? 1) === 1 ? 1 : 0,
+      ),
     })
 
     if (Array.isArray(role_ids)) {

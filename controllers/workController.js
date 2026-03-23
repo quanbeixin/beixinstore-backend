@@ -577,6 +577,101 @@ const deleteDemand = async (req, res) => {
   }
 }
 
+const listArchivedDemands = async (req, res) => {
+  const page = toPositiveInt(req.query.page) || 1
+  const pageSize = toPositiveInt(req.query.pageSize) || 10
+  const keyword = normalizeText(req.query.keyword, 100)
+  const ownerUserId = toPositiveInt(req.query.owner_user_id)
+  const archivedStartDateRaw = req.query.archived_start_date
+  const archivedEndDateRaw = req.query.archived_end_date
+  const archivedStartDate = normalizeDate(archivedStartDateRaw)
+  const archivedEndDate = normalizeDate(archivedEndDateRaw)
+
+  if (
+    archivedStartDateRaw !== undefined &&
+    archivedStartDateRaw !== null &&
+    String(archivedStartDateRaw).trim() !== '' &&
+    !archivedStartDate
+  ) {
+    return res.status(400).json({ success: false, message: 'archived_start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (
+    archivedEndDateRaw !== undefined &&
+    archivedEndDateRaw !== null &&
+    String(archivedEndDateRaw).trim() !== '' &&
+    !archivedEndDate
+  ) {
+    return res.status(400).json({ success: false, message: 'archived_end_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (archivedStartDate && archivedEndDate && archivedStartDate > archivedEndDate) {
+    return res.status(400).json({ success: false, message: '归档时间范围不合法：开始日期不能大于结束日期' })
+  }
+
+  try {
+    const { rows, total } = await Work.listArchivedDemands({
+      page,
+      pageSize,
+      keyword,
+      ownerUserId,
+      archivedStartDate: archivedStartDate || '',
+      archivedEndDate: archivedEndDate || '',
+    })
+
+    return res.json({
+      success: true,
+      data: {
+        list: rows,
+        total,
+        page,
+        pageSize,
+      },
+    })
+  } catch (err) {
+    console.error('获取归档需求失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const purgeArchivedDemand = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  const confirmDemandIdRaw = req.body?.confirm_demand_id
+  const confirmDemandId =
+    confirmDemandIdRaw === undefined || confirmDemandIdRaw === null || String(confirmDemandIdRaw).trim() === ''
+      ? ''
+      : normalizeDemandId(confirmDemandIdRaw)
+
+  if (confirmDemandIdRaw !== undefined && confirmDemandIdRaw !== null && String(confirmDemandIdRaw).trim() !== '') {
+    if (!confirmDemandId) {
+      return res.status(400).json({ success: false, message: 'confirm_demand_id 格式错误' })
+    }
+    if (confirmDemandId !== demandId) {
+      return res.status(400).json({ success: false, message: '确认需求 ID 不匹配' })
+    }
+  }
+
+  try {
+    const result = await Work.purgeArchivedDemand(demandId)
+    return res.json({
+      success: true,
+      message: '归档需求已彻底删除',
+      data: result,
+    })
+  } catch (err) {
+    if (err?.code === 'DEMAND_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    if (err?.code === 'DEMAND_NOT_ARCHIVED') {
+      return res.status(400).json({ success: false, message: '仅已归档需求可彻底删除' })
+    }
+    console.error('彻底删除归档需求失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const listLogs = async (req, res) => {
   const page = toPositiveInt(req.query.page) || 1
   const pageSize = toPositiveInt(req.query.pageSize) || 20
@@ -1698,6 +1793,8 @@ module.exports = {
   createDemand,
   updateDemand,
   deleteDemand,
+  listArchivedDemands,
+  purgeArchivedDemand,
   listLogs,
   createLog,
   createOwnerAssignedLog,

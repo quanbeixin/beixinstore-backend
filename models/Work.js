@@ -101,6 +101,10 @@ function isMissingColumnError(err) {
   return err && err.code === 'ER_BAD_FIELD_ERROR'
 }
 
+function isMissingTableError(err) {
+  return err && (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146)
+}
+
 function parseExtraJson(raw) {
   if (!raw) return null
   if (typeof raw === 'object') return raw
@@ -182,6 +186,7 @@ async function listActiveUserIds() {
     `SELECT u.id
      FROM users u
      WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+       AND COALESCE(u.include_in_metrics, 1) = 1
      ORDER BY u.id ASC`,
   )
   return normalizeUserIds(rows)
@@ -283,6 +288,7 @@ async function resolveOwnerScope(ownerUserId, { isSuperAdmin = false } = {}) {
      FROM users u
      WHERE u.department_id IN (?)
        AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+       AND COALESCE(u.include_in_metrics, 1) = 1
      ORDER BY u.id ASC`,
     [managedDepartmentIds],
   )
@@ -372,6 +378,7 @@ function buildDemandInsightWhere({
   const conditions = [
     'l.demand_id IS NOT NULL',
     "COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'",
+    'COALESCE(u.include_in_metrics, 1) = 1',
     'l.log_date >= ?',
     'l.log_date <= ?',
   ]
@@ -419,7 +426,12 @@ function buildMemberInsightWhere({
   memberUserId = null,
   keyword = '',
 } = {}) {
-  const conditions = ["COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'", 'l.log_date >= ?', 'l.log_date <= ?']
+  const conditions = [
+    "COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'",
+    'COALESCE(u.include_in_metrics, 1) = 1',
+    'l.log_date >= ?',
+    'l.log_date <= ?',
+  ]
   const params = [startDate, endDate]
 
   if (departmentId) {
@@ -912,6 +924,209 @@ const Work = {
       mode: 'DELETED',
       affected_rows: Number(result?.affectedRows || 0),
       related_log_count: 0,
+    }
+  },
+
+  async listArchivedDemands({
+    page = 1,
+    pageSize = 10,
+    keyword = '',
+    ownerUserId = null,
+    archivedStartDate = '',
+    archivedEndDate = '',
+  } = {}) {
+    const offset = (page - 1) * pageSize
+    const conditions = ['d.status = ?']
+    const params = ['CANCELLED']
+
+    if (keyword) {
+      conditions.push('(d.id LIKE ? OR d.name LIKE ?)')
+      params.push(`%${keyword}%`, `%${keyword}%`)
+    }
+
+    if (ownerUserId) {
+      conditions.push('d.owner_user_id = ?')
+      params.push(ownerUserId)
+    }
+
+    if (archivedStartDate) {
+      conditions.push('d.completed_at >= ?')
+      params.push(`${archivedStartDate} 00:00:00`)
+    }
+
+    if (archivedEndDate) {
+      conditions.push('d.completed_at < DATE_ADD(?, INTERVAL 1 DAY)')
+      params.push(archivedEndDate)
+    }
+
+    const whereSql = conditions.join(' AND ')
+    const baseSelectSql = `
+      SELECT
+        d.id,
+        d.name,
+        d.owner_user_id,
+        COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
+        d.business_group_code,
+        bg.item_name AS business_group_name,
+        d.status,
+        DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS archived_at,
+        DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+        COALESCE(lc.related_log_count, 0) AS related_log_count`
+    const fromSql = `
+      FROM work_demands d
+      LEFT JOIN users u ON u.id = d.owner_user_id
+      LEFT JOIN config_dict_items bg
+        ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
+       AND bg.item_code = d.business_group_code
+      LEFT JOIN (
+        SELECT demand_id, COUNT(*) AS related_log_count
+        FROM work_logs
+        WHERE demand_id IS NOT NULL
+        GROUP BY demand_id
+      ) lc ON lc.demand_id = d.id`
+
+    const listSqlWithWorkflow = `
+      ${baseSelectSql},
+        COALESCE(wi.related_workflow_instance_count, 0) AS related_workflow_instance_count
+      ${fromSql}
+      LEFT JOIN (
+        SELECT biz_id, COUNT(*) AS related_workflow_instance_count
+        FROM wf_process_instances
+        WHERE biz_type = 'DEMAND'
+        GROUP BY biz_id
+      ) wi ON wi.biz_id = d.id
+      WHERE ${whereSql}
+      ORDER BY d.completed_at DESC, d.updated_at DESC, d.id DESC
+      LIMIT ? OFFSET ?`
+
+    const listSqlWithoutWorkflow = `
+      ${baseSelectSql},
+        0 AS related_workflow_instance_count
+      ${fromSql}
+      WHERE ${whereSql}
+      ORDER BY d.completed_at DESC, d.updated_at DESC, d.id DESC
+      LIMIT ? OFFSET ?`
+
+    let rows = []
+    try {
+      ;[rows] = await pool.query(listSqlWithWorkflow, [...params, pageSize, offset])
+    } catch (err) {
+      if (!isMissingTableError(err)) throw err
+      ;[rows] = await pool.query(listSqlWithoutWorkflow, [...params, pageSize, offset])
+    }
+
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM work_demands d
+       WHERE ${whereSql}`,
+      params,
+    )
+
+    return { rows, total }
+  },
+
+  async purgeArchivedDemand(demandId) {
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const [demandRows] = await conn.query(
+        `SELECT id, status
+         FROM work_demands
+         WHERE id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [demandId],
+      )
+      const demand = demandRows[0] || null
+
+      if (!demand) {
+        const err = new Error('demand_not_found')
+        err.code = 'DEMAND_NOT_FOUND'
+        throw err
+      }
+
+      if (String(demand.status || '').toUpperCase() !== 'CANCELLED') {
+        const err = new Error('demand_not_archived')
+        err.code = 'DEMAND_NOT_ARCHIVED'
+        throw err
+      }
+
+      const stats = {
+        demand_id: demandId,
+        deleted_work_logs: 0,
+        deleted_demand_phases: 0,
+        deleted_workflow_instances: 0,
+        deleted_workflow_nodes: 0,
+        deleted_workflow_tasks: 0,
+        deleted_workflow_actions: 0,
+        deleted_demands: 0,
+      }
+
+      const [logResult] = await conn.query('DELETE FROM work_logs WHERE demand_id = ?', [demandId])
+      stats.deleted_work_logs = Number(logResult?.affectedRows || 0)
+
+      try {
+        const [phaseResult] = await conn.query('DELETE FROM work_demand_phases WHERE demand_id = ?', [demandId])
+        stats.deleted_demand_phases = Number(phaseResult?.affectedRows || 0)
+      } catch (err) {
+        if (!isMissingTableError(err)) throw err
+      }
+
+      let workflowInstanceIds = []
+      try {
+        const [instanceRows] = await conn.query(
+          `SELECT id
+           FROM wf_process_instances
+           WHERE biz_type = 'DEMAND' AND biz_id = ?
+           FOR UPDATE`,
+          [demandId],
+        )
+        workflowInstanceIds = (instanceRows || [])
+          .map((item) => Number(item.id))
+          .filter((id) => Number.isInteger(id) && id > 0)
+      } catch (err) {
+        if (!isMissingTableError(err)) throw err
+      }
+
+      if (workflowInstanceIds.length > 0) {
+        const placeholders = workflowInstanceIds.map(() => '?').join(', ')
+
+        const [actionResult] = await conn.query(
+          `DELETE FROM wf_process_actions WHERE instance_id IN (${placeholders})`,
+          workflowInstanceIds,
+        )
+        stats.deleted_workflow_actions = Number(actionResult?.affectedRows || 0)
+
+        const [taskResult] = await conn.query(
+          `DELETE FROM wf_process_tasks WHERE instance_id IN (${placeholders})`,
+          workflowInstanceIds,
+        )
+        stats.deleted_workflow_tasks = Number(taskResult?.affectedRows || 0)
+
+        const [nodeResult] = await conn.query(
+          `DELETE FROM wf_process_instance_nodes WHERE instance_id IN (${placeholders})`,
+          workflowInstanceIds,
+        )
+        stats.deleted_workflow_nodes = Number(nodeResult?.affectedRows || 0)
+
+        const [instanceResult] = await conn.query(
+          `DELETE FROM wf_process_instances WHERE id IN (${placeholders})`,
+          workflowInstanceIds,
+        )
+        stats.deleted_workflow_instances = Number(instanceResult?.affectedRows || 0)
+      }
+
+      const [demandDeleteResult] = await conn.query('DELETE FROM work_demands WHERE id = ?', [demandId])
+      stats.deleted_demands = Number(demandDeleteResult?.affectedRows || 0)
+
+      await conn.commit()
+      return stats
+    } catch (err) {
+      await conn.rollback()
+      throw err
+    } finally {
+      conn.release()
     }
   },
 
@@ -1454,6 +1669,7 @@ const Work = {
        FROM users u
        LEFT JOIN departments d ON d.id = u.department_id
        WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+         AND COALESCE(u.include_in_metrics, 1) = 1
          AND u.department_id IN (?)
        ORDER BY u.department_id ASC, u.id ASC`,
       [scopedDepartmentIds],
@@ -1700,6 +1916,7 @@ const Work = {
            u.department_id
          FROM users u
          WHERE u.id IN (?)
+           AND COALESCE(u.include_in_metrics, 1) = 1
          ORDER BY u.id ASC`,
         [teamMemberIds],
       )
@@ -1712,7 +1929,8 @@ const Work = {
            COALESCE(SUM(CASE WHEN wl.log_date = CURDATE() THEN wl.actual_hours ELSE 0 END), 0) AS total_actual_hours_today
          FROM users u
          LEFT JOIN work_logs wl ON wl.user_id = u.id
-         WHERE u.id IN (?)`,
+         WHERE u.id IN (?)
+           AND COALESCE(u.include_in_metrics, 1) = 1`,
         [teamMemberIds],
       )
       overview = overviewRow || defaultOverview
@@ -1727,14 +1945,19 @@ const Work = {
            FROM work_logs
            WHERE log_date = CURDATE()
          ) l ON l.user_id = u.id
-         WHERE u.id IN (?) AND l.user_id IS NULL
+         WHERE u.id IN (?)
+           AND COALESCE(u.include_in_metrics, 1) = 1
+           AND l.user_id IS NULL
          ORDER BY u.id ASC`,
         [teamMemberIds],
       )
     }
 
     let ownerEstimateItems = []
-    const ownerEstimateQueryConditions = [`COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'`]
+    const ownerEstimateQueryConditions = [
+      `COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'`,
+      `COALESCE(u.include_in_metrics, 1) = 1`,
+    ]
     const ownerEstimateQueryParams = []
 
     if (!isSuperAdmin) {
@@ -1897,6 +2120,7 @@ const Work = {
        FROM users u
        LEFT JOIN departments d ON d.id = u.department_id
        WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+         AND COALESCE(u.include_in_metrics, 1) = 1
        ORDER BY u.id ASC`,
     )
 
@@ -2179,7 +2403,10 @@ const Work = {
     memberUserId = null,
     keyword = '',
   } = {}) {
-    const userConditions = [`COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'`]
+    const userConditions = [
+      `COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'`,
+      'COALESCE(u.include_in_metrics, 1) = 1',
+    ]
     const userParams = []
     if (departmentId) {
       userConditions.push('u.department_id = ?')
