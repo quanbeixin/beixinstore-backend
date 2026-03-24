@@ -67,6 +67,16 @@ function addDays(date, days) {
   return d
 }
 
+function resolveDailyPlanRange(startDate, endDate, fallbackDate) {
+  const fallback = normalizeDate(fallbackDate) || formatDate(new Date())
+  const start = normalizeDate(startDate) || fallback
+  const endCandidate = normalizeDate(endDate) || start
+  if (endCandidate < start) {
+    return { startDate: start, endDate: start }
+  }
+  return { startDate: start, endDate: endCandidate }
+}
+
 function resolveInsightDateRange(startRaw, endRaw) {
   const startProvided = startRaw !== undefined && startRaw !== null && String(startRaw).trim() !== ''
   const endProvided = endRaw !== undefined && endRaw !== null && String(endRaw).trim() !== ''
@@ -861,6 +871,24 @@ const createLog = async (req, res) => {
       logCompletedAt: logCompletedAt || null,
     })
 
+    try {
+      const { startDate, endDate } = resolveDailyPlanRange(
+        expectedStartDate,
+        expectedCompletionDate,
+        logDate,
+      )
+      await Work.seedDailyPlansForLog(id, {
+        userId: req.user.id,
+        expectedStartDate: startDate,
+        expectedCompletionDate: endDate,
+        totalPlannedHours: personalEstimateHours,
+        source: 'SYSTEM_SPLIT',
+        createdBy: req.user.id,
+      })
+    } catch (dailyPlanErr) {
+      console.error('创建工作记录后初始化日计划失败:', dailyPlanErr)
+    }
+
     let workflowSync = null
     try {
       workflowSync = await Workflow.syncFromWorkLogStatusChange({
@@ -1046,6 +1074,24 @@ const createOwnerAssignedLog = async (req, res) => {
     })
 
     try {
+      const { startDate, endDate } = resolveDailyPlanRange(
+        expectedStartDate,
+        expectedCompletionDate,
+        logDate,
+      )
+      await Work.seedDailyPlansForLog(id, {
+        userId: assigneeUserId,
+        expectedStartDate: startDate,
+        expectedCompletionDate: endDate,
+        totalPlannedHours: personalEstimateHours,
+        source: 'OWNER_ASSIGN',
+        createdBy: req.user.id,
+      })
+    } catch (dailyPlanErr) {
+      console.error('创建 Owner 指派事项后初始化日计划失败:', dailyPlanErr)
+    }
+
+    try {
       await Work.updateLogOwnerEstimate(id, {
         ownerEstimateHours,
         ownerEstimatedBy: req.user.id,
@@ -1219,6 +1265,24 @@ const updateLog = async (req, res) => {
       logCompletedAt,
     })
 
+    try {
+      const { startDate, endDate } = resolveDailyPlanRange(
+        expectedStartDate,
+        expectedCompletionDate,
+        logDate || existing.log_date,
+      )
+      await Work.syncAutoDailyPlansForLog(id, {
+        userId: req.user.id,
+        expectedStartDate: startDate,
+        expectedCompletionDate: endDate,
+        totalPlannedHours: personalEstimateHours,
+        source: 'SYSTEM_SPLIT_UPDATE',
+        createdBy: req.user.id,
+      })
+    } catch (dailyPlanErr) {
+      console.error('更新工作记录后同步日计划失败:', dailyPlanErr)
+    }
+
     let workflowSync = null
     try {
       workflowSync = await Workflow.syncFromWorkLogStatusChange({
@@ -1272,6 +1336,183 @@ const deleteLog = async (req, res) => {
     return res.json({ success: true, message: '工作记录已删除' })
   } catch (err) {
     console.error('删除工作记录失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listLogDailyPlans = async (req, res) => {
+  const id = toPositiveInt(req.params.id)
+  if (!id) {
+    return res.status(400).json({ success: false, message: '工作记录 ID 无效' })
+  }
+
+  const startDateRaw = req.query.start_date
+  const endDateRaw = req.query.end_date
+  const startDate = normalizeDate(startDateRaw)
+  const endDate = normalizeDate(endDateRaw)
+  if (startDateRaw !== undefined && String(startDateRaw || '').trim() !== '' && !startDate) {
+    return res.status(400).json({ success: false, message: 'start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (endDateRaw !== undefined && String(endDateRaw || '').trim() !== '' && !endDate) {
+    return res.status(400).json({ success: false, message: 'end_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  try {
+    const existing = await Work.findLogById(id)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '工作记录不存在' })
+    }
+    if (Number(existing.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可查看自己的事项计划' })
+    }
+
+    const rows = await Work.listDailyPlansForLog(id, {
+      startDate,
+      endDate,
+    })
+    return res.json({ success: true, data: rows })
+  } catch (err) {
+    console.error('获取事项日计划失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const upsertLogDailyPlan = async (req, res) => {
+  const id = toPositiveInt(req.params.id)
+  if (!id) {
+    return res.status(400).json({ success: false, message: '工作记录 ID 无效' })
+  }
+
+  const planDateRaw = req.body.plan_date
+  const planDate = normalizeDate(planDateRaw)
+  if (!planDate) {
+    return res.status(400).json({ success: false, message: 'plan_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  const plannedHours = normalizeHours(req.body.planned_hours, null)
+  if (plannedHours === null || plannedHours < 0) {
+    return res.status(400).json({ success: false, message: 'planned_hours 不能小于 0' })
+  }
+
+  const note = normalizeText(req.body.note, 500)
+
+  try {
+    const existing = await Work.findLogById(id)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '工作记录不存在' })
+    }
+    if (Number(existing.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可维护自己的事项计划' })
+    }
+
+    await Work.upsertDailyPlanForLog(id, {
+      userId: req.user.id,
+      planDate,
+      plannedHours,
+      source: 'MANUAL',
+      note: note || '',
+      createdBy: req.user.id,
+    })
+    const rows = await Work.listDailyPlansForLog(id, { startDate: planDate, endDate: planDate })
+    return res.json({
+      success: true,
+      message: '日计划已保存',
+      data: rows[0] || null,
+    })
+  } catch (err) {
+    console.error('保存事项日计划失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listLogDailyEntries = async (req, res) => {
+  const id = toPositiveInt(req.params.id)
+  if (!id) {
+    return res.status(400).json({ success: false, message: '工作记录 ID 无效' })
+  }
+
+  const startDateRaw = req.query.start_date
+  const endDateRaw = req.query.end_date
+  const startDate = normalizeDate(startDateRaw)
+  const endDate = normalizeDate(endDateRaw)
+  if (startDateRaw !== undefined && String(startDateRaw || '').trim() !== '' && !startDate) {
+    return res.status(400).json({ success: false, message: 'start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (endDateRaw !== undefined && String(endDateRaw || '').trim() !== '' && !endDate) {
+    return res.status(400).json({ success: false, message: 'end_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  try {
+    const existing = await Work.findLogById(id)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '工作记录不存在' })
+    }
+    if (Number(existing.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可查看自己的事项投入记录' })
+    }
+
+    const rows = await Work.listDailyEntriesForLog(id, {
+      startDate,
+      endDate,
+    })
+    return res.json({ success: true, data: rows })
+  } catch (err) {
+    console.error('获取事项日投入失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const createLogDailyEntry = async (req, res) => {
+  const id = toPositiveInt(req.params.id)
+  if (!id) {
+    return res.status(400).json({ success: false, message: '工作记录 ID 无效' })
+  }
+
+  const entryDateRaw = req.body.entry_date
+  const entryDate = normalizeDate(entryDateRaw) || formatDate(new Date())
+  if (
+    entryDateRaw !== undefined &&
+    entryDateRaw !== null &&
+    String(entryDateRaw).trim() !== '' &&
+    !normalizeDate(entryDateRaw)
+  ) {
+    return res.status(400).json({ success: false, message: 'entry_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  const actualHours = normalizeHours(req.body.actual_hours, null)
+  if (actualHours === null || actualHours <= 0) {
+    return res.status(400).json({ success: false, message: 'actual_hours 必须大于 0' })
+  }
+  const description = normalizeText(req.body.description, 2000)
+
+  try {
+    const existing = await Work.findLogById(id)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '工作记录不存在' })
+    }
+    if (Number(existing.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可登记自己的事项投入记录' })
+    }
+
+    const entryId = await Work.createDailyEntryForLog(id, {
+      userId: req.user.id,
+      entryDate,
+      actualHours,
+      description,
+      createdBy: req.user.id,
+    })
+    const rows = await Work.listDailyEntriesForLog(id, {
+      startDate: entryDate,
+      endDate: entryDate,
+    })
+    const created = rows.find((item) => Number(item.id) === Number(entryId)) || rows[0] || null
+    return res.status(201).json({
+      success: true,
+      message: '日投入记录已创建',
+      data: created,
+    })
+  } catch (err) {
+    console.error('创建事项日投入失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -1800,6 +2041,10 @@ module.exports = {
   createOwnerAssignedLog,
   updateLog,
   deleteLog,
+  listLogDailyPlans,
+  upsertLogDailyPlan,
+  listLogDailyEntries,
+  createLogDailyEntry,
   updateLogOwnerEstimate,
   getInsightFilterOptions,
   getDemandInsight,

@@ -18,6 +18,10 @@ const {
   createOwnerAssignedLog,
   updateLog,
   deleteLog,
+  listLogDailyPlans,
+  upsertLogDailyPlan,
+  listLogDailyEntries,
+  createLogDailyEntry,
   updateLogOwnerEstimate,
   getInsightFilterOptions,
   getDemandInsight,
@@ -81,6 +85,10 @@ router.post(
 )
 router.put('/logs/:id', authMiddleware.requirePermission('worklog.update.self'), updateLog)
 router.delete('/logs/:id', authMiddleware.requirePermission('worklog.update.self'), deleteLog)
+router.get('/logs/:id/daily-plans', authMiddleware.requirePermission('worklog.view.self'), listLogDailyPlans)
+router.post('/logs/:id/daily-plan', authMiddleware.requirePermission('worklog.update.self'), upsertLogDailyPlan)
+router.get('/logs/:id/daily-entries', authMiddleware.requirePermission('worklog.view.self'), listLogDailyEntries)
+router.post('/logs/:id/daily-entries', authMiddleware.requirePermission('worklog.update.self'), createLogDailyEntry)
 router.put(
   '/logs/:id/owner-estimate',
   authMiddleware.requireAnyPermission(['workbench.view.owner', 'workbench.view.self']),
