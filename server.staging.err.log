@@ -1,0 +1,1238 @@
+获取事项类型失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listIssueTypeDictItems (D:\Project\beixinstore-backend\models\Work.js:489:31)
+    at Object.listItemTypes (D:\Project\beixinstore-backend\models\Work.js:578:33)
+    at listWorkItemTypes (D:\Project\beixinstore-backend\controllers\workController.js:177:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.id,\n' +
+    '         i.item_code,\n' +
+    '         i.item_name,\n' +
+    '         i.enabled,\n' +
+    '         i.sort_order,\n' +
+    '         i.extra_json\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'issue_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取工作记录失败: Error: Table 'beixin_store_staging.work_logs' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listLogs (D:\Project\beixinstore-backend\models\Work.js:1018:31)
+    at listLogs (D:\Project\beixinstore-backend\controllers\workController.js:605:40)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: '\n' +
+    '      SELECT\n' +
+    '        l.id,\n' +
+    '        l.user_id,\n' +
+    "        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,\n" +
+    "        DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,\n" +
+    '        l.item_type_id,\n' +
+    "        COALESCE(t.type_key, '-') AS item_type_key,\n" +
+    "        COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,\n" +
+    '        COALESCE(t.require_demand, 0) AS require_demand,\n' +
+    '        l.description,\n' +
+    '        l.personal_estimate_hours,\n' +
+    '        l.actual_hours,\n' +
+    '        l.remaining_hours,\n' +
+    "        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,\n" +
+    "        COALESCE(l.task_source, 'SELF') AS task_source,\n" +
+    '        l.demand_id,\n' +
+    '        l.phase_key,\n' +
+    '        l.assigned_by_user_id,\n' +
+    "        COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,\n" +
+    "        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,\n" +
+    "        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,\n" +
+    "        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,\n" +
+    "        COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,\n" +
+    '        d.name AS demand_name,\n' +
+    "        DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,\n" +
+    "        DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at\n" +
+    '      FROM work_logs l\n' +
+    '      INNER JOIN users u ON u.id = l.user_id\n' +
+    '      LEFT JOIN users au ON au.id = l.assigned_by_user_id\n' +
+    '      LEFT JOIN (\n' +
+    '  SELECT\n' +
+    '    CAST(i.id AS SIGNED) AS id,\n' +
+    '    i.item_code AS type_key,\n' +
+    '    i.item_name AS name,\n' +
+    '    i.enabled AS enabled,\n' +
+    '    i.sort_order AS sort_order,\n' +
+    '    CASE\n' +
+    "      WHEN LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.require_demand')), '')) IN ('1', 'true', 'yes', 'y', 'on')\n" +
+    '        THEN 1\n' +
+    "      WHEN LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.requireDemand')), '')) IN ('1', 'true', 'yes', 'y', 'on')\n" +
+    '        THEN 1\n' +
+    '      ELSE 0\n' +
+    '    END AS require_demand,\n' +
+    '    CASE UPPER(COALESCE(\n' +
+    "      JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.owner_estimate_rule')),\n" +
+    "      JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.ownerEstimateRule')),\n" +
+    "      'NONE'\n" +
+    '    ))\n' +
+    "      WHEN 'OPTIONAL' THEN 'OPTIONAL'\n" +
+    "      WHEN 'REQUIRED' THEN 'REQUIRED'\n" +
+    "      ELSE 'NONE'\n" +
+    '    END AS owner_estimate_rule\n' +
+    '  FROM config_dict_items i\n' +
+    '  INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "  WHERE i.type_key = 'issue_type' AND t.enabled = 1\n" +
+    '  UNION ALL\n' +
+    '  SELECT\n' +
+    '    w.id AS id,\n' +
+    '    w.type_key AS type_key,\n' +
+    '    w.name AS name,\n' +
+    '    w.enabled AS enabled,\n' +
+    '    w.sort_order AS sort_order,\n' +
+    '    w.require_demand AS require_demand,\n' +
+    "    'NONE' AS owner_estimate_rule\n" +
+    '  FROM work_item_types w\n' +
+    '  WHERE NOT EXISTS (\n' +
+    '    SELECT 1\n' +
+    '    FROM config_dict_items i2\n' +
+    '    INNER JOIN config_dict_types t2 ON t2.type_key = i2.type_key\n' +
+    "    WHERE i2.type_key = 'issue_type' AND t2.enabled = 1\n" +
+    '  )\n' +
+    ') t ON t.id = l.item_type_id\n' +
+    '      LEFT JOIN work_demands d ON d.id = l.demand_id\n' +
+    '      LEFT JOIN config_dict_items pdi\n' +
+    "        ON pdi.type_key = 'demand_phase_type'\n" +
+    '       AND pdi.item_code = l.phase_key\n' +
+    '      WHERE 1 = 1 AND l.user_id = 26\n' +
+    '      ORDER BY l.log_date DESC, l.id DESC\n' +
+    '      LIMIT 10 OFFSET 0',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_logs' doesn't exist"
+}
+获取个人工作台失败: Error: Table 'beixin_store_staging.work_logs' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.getMyWorkbench (D:\Project\beixinstore-backend\models\Work.js:1239:34)
+    at getMyWorkbench (D:\Project\beixinstore-backend\controllers\workController.js:1606:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         COUNT(*) AS log_count_today,\n' +
+    '         COALESCE(SUM(personal_estimate_hours), 0) AS personal_estimate_hours_today,\n' +
+    '         COALESCE(SUM(actual_hours), 0) AS actual_hours_today,\n' +
+    '         COALESCE(SUM(remaining_hours), 0) AS remaining_hours_today\n' +
+    '       FROM work_logs\n' +
+    '       WHERE user_id = 26 AND log_date = CURDATE()',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_logs' doesn't exist"
+}
+获取需求阶段字典失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemandPhaseTypes (D:\Project\beixinstore-backend\models\Work.js:598:31)
+    at listDemandPhaseTypes (D:\Project\beixinstore-backend\controllers\workController.js:188:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.item_code AS phase_key,\n' +
+    '         i.item_name AS phase_name,\n' +
+    '         i.sort_order,\n' +
+    '         i.enabled\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'demand_phase_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取需求池失败: Error: Table 'beixin_store_staging.work_demands' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemands (D:\Project\beixinstore-backend\models\Work.js:759:31)
+    at listDemands (D:\Project\beixinstore-backend\controllers\workController.js:278:40)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: '\n' +
+    '      SELECT\n' +
+    '        d.id,\n' +
+    '        d.name,\n' +
+    '        d.owner_user_id,\n' +
+    "        COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,\n" +
+    '        d.business_group_code,\n' +
+    '        bg.item_name AS business_group_name,\n' +
+    "        DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,\n" +
+    '        d.status,\n' +
+    '        d.priority,\n' +
+    '        d.description,\n' +
+    '        d.created_by,\n' +
+    "        DATE_FORMAT(d.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,\n" +
+    "        DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,\n" +
+    "        DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,\n" +
+    '        COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,\n' +
+    '        COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,\n' +
+    '        COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours\n' +
+    '      FROM work_demands d\n' +
+    '      LEFT JOIN users u ON u.id = d.owner_user_id\n' +
+    '      LEFT JOIN config_dict_items bg\n' +
+    "        ON bg.type_key = 'business_group'\n" +
+    '       AND bg.item_code = d.business_group_code\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT\n' +
+    '          demand_id,\n' +
+    '          SUM(personal_estimate_hours) AS total_personal_estimate_hours,\n' +
+    '          SUM(actual_hours) AS total_actual_hours\n' +
+    '        FROM work_logs\n' +
+    '        WHERE demand_id IS NOT NULL\n' +
+    '        GROUP BY demand_id\n' +
+    '      ) ta ON ta.demand_id = d.id\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT l1.demand_id, l1.remaining_hours\n' +
+    '        FROM work_logs l1\n' +
+    '        INNER JOIN (\n' +
+    '          SELECT demand_id, MAX(id) AS max_id\n' +
+    '          FROM work_logs\n' +
+    '          WHERE demand_id IS NOT NULL\n' +
+    '          GROUP BY demand_id\n' +
+    '        ) l2 ON l1.id = l2.max_id\n' +
+    '      ) lr ON lr.demand_id = d.id\n' +
+    '      WHERE 1 = 1\n' +
+    '      ORDER BY\n' +
+    '        CASE d.priority\n' +
+    "          WHEN 'P0' THEN 0\n" +
+    "          WHEN 'P1' THEN 1\n" +
+    "          WHEN 'P2' THEN 2\n" +
+    '          ELSE 3\n' +
+    '        END ASC,\n' +
+    '        d.updated_at DESC\n' +
+    '      LIMIT 1000 OFFSET 0',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_demands' doesn't exist"
+}
+获取事项类型失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listIssueTypeDictItems (D:\Project\beixinstore-backend\models\Work.js:489:31)
+    at Object.listItemTypes (D:\Project\beixinstore-backend\models\Work.js:578:33)
+    at listWorkItemTypes (D:\Project\beixinstore-backend\controllers\workController.js:177:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.id,\n' +
+    '         i.item_code,\n' +
+    '         i.item_name,\n' +
+    '         i.enabled,\n' +
+    '         i.sort_order,\n' +
+    '         i.extra_json\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'issue_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取需求阶段字典失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemandPhaseTypes (D:\Project\beixinstore-backend\models\Work.js:598:31)
+    at listDemandPhaseTypes (D:\Project\beixinstore-backend\controllers\workController.js:188:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.item_code AS phase_key,\n' +
+    '         i.item_name AS phase_name,\n' +
+    '         i.sort_order,\n' +
+    '         i.enabled\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'demand_phase_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取个人工作台失败: Error: Table 'beixin_store_staging.work_logs' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.getMyWorkbench (D:\Project\beixinstore-backend\models\Work.js:1239:34)
+    at getMyWorkbench (D:\Project\beixinstore-backend\controllers\workController.js:1606:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         COUNT(*) AS log_count_today,\n' +
+    '         COALESCE(SUM(personal_estimate_hours), 0) AS personal_estimate_hours_today,\n' +
+    '         COALESCE(SUM(actual_hours), 0) AS actual_hours_today,\n' +
+    '         COALESCE(SUM(remaining_hours), 0) AS remaining_hours_today\n' +
+    '       FROM work_logs\n' +
+    '       WHERE user_id = 26 AND log_date = CURDATE()',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_logs' doesn't exist"
+}
+获取工作记录失败: Error: Table 'beixin_store_staging.work_logs' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listLogs (D:\Project\beixinstore-backend\models\Work.js:1018:31)
+    at listLogs (D:\Project\beixinstore-backend\controllers\workController.js:605:40)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: '\n' +
+    '      SELECT\n' +
+    '        l.id,\n' +
+    '        l.user_id,\n' +
+    "        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,\n" +
+    "        DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,\n" +
+    '        l.item_type_id,\n' +
+    "        COALESCE(t.type_key, '-') AS item_type_key,\n" +
+    "        COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,\n" +
+    '        COALESCE(t.require_demand, 0) AS require_demand,\n' +
+    '        l.description,\n' +
+    '        l.personal_estimate_hours,\n' +
+    '        l.actual_hours,\n' +
+    '        l.remaining_hours,\n' +
+    "        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,\n" +
+    "        COALESCE(l.task_source, 'SELF') AS task_source,\n" +
+    '        l.demand_id,\n' +
+    '        l.phase_key,\n' +
+    '        l.assigned_by_user_id,\n' +
+    "        COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,\n" +
+    "        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,\n" +
+    "        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,\n" +
+    "        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,\n" +
+    "        COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,\n" +
+    '        d.name AS demand_name,\n' +
+    "        DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,\n" +
+    "        DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at\n" +
+    '      FROM work_logs l\n' +
+    '      INNER JOIN users u ON u.id = l.user_id\n' +
+    '      LEFT JOIN users au ON au.id = l.assigned_by_user_id\n' +
+    '      LEFT JOIN (\n' +
+    '  SELECT\n' +
+    '    CAST(i.id AS SIGNED) AS id,\n' +
+    '    i.item_code AS type_key,\n' +
+    '    i.item_name AS name,\n' +
+    '    i.enabled AS enabled,\n' +
+    '    i.sort_order AS sort_order,\n' +
+    '    CASE\n' +
+    "      WHEN LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.require_demand')), '')) IN ('1', 'true', 'yes', 'y', 'on')\n" +
+    '        THEN 1\n' +
+    "      WHEN LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.requireDemand')), '')) IN ('1', 'true', 'yes', 'y', 'on')\n" +
+    '        THEN 1\n' +
+    '      ELSE 0\n' +
+    '    END AS require_demand,\n' +
+    '    CASE UPPER(COALESCE(\n' +
+    "      JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.owner_estimate_rule')),\n" +
+    "      JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.ownerEstimateRule')),\n" +
+    "      'NONE'\n" +
+    '    ))\n' +
+    "      WHEN 'OPTIONAL' THEN 'OPTIONAL'\n" +
+    "      WHEN 'REQUIRED' THEN 'REQUIRED'\n" +
+    "      ELSE 'NONE'\n" +
+    '    END AS owner_estimate_rule\n' +
+    '  FROM config_dict_items i\n' +
+    '  INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "  WHERE i.type_key = 'issue_type' AND t.enabled = 1\n" +
+    '  UNION ALL\n' +
+    '  SELECT\n' +
+    '    w.id AS id,\n' +
+    '    w.type_key AS type_key,\n' +
+    '    w.name AS name,\n' +
+    '    w.enabled AS enabled,\n' +
+    '    w.sort_order AS sort_order,\n' +
+    '    w.require_demand AS require_demand,\n' +
+    "    'NONE' AS owner_estimate_rule\n" +
+    '  FROM work_item_types w\n' +
+    '  WHERE NOT EXISTS (\n' +
+    '    SELECT 1\n' +
+    '    FROM config_dict_items i2\n' +
+    '    INNER JOIN config_dict_types t2 ON t2.type_key = i2.type_key\n' +
+    "    WHERE i2.type_key = 'issue_type' AND t2.enabled = 1\n" +
+    '  )\n' +
+    ') t ON t.id = l.item_type_id\n' +
+    '      LEFT JOIN work_demands d ON d.id = l.demand_id\n' +
+    '      LEFT JOIN config_dict_items pdi\n' +
+    "        ON pdi.type_key = 'demand_phase_type'\n" +
+    '       AND pdi.item_code = l.phase_key\n' +
+    '      WHERE 1 = 1 AND l.user_id = 26\n' +
+    '      ORDER BY l.log_date DESC, l.id DESC\n' +
+    '      LIMIT 10 OFFSET 0',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_logs' doesn't exist"
+}
+获取需求池失败: Error: Table 'beixin_store_staging.work_demands' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemands (D:\Project\beixinstore-backend\models\Work.js:759:31)
+    at listDemands (D:\Project\beixinstore-backend\controllers\workController.js:278:40)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: '\n' +
+    '      SELECT\n' +
+    '        d.id,\n' +
+    '        d.name,\n' +
+    '        d.owner_user_id,\n' +
+    "        COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,\n" +
+    '        d.business_group_code,\n' +
+    '        bg.item_name AS business_group_name,\n' +
+    "        DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,\n" +
+    '        d.status,\n' +
+    '        d.priority,\n' +
+    '        d.description,\n' +
+    '        d.created_by,\n' +
+    "        DATE_FORMAT(d.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,\n" +
+    "        DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,\n" +
+    "        DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,\n" +
+    '        COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,\n' +
+    '        COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,\n' +
+    '        COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours\n' +
+    '      FROM work_demands d\n' +
+    '      LEFT JOIN users u ON u.id = d.owner_user_id\n' +
+    '      LEFT JOIN config_dict_items bg\n' +
+    "        ON bg.type_key = 'business_group'\n" +
+    '       AND bg.item_code = d.business_group_code\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT\n' +
+    '          demand_id,\n' +
+    '          SUM(personal_estimate_hours) AS total_personal_estimate_hours,\n' +
+    '          SUM(actual_hours) AS total_actual_hours\n' +
+    '        FROM work_logs\n' +
+    '        WHERE demand_id IS NOT NULL\n' +
+    '        GROUP BY demand_id\n' +
+    '      ) ta ON ta.demand_id = d.id\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT l1.demand_id, l1.remaining_hours\n' +
+    '        FROM work_logs l1\n' +
+    '        INNER JOIN (\n' +
+    '          SELECT demand_id, MAX(id) AS max_id\n' +
+    '          FROM work_logs\n' +
+    '          WHERE demand_id IS NOT NULL\n' +
+    '          GROUP BY demand_id\n' +
+    '        ) l2 ON l1.id = l2.max_id\n' +
+    '      ) lr ON lr.demand_id = d.id\n' +
+    '      WHERE 1 = 1\n' +
+    '      ORDER BY\n' +
+    '        CASE d.priority\n' +
+    "          WHEN 'P0' THEN 0\n" +
+    "          WHEN 'P1' THEN 1\n" +
+    "          WHEN 'P2' THEN 2\n" +
+    '          ELSE 3\n' +
+    '        END ASC,\n' +
+    '        d.updated_at DESC\n' +
+    '      LIMIT 1000 OFFSET 0',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_demands' doesn't exist"
+}
+获取事项类型失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listIssueTypeDictItems (D:\Project\beixinstore-backend\models\Work.js:489:31)
+    at Object.listItemTypes (D:\Project\beixinstore-backend\models\Work.js:578:33)
+    at listWorkItemTypes (D:\Project\beixinstore-backend\controllers\workController.js:177:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.id,\n' +
+    '         i.item_code,\n' +
+    '         i.item_name,\n' +
+    '         i.enabled,\n' +
+    '         i.sort_order,\n' +
+    '         i.extra_json\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'issue_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取需求阶段字典失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemandPhaseTypes (D:\Project\beixinstore-backend\models\Work.js:598:31)
+    at listDemandPhaseTypes (D:\Project\beixinstore-backend\controllers\workController.js:188:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.item_code AS phase_key,\n' +
+    '         i.item_name AS phase_name,\n' +
+    '         i.sort_order,\n' +
+    '         i.enabled\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'demand_phase_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取个人工作台失败: Error: Table 'beixin_store_staging.work_logs' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.getMyWorkbench (D:\Project\beixinstore-backend\models\Work.js:1239:34)
+    at getMyWorkbench (D:\Project\beixinstore-backend\controllers\workController.js:1606:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         COUNT(*) AS log_count_today,\n' +
+    '         COALESCE(SUM(personal_estimate_hours), 0) AS personal_estimate_hours_today,\n' +
+    '         COALESCE(SUM(actual_hours), 0) AS actual_hours_today,\n' +
+    '         COALESCE(SUM(remaining_hours), 0) AS remaining_hours_today\n' +
+    '       FROM work_logs\n' +
+    '       WHERE user_id = 26 AND log_date = CURDATE()',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_logs' doesn't exist"
+}
+获取需求池失败: Error: Table 'beixin_store_staging.work_demands' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemands (D:\Project\beixinstore-backend\models\Work.js:759:31)
+    at listDemands (D:\Project\beixinstore-backend\controllers\workController.js:278:40)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: '\n' +
+    '      SELECT\n' +
+    '        d.id,\n' +
+    '        d.name,\n' +
+    '        d.owner_user_id,\n' +
+    "        COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,\n" +
+    '        d.business_group_code,\n' +
+    '        bg.item_name AS business_group_name,\n' +
+    "        DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,\n" +
+    '        d.status,\n' +
+    '        d.priority,\n' +
+    '        d.description,\n' +
+    '        d.created_by,\n' +
+    "        DATE_FORMAT(d.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,\n" +
+    "        DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,\n" +
+    "        DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,\n" +
+    '        COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,\n' +
+    '        COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,\n' +
+    '        COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours\n' +
+    '      FROM work_demands d\n' +
+    '      LEFT JOIN users u ON u.id = d.owner_user_id\n' +
+    '      LEFT JOIN config_dict_items bg\n' +
+    "        ON bg.type_key = 'business_group'\n" +
+    '       AND bg.item_code = d.business_group_code\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT\n' +
+    '          demand_id,\n' +
+    '          SUM(personal_estimate_hours) AS total_personal_estimate_hours,\n' +
+    '          SUM(actual_hours) AS total_actual_hours\n' +
+    '        FROM work_logs\n' +
+    '        WHERE demand_id IS NOT NULL\n' +
+    '        GROUP BY demand_id\n' +
+    '      ) ta ON ta.demand_id = d.id\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT l1.demand_id, l1.remaining_hours\n' +
+    '        FROM work_logs l1\n' +
+    '        INNER JOIN (\n' +
+    '          SELECT demand_id, MAX(id) AS max_id\n' +
+    '          FROM work_logs\n' +
+    '          WHERE demand_id IS NOT NULL\n' +
+    '          GROUP BY demand_id\n' +
+    '        ) l2 ON l1.id = l2.max_id\n' +
+    '      ) lr ON lr.demand_id = d.id\n' +
+    '      WHERE 1 = 1\n' +
+    '      ORDER BY\n' +
+    '        CASE d.priority\n' +
+    "          WHEN 'P0' THEN 0\n" +
+    "          WHEN 'P1' THEN 1\n" +
+    "          WHEN 'P2' THEN 2\n" +
+    '          ELSE 3\n' +
+    '        END ASC,\n' +
+    '        d.updated_at DESC\n' +
+    '      LIMIT 1000 OFFSET 0',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_demands' doesn't exist"
+}
+获取工作记录失败: Error: Table 'beixin_store_staging.work_logs' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listLogs (D:\Project\beixinstore-backend\models\Work.js:1018:31)
+    at listLogs (D:\Project\beixinstore-backend\controllers\workController.js:605:40)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: '\n' +
+    '      SELECT\n' +
+    '        l.id,\n' +
+    '        l.user_id,\n' +
+    "        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,\n" +
+    "        DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,\n" +
+    '        l.item_type_id,\n' +
+    "        COALESCE(t.type_key, '-') AS item_type_key,\n" +
+    "        COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,\n" +
+    '        COALESCE(t.require_demand, 0) AS require_demand,\n' +
+    '        l.description,\n' +
+    '        l.personal_estimate_hours,\n' +
+    '        l.actual_hours,\n' +
+    '        l.remaining_hours,\n' +
+    "        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,\n" +
+    "        COALESCE(l.task_source, 'SELF') AS task_source,\n" +
+    '        l.demand_id,\n' +
+    '        l.phase_key,\n' +
+    '        l.assigned_by_user_id,\n' +
+    "        COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,\n" +
+    "        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,\n" +
+    "        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,\n" +
+    "        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,\n" +
+    "        COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,\n" +
+    '        d.name AS demand_name,\n' +
+    "        DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,\n" +
+    "        DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at\n" +
+    '      FROM work_logs l\n' +
+    '      INNER JOIN users u ON u.id = l.user_id\n' +
+    '      LEFT JOIN users au ON au.id = l.assigned_by_user_id\n' +
+    '      LEFT JOIN (\n' +
+    '  SELECT\n' +
+    '    CAST(i.id AS SIGNED) AS id,\n' +
+    '    i.item_code AS type_key,\n' +
+    '    i.item_name AS name,\n' +
+    '    i.enabled AS enabled,\n' +
+    '    i.sort_order AS sort_order,\n' +
+    '    CASE\n' +
+    "      WHEN LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.require_demand')), '')) IN ('1', 'true', 'yes', 'y', 'on')\n" +
+    '        THEN 1\n' +
+    "      WHEN LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.requireDemand')), '')) IN ('1', 'true', 'yes', 'y', 'on')\n" +
+    '        THEN 1\n' +
+    '      ELSE 0\n' +
+    '    END AS require_demand,\n' +
+    '    CASE UPPER(COALESCE(\n' +
+    "      JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.owner_estimate_rule')),\n" +
+    "      JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.ownerEstimateRule')),\n" +
+    "      'NONE'\n" +
+    '    ))\n' +
+    "      WHEN 'OPTIONAL' THEN 'OPTIONAL'\n" +
+    "      WHEN 'REQUIRED' THEN 'REQUIRED'\n" +
+    "      ELSE 'NONE'\n" +
+    '    END AS owner_estimate_rule\n' +
+    '  FROM config_dict_items i\n' +
+    '  INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "  WHERE i.type_key = 'issue_type' AND t.enabled = 1\n" +
+    '  UNION ALL\n' +
+    '  SELECT\n' +
+    '    w.id AS id,\n' +
+    '    w.type_key AS type_key,\n' +
+    '    w.name AS name,\n' +
+    '    w.enabled AS enabled,\n' +
+    '    w.sort_order AS sort_order,\n' +
+    '    w.require_demand AS require_demand,\n' +
+    "    'NONE' AS owner_estimate_rule\n" +
+    '  FROM work_item_types w\n' +
+    '  WHERE NOT EXISTS (\n' +
+    '    SELECT 1\n' +
+    '    FROM config_dict_items i2\n' +
+    '    INNER JOIN config_dict_types t2 ON t2.type_key = i2.type_key\n' +
+    "    WHERE i2.type_key = 'issue_type' AND t2.enabled = 1\n" +
+    '  )\n' +
+    ') t ON t.id = l.item_type_id\n' +
+    '      LEFT JOIN work_demands d ON d.id = l.demand_id\n' +
+    '      LEFT JOIN config_dict_items pdi\n' +
+    "        ON pdi.type_key = 'demand_phase_type'\n" +
+    '       AND pdi.item_code = l.phase_key\n' +
+    '      WHERE 1 = 1 AND l.user_id = 26\n' +
+    '      ORDER BY l.log_date DESC, l.id DESC\n' +
+    '      LIMIT 10 OFFSET 0',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_logs' doesn't exist"
+}
+获取事项类型失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listIssueTypeDictItems (D:\Project\beixinstore-backend\models\Work.js:489:31)
+    at Object.listItemTypes (D:\Project\beixinstore-backend\models\Work.js:578:33)
+    at listWorkItemTypes (D:\Project\beixinstore-backend\controllers\workController.js:177:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.id,\n' +
+    '         i.item_code,\n' +
+    '         i.item_name,\n' +
+    '         i.enabled,\n' +
+    '         i.sort_order,\n' +
+    '         i.extra_json\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'issue_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取需求阶段字典失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemandPhaseTypes (D:\Project\beixinstore-backend\models\Work.js:598:31)
+    at listDemandPhaseTypes (D:\Project\beixinstore-backend\controllers\workController.js:188:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.item_code AS phase_key,\n' +
+    '         i.item_name AS phase_name,\n' +
+    '         i.sort_order,\n' +
+    '         i.enabled\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'demand_phase_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取需求池失败: Error: Table 'beixin_store_staging.work_demands' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemands (D:\Project\beixinstore-backend\models\Work.js:759:31)
+    at listDemands (D:\Project\beixinstore-backend\controllers\workController.js:278:40)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: '\n' +
+    '      SELECT\n' +
+    '        d.id,\n' +
+    '        d.name,\n' +
+    '        d.owner_user_id,\n' +
+    "        COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,\n" +
+    '        d.business_group_code,\n' +
+    '        bg.item_name AS business_group_name,\n' +
+    "        DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,\n" +
+    '        d.status,\n' +
+    '        d.priority,\n' +
+    '        d.description,\n' +
+    '        d.created_by,\n' +
+    "        DATE_FORMAT(d.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,\n" +
+    "        DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,\n" +
+    "        DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,\n" +
+    '        COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,\n' +
+    '        COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,\n' +
+    '        COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours\n' +
+    '      FROM work_demands d\n' +
+    '      LEFT JOIN users u ON u.id = d.owner_user_id\n' +
+    '      LEFT JOIN config_dict_items bg\n' +
+    "        ON bg.type_key = 'business_group'\n" +
+    '       AND bg.item_code = d.business_group_code\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT\n' +
+    '          demand_id,\n' +
+    '          SUM(personal_estimate_hours) AS total_personal_estimate_hours,\n' +
+    '          SUM(actual_hours) AS total_actual_hours\n' +
+    '        FROM work_logs\n' +
+    '        WHERE demand_id IS NOT NULL\n' +
+    '        GROUP BY demand_id\n' +
+    '      ) ta ON ta.demand_id = d.id\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT l1.demand_id, l1.remaining_hours\n' +
+    '        FROM work_logs l1\n' +
+    '        INNER JOIN (\n' +
+    '          SELECT demand_id, MAX(id) AS max_id\n' +
+    '          FROM work_logs\n' +
+    '          WHERE demand_id IS NOT NULL\n' +
+    '          GROUP BY demand_id\n' +
+    '        ) l2 ON l1.id = l2.max_id\n' +
+    '      ) lr ON lr.demand_id = d.id\n' +
+    '      WHERE 1 = 1\n' +
+    '      ORDER BY\n' +
+    '        CASE d.priority\n' +
+    "          WHEN 'P0' THEN 0\n" +
+    "          WHEN 'P1' THEN 1\n" +
+    "          WHEN 'P2' THEN 2\n" +
+    '          ELSE 3\n' +
+    '        END ASC,\n' +
+    '        d.updated_at DESC\n' +
+    '      LIMIT 1000 OFFSET 0',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_demands' doesn't exist"
+}
+获取工作记录失败: Error: Table 'beixin_store_staging.work_logs' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listLogs (D:\Project\beixinstore-backend\models\Work.js:1018:31)
+    at listLogs (D:\Project\beixinstore-backend\controllers\workController.js:605:40)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: '\n' +
+    '      SELECT\n' +
+    '        l.id,\n' +
+    '        l.user_id,\n' +
+    "        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,\n" +
+    "        DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,\n" +
+    '        l.item_type_id,\n' +
+    "        COALESCE(t.type_key, '-') AS item_type_key,\n" +
+    "        COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,\n" +
+    '        COALESCE(t.require_demand, 0) AS require_demand,\n' +
+    '        l.description,\n' +
+    '        l.personal_estimate_hours,\n' +
+    '        l.actual_hours,\n' +
+    '        l.remaining_hours,\n' +
+    "        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,\n" +
+    "        COALESCE(l.task_source, 'SELF') AS task_source,\n" +
+    '        l.demand_id,\n' +
+    '        l.phase_key,\n' +
+    '        l.assigned_by_user_id,\n' +
+    "        COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,\n" +
+    "        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,\n" +
+    "        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,\n" +
+    "        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,\n" +
+    "        COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,\n" +
+    '        d.name AS demand_name,\n' +
+    "        DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,\n" +
+    "        DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at\n" +
+    '      FROM work_logs l\n' +
+    '      INNER JOIN users u ON u.id = l.user_id\n' +
+    '      LEFT JOIN users au ON au.id = l.assigned_by_user_id\n' +
+    '      LEFT JOIN (\n' +
+    '  SELECT\n' +
+    '    CAST(i.id AS SIGNED) AS id,\n' +
+    '    i.item_code AS type_key,\n' +
+    '    i.item_name AS name,\n' +
+    '    i.enabled AS enabled,\n' +
+    '    i.sort_order AS sort_order,\n' +
+    '    CASE\n' +
+    "      WHEN LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.require_demand')), '')) IN ('1', 'true', 'yes', 'y', 'on')\n" +
+    '        THEN 1\n' +
+    "      WHEN LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.requireDemand')), '')) IN ('1', 'true', 'yes', 'y', 'on')\n" +
+    '        THEN 1\n' +
+    '      ELSE 0\n' +
+    '    END AS require_demand,\n' +
+    '    CASE UPPER(COALESCE(\n' +
+    "      JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.owner_estimate_rule')),\n" +
+    "      JSON_UNQUOTE(JSON_EXTRACT(i.extra_json, '$.ownerEstimateRule')),\n" +
+    "      'NONE'\n" +
+    '    ))\n' +
+    "      WHEN 'OPTIONAL' THEN 'OPTIONAL'\n" +
+    "      WHEN 'REQUIRED' THEN 'REQUIRED'\n" +
+    "      ELSE 'NONE'\n" +
+    '    END AS owner_estimate_rule\n' +
+    '  FROM config_dict_items i\n' +
+    '  INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "  WHERE i.type_key = 'issue_type' AND t.enabled = 1\n" +
+    '  UNION ALL\n' +
+    '  SELECT\n' +
+    '    w.id AS id,\n' +
+    '    w.type_key AS type_key,\n' +
+    '    w.name AS name,\n' +
+    '    w.enabled AS enabled,\n' +
+    '    w.sort_order AS sort_order,\n' +
+    '    w.require_demand AS require_demand,\n' +
+    "    'NONE' AS owner_estimate_rule\n" +
+    '  FROM work_item_types w\n' +
+    '  WHERE NOT EXISTS (\n' +
+    '    SELECT 1\n' +
+    '    FROM config_dict_items i2\n' +
+    '    INNER JOIN config_dict_types t2 ON t2.type_key = i2.type_key\n' +
+    "    WHERE i2.type_key = 'issue_type' AND t2.enabled = 1\n" +
+    '  )\n' +
+    ') t ON t.id = l.item_type_id\n' +
+    '      LEFT JOIN work_demands d ON d.id = l.demand_id\n' +
+    '      LEFT JOIN config_dict_items pdi\n' +
+    "        ON pdi.type_key = 'demand_phase_type'\n" +
+    '       AND pdi.item_code = l.phase_key\n' +
+    '      WHERE 1 = 1 AND l.user_id = 26\n' +
+    '      ORDER BY l.log_date DESC, l.id DESC\n' +
+    '      LIMIT 10 OFFSET 0',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_logs' doesn't exist"
+}
+获取个人工作台失败: Error: Table 'beixin_store_staging.work_logs' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.getMyWorkbench (D:\Project\beixinstore-backend\models\Work.js:1239:34)
+    at getMyWorkbench (D:\Project\beixinstore-backend\controllers\workController.js:1606:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         COUNT(*) AS log_count_today,\n' +
+    '         COALESCE(SUM(personal_estimate_hours), 0) AS personal_estimate_hours_today,\n' +
+    '         COALESCE(SUM(actual_hours), 0) AS actual_hours_today,\n' +
+    '         COALESCE(SUM(remaining_hours), 0) AS remaining_hours_today\n' +
+    '       FROM work_logs\n' +
+    '       WHERE user_id = 26 AND log_date = CURDATE()',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_logs' doesn't exist"
+}
+获取事项类型失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listIssueTypeDictItems (D:\Project\beixinstore-backend\models\Work.js:489:31)
+    at Object.listItemTypes (D:\Project\beixinstore-backend\models\Work.js:578:33)
+    at listWorkItemTypes (D:\Project\beixinstore-backend\controllers\workController.js:177:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.id,\n' +
+    '         i.item_code,\n' +
+    '         i.item_name,\n' +
+    '         i.enabled,\n' +
+    '         i.sort_order,\n' +
+    '         i.extra_json\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'issue_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取需求阶段字典失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemandPhaseTypes (D:\Project\beixinstore-backend\models\Work.js:598:31)
+    at listDemandPhaseTypes (D:\Project\beixinstore-backend\controllers\workController.js:188:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.item_code AS phase_key,\n' +
+    '         i.item_name AS phase_name,\n' +
+    '         i.sort_order,\n' +
+    '         i.enabled\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'demand_phase_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取需求池失败: Error: Table 'beixin_store_staging.work_demands' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemands (D:\Project\beixinstore-backend\models\Work.js:759:31)
+    at listDemands (D:\Project\beixinstore-backend\controllers\workController.js:278:40)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: '\n' +
+    '      SELECT\n' +
+    '        d.id,\n' +
+    '        d.name,\n' +
+    '        d.owner_user_id,\n' +
+    "        COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,\n" +
+    '        d.business_group_code,\n' +
+    '        bg.item_name AS business_group_name,\n' +
+    "        DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,\n" +
+    '        d.status,\n' +
+    '        d.priority,\n' +
+    '        d.description,\n' +
+    '        d.created_by,\n' +
+    "        DATE_FORMAT(d.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,\n" +
+    "        DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,\n" +
+    "        DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,\n" +
+    '        COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,\n' +
+    '        COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,\n' +
+    '        COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours\n' +
+    '      FROM work_demands d\n' +
+    '      LEFT JOIN users u ON u.id = d.owner_user_id\n' +
+    '      LEFT JOIN config_dict_items bg\n' +
+    "        ON bg.type_key = 'business_group'\n" +
+    '       AND bg.item_code = d.business_group_code\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT\n' +
+    '          demand_id,\n' +
+    '          SUM(personal_estimate_hours) AS total_personal_estimate_hours,\n' +
+    '          SUM(actual_hours) AS total_actual_hours\n' +
+    '        FROM work_logs\n' +
+    '        WHERE demand_id IS NOT NULL\n' +
+    '        GROUP BY demand_id\n' +
+    '      ) ta ON ta.demand_id = d.id\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT l1.demand_id, l1.remaining_hours\n' +
+    '        FROM work_logs l1\n' +
+    '        INNER JOIN (\n' +
+    '          SELECT demand_id, MAX(id) AS max_id\n' +
+    '          FROM work_logs\n' +
+    '          WHERE demand_id IS NOT NULL\n' +
+    '          GROUP BY demand_id\n' +
+    '        ) l2 ON l1.id = l2.max_id\n' +
+    '      ) lr ON lr.demand_id = d.id\n' +
+    '      WHERE 1 = 1\n' +
+    '      ORDER BY\n' +
+    '        CASE d.priority\n' +
+    "          WHEN 'P0' THEN 0\n" +
+    "          WHEN 'P1' THEN 1\n" +
+    "          WHEN 'P2' THEN 2\n" +
+    '          ELSE 3\n' +
+    '        END ASC,\n' +
+    '        d.updated_at DESC\n' +
+    '      LIMIT 1000 OFFSET 0',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_demands' doesn't exist"
+}
+获取 Owner 工作台失败: Error: Table 'beixin_store_staging.work_logs' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.getOwnerWorkbench (D:\Project\beixinstore-backend\models\Work.js:1707:42)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async getOwnerWorkbench (D:\Project\beixinstore-backend\controllers\workController.js:1638:18) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '           COUNT(DISTINCT u.id) AS team_size,\n' +
+    '           COUNT(DISTINCT CASE WHEN wl.log_date = CURDATE() THEN wl.user_id END) AS filled_users_today,\n' +
+    '           COALESCE(SUM(CASE WHEN wl.log_date = CURDATE() THEN wl.personal_estimate_hours ELSE 0 END), 0) AS total_personal_estimate_hours_today,\n' +
+    '           COALESCE(SUM(CASE WHEN wl.log_date = CURDATE() THEN wl.actual_hours ELSE 0 END), 0) AS total_actual_hours_today\n' +
+    '         FROM users u\n' +
+    '         LEFT JOIN work_logs wl ON wl.user_id = u.id\n' +
+    '         WHERE u.id IN (26, 27, 28)',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_logs' doesn't exist"
+}
+获取事项类型失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listIssueTypeDictItems (D:\Project\beixinstore-backend\models\Work.js:489:31)
+    at Object.listItemTypes (D:\Project\beixinstore-backend\models\Work.js:578:33)
+    at listWorkItemTypes (D:\Project\beixinstore-backend\controllers\workController.js:177:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.id,\n' +
+    '         i.item_code,\n' +
+    '         i.item_name,\n' +
+    '         i.enabled,\n' +
+    '         i.sort_order,\n' +
+    '         i.extra_json\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'issue_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取需求池失败: Error: Table 'beixin_store_staging.work_demands' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemands (D:\Project\beixinstore-backend\models\Work.js:759:31)
+    at listDemands (D:\Project\beixinstore-backend\controllers\workController.js:278:40)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: '\n' +
+    '      SELECT\n' +
+    '        d.id,\n' +
+    '        d.name,\n' +
+    '        d.owner_user_id,\n' +
+    "        COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,\n" +
+    '        d.business_group_code,\n' +
+    '        bg.item_name AS business_group_name,\n' +
+    "        DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,\n" +
+    '        d.status,\n' +
+    '        d.priority,\n' +
+    '        d.description,\n' +
+    '        d.created_by,\n' +
+    "        DATE_FORMAT(d.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,\n" +
+    "        DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,\n" +
+    "        DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,\n" +
+    '        COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,\n' +
+    '        COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,\n' +
+    '        COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours\n' +
+    '      FROM work_demands d\n' +
+    '      LEFT JOIN users u ON u.id = d.owner_user_id\n' +
+    '      LEFT JOIN config_dict_items bg\n' +
+    "        ON bg.type_key = 'business_group'\n" +
+    '       AND bg.item_code = d.business_group_code\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT\n' +
+    '          demand_id,\n' +
+    '          SUM(personal_estimate_hours) AS total_personal_estimate_hours,\n' +
+    '          SUM(actual_hours) AS total_actual_hours\n' +
+    '        FROM work_logs\n' +
+    '        WHERE demand_id IS NOT NULL\n' +
+    '        GROUP BY demand_id\n' +
+    '      ) ta ON ta.demand_id = d.id\n' +
+    '      LEFT JOIN (\n' +
+    '        SELECT l1.demand_id, l1.remaining_hours\n' +
+    '        FROM work_logs l1\n' +
+    '        INNER JOIN (\n' +
+    '          SELECT demand_id, MAX(id) AS max_id\n' +
+    '          FROM work_logs\n' +
+    '          WHERE demand_id IS NOT NULL\n' +
+    '          GROUP BY demand_id\n' +
+    '        ) l2 ON l1.id = l2.max_id\n' +
+    '      ) lr ON lr.demand_id = d.id\n' +
+    '      WHERE 1 = 1\n' +
+    '      ORDER BY\n' +
+    '        CASE d.priority\n' +
+    "          WHEN 'P0' THEN 0\n" +
+    "          WHEN 'P1' THEN 1\n" +
+    "          WHEN 'P2' THEN 2\n" +
+    '          ELSE 3\n' +
+    '        END ASC,\n' +
+    '        d.updated_at DESC\n' +
+    '      LIMIT 1000 OFFSET 0',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_demands' doesn't exist"
+}
+获取需求阶段字典失败: Error: Table 'beixin_store_staging.config_dict_items' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.listDemandPhaseTypes (D:\Project\beixinstore-backend\models\Work.js:598:31)
+    at listDemandPhaseTypes (D:\Project\beixinstore-backend\controllers\workController.js:188:29)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at D:\Project\beixinstore-backend\middleware\auth.js:95:14
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5)
+    at next (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (D:\Project\beixinstore-backend\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (D:\Project\beixinstore-backend\node_modules\express\lib\router\layer.js:95:5) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '         i.item_code AS phase_key,\n' +
+    '         i.item_name AS phase_name,\n' +
+    '         i.sort_order,\n' +
+    '         i.enabled\n' +
+    '       FROM config_dict_items i\n' +
+    '       INNER JOIN config_dict_types t ON t.type_key = i.type_key\n' +
+    "       WHERE i.type_key = 'demand_phase_type' AND t.enabled = 1 AND i.enabled = 1\n" +
+    '       ORDER BY i.sort_order ASC, i.id ASC',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.config_dict_items' doesn't exist"
+}
+获取 Owner 工作台失败: Error: Table 'beixin_store_staging.work_logs' doesn't exist
+    at PromisePool.query (D:\Project\beixinstore-backend\node_modules\mysql2\lib\promise\pool.js:36:22)
+    at Object.getOwnerWorkbench (D:\Project\beixinstore-backend\models\Work.js:1707:42)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async getOwnerWorkbench (D:\Project\beixinstore-backend\controllers\workController.js:1638:18) {
+  code: 'ER_NO_SUCH_TABLE',
+  errno: 1146,
+  sql: 'SELECT\n' +
+    '           COUNT(DISTINCT u.id) AS team_size,\n' +
+    '           COUNT(DISTINCT CASE WHEN wl.log_date = CURDATE() THEN wl.user_id END) AS filled_users_today,\n' +
+    '           COALESCE(SUM(CASE WHEN wl.log_date = CURDATE() THEN wl.personal_estimate_hours ELSE 0 END), 0) AS total_personal_estimate_hours_today,\n' +
+    '           COALESCE(SUM(CASE WHEN wl.log_date = CURDATE() THEN wl.actual_hours ELSE 0 END), 0) AS total_actual_hours_today\n' +
+    '         FROM users u\n' +
+    '         LEFT JOIN work_logs wl ON wl.user_id = u.id\n' +
+    '         WHERE u.id IN (26, 27, 28)',
+  sqlState: '42S02',
+  sqlMessage: "Table 'beixin_store_staging.work_logs' doesn't exist"
+}
