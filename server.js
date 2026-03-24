@@ -1,10 +1,8 @@
 ﻿const express = require('express')
 const cors = require('cors')
-const dotenv = require('dotenv')
-const path = require('path')
+const { loadEnv } = require('./utils/loadEnv')
 
-const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env'
-dotenv.config({ path: path.resolve(__dirname, envFile) })
+const { envFile } = loadEnv()
 
 const authRoutes = require('./routes/authRoutes')
 const testRoutes = require('./routes/testRoutes')
@@ -14,6 +12,11 @@ const configRoutes = require('./routes/configRoutes')
 const orgRoutes = require('./routes/orgRoutes')
 const rbacRoutes = require('./routes/rbacRoutes')
 const workRoutes = require('./routes/workRoutes')
+const projectRoutes = require('./routes/projectRoutes')
+const requirementRoutes = require('./routes/requirementRoutes')
+const bugRoutes = require('./routes/bugRoutes')
+const projectStatsRoutes = require('./routes/projectStatsRoutes')
+const { initializeProjectManagementModule, isLegacyBootstrapEnabled } = require('./models/ProjectManagementInit')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -74,6 +77,10 @@ app.use('/api/config', configRoutes)
 app.use('/api/org', orgRoutes)
 app.use('/api/rbac', rbacRoutes)
 app.use('/api/work', workRoutes)
+app.use('/api/projects', projectRoutes)
+app.use('/api/requirements', requirementRoutes)
+app.use('/api/bugs', bugRoutes)
+app.use('/api/project-stats', projectStatsRoutes)
 app.use('/api', testRoutes)
 
 app.get('/', (req, res) => {
@@ -108,11 +115,24 @@ app.use((err, req, res, next) => {
   })
 })
 
-const server = app.listen(PORT, HOST, () => {
-  console.log(`Server running at http://${HOST}:${PORT}`)
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`)
-  console.log(`CORS origins: ${allowedOrigins.join(', ') || 'none'}`)
-  console.log(`Loaded env file: ${envFile}`)
+let server = null
+
+async function startServer() {
+  await initializeProjectManagementModule()
+
+  server = app.listen(PORT, HOST, () => {
+    console.log(`Server running at http://${HOST}:${PORT}`)
+    console.log(`Environment: ${process.env.APP_ENV || process.env.NODE_ENV || 'development'}`)
+    console.log(`CORS origins: ${allowedOrigins.join(', ') || 'none'}`)
+    console.log(`Loaded env file: ${envFile}`)
+    console.log(`Legacy bootstrap: ${isLegacyBootstrapEnabled() ? 'enabled' : 'disabled'}`)
+    console.log('Server startup checks completed')
+  })
+}
+
+startServer().catch((err) => {
+  console.error('Failed to start server:', err)
+  process.exit(1)
 })
 
 process.on('SIGTERM', () => {

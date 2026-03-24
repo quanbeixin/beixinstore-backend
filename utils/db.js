@@ -1,7 +1,7 @@
 const mysql = require('mysql2/promise')
-const dotenv = require('dotenv')
+const { loadEnv } = require('./loadEnv')
 
-dotenv.config()
+loadEnv()
 
 const DB_TIME_ZONE = process.env.DB_TIME_ZONE || '+08:00'
 
