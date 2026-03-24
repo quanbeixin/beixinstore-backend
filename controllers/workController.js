@@ -114,6 +114,58 @@ function resolveInsightDateRange(startRaw, endRaw) {
   }
 }
 
+function getCurrentWeekRange() {
+  const today = new Date()
+  const localToday = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  const weekday = localToday.getDay()
+  const offsetToMonday = weekday === 0 ? 6 : weekday - 1
+  const currentWeekMonday = addDays(localToday, -offsetToMonday)
+  return {
+    startDate: formatDate(currentWeekMonday),
+    endDate: formatDate(localToday),
+  }
+}
+
+function resolveWeeklyReportDateRange(startRaw, endRaw) {
+  const startProvided = startRaw !== undefined && startRaw !== null && String(startRaw).trim() !== ''
+  const endProvided = endRaw !== undefined && endRaw !== null && String(endRaw).trim() !== ''
+  const normalizedStart = startProvided ? normalizeDate(startRaw) : ''
+  const normalizedEnd = endProvided ? normalizeDate(endRaw) : ''
+
+  if (startProvided && !normalizedStart) {
+    return { error: 'start_date 格式错误，需为 YYYY-MM-DD' }
+  }
+  if (endProvided && !normalizedEnd) {
+    return { error: 'end_date 格式错误，需为 YYYY-MM-DD' }
+  }
+
+  if (!startProvided && !endProvided) {
+    return getCurrentWeekRange()
+  }
+
+  const startDate = normalizedStart || normalizedEnd
+  const endDate = normalizedEnd || normalizedStart
+  if (!startDate || !endDate) {
+    return { error: '时间范围不合法，请同时检查 start_date 与 end_date' }
+  }
+  if (startDate > endDate) {
+    return { error: '时间范围不合法：start_date 不能大于 end_date' }
+  }
+
+  const startObj = new Date(`${startDate}T00:00:00`)
+  const endObj = new Date(`${endDate}T00:00:00`)
+  if (Number.isNaN(startObj.getTime()) || Number.isNaN(endObj.getTime())) {
+    return { error: '时间范围不合法，请检查日期值' }
+  }
+
+  const daySpan = Math.floor((endObj.getTime() - startObj.getTime()) / 86400000) + 1
+  if (daySpan > 62) {
+    return { error: '时间范围过大，最多支持 62 天' }
+  }
+
+  return { startDate, endDate }
+}
+
 function normalizeStatus(value) {
   const status = String(value || 'TODO').trim().toUpperCase()
   return Work.DEMAND_STATUSES.includes(status) ? status : 'TODO'
@@ -1961,6 +2013,24 @@ const getMyWorkbench = async (req, res) => {
   }
 }
 
+const getMyWeeklyReport = async (req, res) => {
+  const { startDate, endDate, error } = resolveWeeklyReportDateRange(req.query.start_date, req.query.end_date)
+  if (error) {
+    return res.status(400).json({ success: false, message: error })
+  }
+
+  try {
+    const data = await Work.getMyWeeklyReport(req.user.id, {
+      startDate,
+      endDate,
+    })
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取个人周报失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getOwnerWorkbench = async (req, res) => {
   try {
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
@@ -2055,6 +2125,7 @@ module.exports = {
   assignDemandWorkflowNode,
   submitDemandWorkflowCurrentNode,
   getMyWorkbench,
+  getMyWeeklyReport,
   getOwnerWorkbench,
   getMorningStandupBoard,
   sendNoFillReminders,

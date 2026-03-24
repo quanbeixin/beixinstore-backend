@@ -1884,27 +1884,66 @@ const Work = {
 
     await ensureDailyTables()
 
-    const [result] = await pool.query(
-      `INSERT INTO work_log_daily_entries (
-         log_id,
-         user_id,
-         entry_date,
-         actual_hours,
-         description,
-         created_by
-       ) VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        normalizedLogId,
-        normalizedUserId,
-        normalizedEntryDate,
-        normalizedActualHours,
-        normalizedDescription,
-        normalizedCreatedBy,
-      ],
+    // 覆盖模式：同一事项同一天仅保留最后一条，重复填报以最后一次为准
+    await pool.query(
+      `DELETE e_old
+       FROM work_log_daily_entries e_old
+       INNER JOIN work_log_daily_entries e_new
+         ON e_old.log_id = e_new.log_id
+        AND e_old.entry_date = e_new.entry_date
+        AND e_old.id < e_new.id
+       WHERE e_old.log_id = ?`,
+      [normalizedLogId],
     )
 
+    const [existingRows] = await pool.query(
+      `SELECT id
+       FROM work_log_daily_entries
+       WHERE log_id = ?
+         AND user_id = ?
+         AND entry_date = ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [normalizedLogId, normalizedUserId, normalizedEntryDate],
+    )
+
+    let entryId = 0
+    const existingEntry = existingRows?.[0]
+    if (existingEntry?.id) {
+      await pool.query(
+        `UPDATE work_log_daily_entries
+         SET actual_hours = ?,
+             description = ?,
+             created_by = ?,
+             created_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [normalizedActualHours, normalizedDescription, normalizedCreatedBy, Number(existingEntry.id)],
+      )
+      entryId = Number(existingEntry.id)
+    } else {
+      const [result] = await pool.query(
+        `INSERT INTO work_log_daily_entries (
+           log_id,
+           user_id,
+           entry_date,
+           actual_hours,
+           description,
+           created_by
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          normalizedLogId,
+          normalizedUserId,
+          normalizedEntryDate,
+          normalizedActualHours,
+          normalizedDescription,
+          normalizedCreatedBy,
+        ],
+      )
+      entryId = Number(result?.insertId || 0)
+    }
+
     await this.syncLogActualHoursByDailyEntries(normalizedLogId)
-    return Number(result?.insertId || 0)
+    return entryId
   },
 
   async listDailyEntriesForLog(logId, { startDate = '', endDate = '' } = {}) {
@@ -1936,6 +1975,11 @@ const Work = {
          e.created_by,
          DATE_FORMAT(e.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
        FROM work_log_daily_entries e
+       INNER JOIN (
+         SELECT log_id, entry_date, MAX(id) AS latest_id
+         FROM work_log_daily_entries
+         GROUP BY log_id, entry_date
+       ) le ON le.latest_id = e.id
        WHERE ${conditions.join(' AND ')}
        ORDER BY e.entry_date DESC, e.id DESC`,
       params,
@@ -1950,9 +1994,14 @@ const Work = {
     await ensureDailyTables()
 
     const [[sumRow]] = await pool.query(
-      `SELECT ROUND(COALESCE(SUM(actual_hours), 0), 1) AS total_actual_hours
-       FROM work_log_daily_entries
-       WHERE log_id = ?`,
+      `SELECT ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS total_actual_hours
+       FROM work_log_daily_entries e
+       INNER JOIN (
+         SELECT log_id, entry_date, MAX(id) AS latest_id
+         FROM work_log_daily_entries
+         WHERE log_id = ?
+         GROUP BY log_id, entry_date
+       ) le ON le.latest_id = e.id`,
       [normalizedLogId],
     )
     const totalActualHours = normalizeDecimal(sumRow?.total_actual_hours, 0) || 0
@@ -2097,14 +2146,24 @@ const Work = {
          GROUP BY log_id
        ) pt ON pt.log_id = l.id
        LEFT JOIN (
-         SELECT log_id, ROUND(COALESCE(SUM(actual_hours), 0), 1) AS today_actual_hours
-         FROM work_log_daily_entries
-         WHERE entry_date = CURDATE()
+         SELECT e.log_id, ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS today_actual_hours
+         FROM work_log_daily_entries e
+         INNER JOIN (
+           SELECT log_id, entry_date, MAX(id) AS latest_id
+           FROM work_log_daily_entries
+           GROUP BY log_id, entry_date
+         ) le ON le.latest_id = e.id
+         WHERE e.entry_date = CURDATE()
          GROUP BY log_id
        ) et ON et.log_id = l.id
        LEFT JOIN (
-         SELECT log_id, ROUND(COALESCE(SUM(actual_hours), 0), 1) AS total_actual_hours
-         FROM work_log_daily_entries
+         SELECT e.log_id, ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS total_actual_hours
+         FROM work_log_daily_entries e
+         INNER JOIN (
+           SELECT log_id, entry_date, MAX(id) AS latest_id
+           FROM work_log_daily_entries
+           GROUP BY log_id, entry_date
+         ) le ON le.latest_id = e.id
          GROUP BY log_id
        ) tt ON tt.log_id = l.id
        WHERE l.user_id = ?
@@ -2162,8 +2221,13 @@ const Work = {
        FROM work_logs l
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
        LEFT JOIN (
-         SELECT log_id, ROUND(COALESCE(SUM(actual_hours), 0), 1) AS total_actual_hours
-         FROM work_log_daily_entries
+         SELECT e.log_id, ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS total_actual_hours
+         FROM work_log_daily_entries e
+         INNER JOIN (
+           SELECT log_id, entry_date, MAX(id) AS latest_id
+           FROM work_log_daily_entries
+           GROUP BY log_id, entry_date
+         ) le ON le.latest_id = e.id
          GROUP BY log_id
        ) tt ON tt.log_id = l.id
        WHERE l.user_id = ?
@@ -2185,6 +2249,338 @@ const Work = {
       },
       active_items: activeItems,
       recent_logs: recentLogs,
+    }
+  },
+
+  async getMyWeeklyReport(userId, { startDate, endDate } = {}) {
+    const normalizedUserId = toPositiveInt(userId)
+    const normalizedStartDate = normalizeDateOnly(startDate)
+    const normalizedEndDate = normalizeDateOnly(endDate)
+    const dateList = buildDateRange(normalizedStartDate, normalizedEndDate)
+
+    const emptyPayload = {
+      range: {
+        start_date: normalizedStartDate || '',
+        end_date: normalizedEndDate || '',
+        total_days: dateList.length,
+      },
+      summary: {
+        item_count: 0,
+        todo_count: 0,
+        in_progress_count: 0,
+        done_count: 0,
+        overdue_count: 0,
+        active_days: 0,
+        filled_days: 0,
+        planned_hours: 0,
+        actual_hours: 0,
+        variance_hours: 0,
+        variance_rate: null,
+      },
+      daily_breakdown: dateList.map((date) => ({
+        date,
+        planned_hours: 0,
+        actual_hours: 0,
+        item_count: 0,
+        entry_count: 0,
+      })),
+      top_items: [],
+    }
+
+    if (!normalizedUserId || !normalizedStartDate || !normalizedEndDate || normalizedStartDate > normalizedEndDate) {
+      return emptyPayload
+    }
+
+    await ensureDailyTables()
+
+    const [logRows] = await pool.query(
+      `SELECT
+         l.id,
+         DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+         l.personal_estimate_hours,
+         l.actual_hours,
+         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+         COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+         l.description,
+         l.demand_id,
+         d.name AS demand_name,
+         l.phase_key,
+         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name
+       FROM work_logs l
+       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+       LEFT JOIN work_demands d ON d.id = l.demand_id
+       LEFT JOIN config_dict_items pdi
+         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+        AND pdi.item_code = l.phase_key
+       WHERE l.user_id = ?
+         AND (
+           l.log_date BETWEEN ? AND ?
+           OR EXISTS (
+             SELECT 1
+             FROM work_log_daily_plans p
+             WHERE p.log_id = l.id
+               AND p.user_id = ?
+               AND p.plan_date BETWEEN ? AND ?
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM work_log_daily_entries e
+             WHERE e.log_id = l.id
+               AND e.user_id = ?
+               AND e.entry_date BETWEEN ? AND ?
+           )
+         )
+       ORDER BY l.updated_at DESC, l.id DESC`,
+      [
+        normalizedUserId,
+        normalizedStartDate,
+        normalizedEndDate,
+        normalizedUserId,
+        normalizedStartDate,
+        normalizedEndDate,
+        normalizedUserId,
+        normalizedStartDate,
+        normalizedEndDate,
+      ],
+    )
+
+    if (!Array.isArray(logRows) || logRows.length === 0) {
+      return emptyPayload
+    }
+
+    const [planRows] = await pool.query(
+      `SELECT
+         p.log_id,
+         DATE_FORMAT(p.plan_date, '%Y-%m-%d') AS plan_date,
+         ROUND(COALESCE(SUM(p.planned_hours), 0), 1) AS planned_hours
+       FROM work_log_daily_plans p
+       WHERE p.user_id = ?
+         AND p.plan_date BETWEEN ? AND ?
+       GROUP BY p.log_id, p.plan_date`,
+      [normalizedUserId, normalizedStartDate, normalizedEndDate],
+    )
+
+    const [entryRows] = await pool.query(
+      `SELECT
+         e.log_id,
+         DATE_FORMAT(e.entry_date, '%Y-%m-%d') AS entry_date,
+         ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS actual_hours,
+         COUNT(*) AS entry_count
+       FROM work_log_daily_entries e
+       INNER JOIN (
+         SELECT log_id, entry_date, MAX(id) AS latest_id
+         FROM work_log_daily_entries
+         GROUP BY log_id, entry_date
+       ) le ON le.latest_id = e.id
+       WHERE e.user_id = ?
+         AND e.entry_date BETWEEN ? AND ?
+       GROUP BY e.log_id, e.entry_date`,
+      [normalizedUserId, normalizedStartDate, normalizedEndDate],
+    )
+
+    const reportDateSet = new Set(dateList)
+    const dailyMap = new Map()
+    dateList.forEach((date) => {
+      dailyMap.set(date, {
+        date,
+        planned_hours: 0,
+        actual_hours: 0,
+        item_count: 0,
+        entry_count: 0,
+      })
+    })
+
+    const plannedByLogDate = new Map()
+    const plannedTotalByLog = new Map()
+    ;(planRows || []).forEach((row) => {
+      const logId = Number(row.log_id)
+      const planDate = normalizeDateOnly(row.plan_date)
+      const plannedHours = toDecimal1(row.planned_hours)
+      if (!logId || !planDate || !reportDateSet.has(planDate)) return
+      plannedByLogDate.set(`${logId}|${planDate}`, plannedHours)
+      plannedTotalByLog.set(logId, toDecimal1(Number(plannedTotalByLog.get(logId) || 0) + plannedHours))
+    })
+
+    const actualByLogDate = new Map()
+    const actualTotalByLog = new Map()
+    const entryCountByLog = new Map()
+    ;(entryRows || []).forEach((row) => {
+      const logId = Number(row.log_id)
+      const entryDate = normalizeDateOnly(row.entry_date)
+      const actualHours = toDecimal1(row.actual_hours)
+      const entryCount = Number(row.entry_count || 0)
+      if (!logId || !entryDate || !reportDateSet.has(entryDate)) return
+      actualByLogDate.set(`${logId}|${entryDate}`, {
+        actual_hours: actualHours,
+        entry_count: entryCount,
+      })
+      actualTotalByLog.set(logId, toDecimal1(Number(actualTotalByLog.get(logId) || 0) + actualHours))
+      entryCountByLog.set(logId, Number(entryCountByLog.get(logId) || 0) + entryCount)
+    })
+
+    const itemRows = []
+    let todoCount = 0
+    let inProgressCount = 0
+    let doneCount = 0
+    let overdueCount = 0
+
+    ;(logRows || []).forEach((row) => {
+      const logId = Number(row.id)
+      if (!logId) return
+
+      let weeklyPlannedHours = toDecimal1(plannedTotalByLog.get(logId) || 0)
+      let weeklyActualHours = toDecimal1(actualTotalByLog.get(logId) || 0)
+      const touchedDates = new Set()
+
+      if (weeklyPlannedHours > 0) {
+        dateList.forEach((date) => {
+          const plannedHours = toDecimal1(plannedByLogDate.get(`${logId}|${date}`) || 0)
+          if (plannedHours <= 0) return
+          const daily = dailyMap.get(date)
+          if (!daily) return
+          daily.planned_hours = toDecimal1(daily.planned_hours + plannedHours)
+          touchedDates.add(date)
+        })
+      } else {
+        const fallbackEstimateHours = toDecimal1(row.personal_estimate_hours)
+        const expectedStartDate = normalizeDateOnly(row.expected_start_date)
+        const expectedEndDate = normalizeDateOnly(row.expected_completion_date) || expectedStartDate
+        const fallbackLogDate = normalizeDateOnly(row.log_date)
+
+        if (fallbackEstimateHours > 0 && expectedStartDate) {
+          const fullDateList = buildDateRange(expectedStartDate, expectedEndDate || expectedStartDate)
+          const hoursPerDay = splitHoursAcrossDates(fallbackEstimateHours, Math.max(1, fullDateList.length))
+          fullDateList.forEach((date, index) => {
+            if (!reportDateSet.has(date)) return
+            const daily = dailyMap.get(date)
+            if (!daily) return
+            const plannedHours = toDecimal1(hoursPerDay[index] || 0)
+            if (plannedHours <= 0) return
+            daily.planned_hours = toDecimal1(daily.planned_hours + plannedHours)
+            weeklyPlannedHours = toDecimal1(weeklyPlannedHours + plannedHours)
+            touchedDates.add(date)
+          })
+        } else if (fallbackEstimateHours > 0 && fallbackLogDate && reportDateSet.has(fallbackLogDate)) {
+          const daily = dailyMap.get(fallbackLogDate)
+          if (daily) {
+            daily.planned_hours = toDecimal1(daily.planned_hours + fallbackEstimateHours)
+            weeklyPlannedHours = toDecimal1(weeklyPlannedHours + fallbackEstimateHours)
+            touchedDates.add(fallbackLogDate)
+          }
+        }
+      }
+
+      const explicitEntryCount = Number(entryCountByLog.get(logId) || 0)
+      if (weeklyActualHours > 0 || explicitEntryCount > 0) {
+        dateList.forEach((date) => {
+          const dailyEntry = actualByLogDate.get(`${logId}|${date}`)
+          if (!dailyEntry) return
+          const daily = dailyMap.get(date)
+          if (!daily) return
+          const actualHours = toDecimal1(dailyEntry.actual_hours)
+          const entryCount = Number(dailyEntry.entry_count || 0)
+          daily.actual_hours = toDecimal1(daily.actual_hours + actualHours)
+          daily.entry_count = Number(daily.entry_count || 0) + entryCount
+          touchedDates.add(date)
+        })
+      } else {
+        const fallbackLogDate = normalizeDateOnly(row.log_date)
+        const fallbackActualHours = toDecimal1(row.actual_hours)
+        if (fallbackActualHours > 0 && fallbackLogDate && reportDateSet.has(fallbackLogDate)) {
+          const daily = dailyMap.get(fallbackLogDate)
+          if (daily) {
+            daily.actual_hours = toDecimal1(daily.actual_hours + fallbackActualHours)
+            daily.entry_count = Number(daily.entry_count || 0) + 1
+            weeklyActualHours = toDecimal1(weeklyActualHours + fallbackActualHours)
+            touchedDates.add(fallbackLogDate)
+          }
+        }
+      }
+
+      touchedDates.forEach((date) => {
+        const daily = dailyMap.get(date)
+        if (!daily) return
+        daily.item_count = Number(daily.item_count || 0) + 1
+      })
+
+      const statusCode = String(row.log_status || 'IN_PROGRESS').trim().toUpperCase()
+      if (statusCode === 'TODO') todoCount += 1
+      else if (statusCode === 'DONE') doneCount += 1
+      else inProgressCount += 1
+
+      const completionDate = normalizeDateOnly(row.expected_completion_date)
+      if (statusCode !== 'DONE' && completionDate && completionDate < normalizedEndDate) {
+        overdueCount += 1
+      }
+
+      itemRows.push({
+        id: logId,
+        log_status: statusCode,
+        item_type_name: row.item_type_name || `事项#${logId}`,
+        description: row.description || '',
+        demand_id: row.demand_id || null,
+        demand_name: row.demand_name || null,
+        phase_key: row.phase_key || '',
+        phase_name: row.phase_name || row.phase_key || '-',
+        planned_hours: toDecimal1(weeklyPlannedHours),
+        actual_hours: toDecimal1(weeklyActualHours),
+        variance_hours: toDecimal1(weeklyActualHours - weeklyPlannedHours),
+        entry_count: explicitEntryCount,
+      })
+    })
+
+    const dailyBreakdown = dateList
+      .map((date) => dailyMap.get(date))
+      .filter(Boolean)
+      .map((item) => ({
+        date: item.date,
+        planned_hours: toDecimal1(item.planned_hours),
+        actual_hours: toDecimal1(item.actual_hours),
+        item_count: Number(item.item_count || 0),
+        entry_count: Number(item.entry_count || 0),
+      }))
+      .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
+
+    const totalPlannedHours = toDecimal1(itemRows.reduce((sum, item) => sum + Number(item.planned_hours || 0), 0))
+    const totalActualHours = toDecimal1(itemRows.reduce((sum, item) => sum + Number(item.actual_hours || 0), 0))
+    const activeDays = dailyBreakdown.filter(
+      (item) => Number(item.planned_hours || 0) > 0 || Number(item.actual_hours || 0) > 0,
+    ).length
+    const filledDays = dailyBreakdown.filter((item) => Number(item.actual_hours || 0) > 0).length
+
+    const topItems = [...itemRows]
+      .sort((a, b) => {
+        const actualDiff = Number(b.actual_hours || 0) - Number(a.actual_hours || 0)
+        if (actualDiff !== 0) return actualDiff
+        const plannedDiff = Number(b.planned_hours || 0) - Number(a.planned_hours || 0)
+        if (plannedDiff !== 0) return plannedDiff
+        return Number(b.id || 0) - Number(a.id || 0)
+      })
+      .slice(0, 10)
+
+    return {
+      range: {
+        start_date: normalizedStartDate,
+        end_date: normalizedEndDate,
+        total_days: dateList.length,
+      },
+      summary: {
+        item_count: itemRows.length,
+        todo_count: todoCount,
+        in_progress_count: inProgressCount,
+        done_count: doneCount,
+        overdue_count: overdueCount,
+        active_days: activeDays,
+        filled_days: filledDays,
+        planned_hours: totalPlannedHours,
+        actual_hours: totalActualHours,
+        variance_hours: toDecimal1(totalActualHours - totalPlannedHours),
+        variance_rate: calcVarianceRate(totalActualHours, totalPlannedHours),
+      },
+      daily_breakdown: dailyBreakdown,
+      top_items: topItems,
     }
   },
 

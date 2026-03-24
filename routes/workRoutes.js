@@ -32,6 +32,7 @@ const {
   assignDemandWorkflowNode,
   submitDemandWorkflowCurrentNode,
   getMyWorkbench,
+  getMyWeeklyReport,
   getOwnerWorkbench,
   getMorningStandupBoard,
   sendNoFillReminders,
@@ -100,6 +101,7 @@ router.get('/insight/demand', getDemandInsight)
 router.get('/insight/member', getMemberInsight)
 
 router.get('/workbench/me', authMiddleware.requirePermission('workbench.view.self'), getMyWorkbench)
+router.get('/workbench/me/weekly-report', authMiddleware.requirePermission('workbench.view.self'), getMyWeeklyReport)
 router.get('/workbench/morning', getMorningStandupBoard)
 router.get(
   '/workbench/owner',
