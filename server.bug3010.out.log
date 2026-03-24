@@ -1,0 +1,23 @@
+Project management bootstrap skipped. Use migrations first. Set ENABLE_LEGACY_BOOTSTRAP=true only for legacy compatibility.
+Server running at http://0.0.0.0:3010
+Environment: development
+CORS origins: http://localhost:5173
+Loaded env file: .env
+Legacy bootstrap: disabled
+Server startup checks completed
+MySQL connected. session time_zone forced to +08:00
+[2026-03-23T11:37:36.889Z] GET /health -> 200 (4ms)
+[2026-03-23T11:37:50.934Z] GET /api/auth/access -> 200 (30ms)
+[2026-03-23T11:38:28.460Z] POST /api/projects -> 201 (80ms)
+[2026-03-23T11:38:28.556Z] POST /api/requirements -> 201 (61ms)
+[2026-03-23T11:38:28.633Z] POST /api/bugs -> 201 (75ms)
+[2026-03-23T11:38:28.671Z] GET /api/bugs?project_id=3 -> 200 (35ms)
+[2026-03-23T11:38:28.701Z] GET /api/bugs/1 -> 200 (28ms)
+[2026-03-23T11:38:28.754Z] PUT /api/bugs/1/status -> 200 (52ms)
+[2026-03-23T11:38:28.813Z] PUT /api/bugs/1/status -> 200 (56ms)
+[2026-03-23T11:38:28.865Z] PUT /api/bugs/1/stage -> 200 (51ms)
+[2026-03-23T11:38:28.938Z] PUT /api/bugs/1/assignee -> 200 (71ms)
+[2026-03-23T11:38:29.100Z] PUT /api/bugs/1/hours -> 200 (160ms)
+[2026-03-23T11:38:29.151Z] DELETE /api/bugs/1 -> 200 (48ms)
+[2026-03-23T11:38:29.198Z] DELETE /api/requirements/2 -> 200 (45ms)
+[2026-03-23T11:38:29.245Z] DELETE /api/projects/3 -> 200 (46ms)

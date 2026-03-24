@@ -1,0 +1,46 @@
+Project management bootstrap skipped. Use migrations first. Set ENABLE_LEGACY_BOOTSTRAP=true only for legacy compatibility.
+Server running at http://0.0.0.0:3000
+Environment: development
+CORS origins: http://localhost:5173
+Loaded env file: .env
+Legacy bootstrap: disabled
+Server startup checks completed
+MySQL connected. session time_zone forced to +08:00
+[2026-03-23T08:03:02.301Z] POST /api/auth/login -> 200 (164ms)
+[2026-03-23T08:03:02.507Z] POST /api/projects -> 201 (85ms)
+[2026-03-23T08:03:32.065Z] POST /api/auth/login -> 200 (149ms)
+[2026-03-23T08:03:32.307Z] POST /api/requirements -> 201 (157ms)
+[2026-03-23T08:04:00.279Z] POST /api/auth/login -> 200 (140ms)
+[2026-03-23T08:04:00.400Z] GET /api/requirements?page=1&pageSize=10&project_id=2 -> 200 (47ms)
+[2026-03-23T08:04:00.567Z] POST /api/auth/login -> 200 (137ms)
+[2026-03-23T08:04:00.691Z] POST /api/auth/login -> 200 (296ms)
+[2026-03-23T08:04:00.744Z] PUT /api/requirements/1/status -> 200 (60ms)
+[2026-03-23T08:04:00.802Z] GET /api/requirements/1 -> 200 (34ms)
+[2026-03-23T08:04:28.032Z] POST /api/auth/login -> 200 (274ms)
+[2026-03-23T08:04:28.043Z] POST /api/auth/login -> 200 (284ms)
+[2026-03-23T08:04:28.058Z] POST /api/auth/login -> 200 (429ms)
+[2026-03-23T08:04:28.174Z] PUT /api/requirements/1/hours -> 200 (72ms)
+[2026-03-23T08:04:28.197Z] PUT /api/requirements/1/assignee -> 200 (88ms)
+[2026-03-23T08:04:28.198Z] PUT /api/requirements/1/stage -> 200 (69ms)
+[2026-03-23T08:04:50.139Z] POST /api/auth/login -> 200 (122ms)
+[2026-03-23T08:04:50.240Z] GET /api/requirements/1 -> 200 (31ms)
+[2026-03-23T08:05:11.587Z] POST /api/auth/login -> 200 (345ms)
+[2026-03-23T08:05:11.596Z] POST /api/auth/login -> 200 (174ms)
+[2026-03-23T08:05:12.827Z] DELETE /api/requirements/1 -> 200 (60ms)
+[2026-03-23T08:05:12.828Z] DELETE /api/projects/2 -> 200 (62ms)
+[2026-03-23T09:12:01.905Z] GET /api/rbac/menu-visibility/me -> 200 (250ms)
+[2026-03-23T09:12:01.962Z] GET /api/rbac/menu-visibility/me -> 304 (44ms)
+[2026-03-23T09:12:03.655Z] GET /api/users?page=1&pageSize=200 -> 200 (97ms)
+[2026-03-23T09:12:03.657Z] GET /api/work/demands?page=1&pageSize=10 -> 200 (95ms)
+[2026-03-23T09:12:03.681Z] GET /api/config/dict/items?typeKey=business_group&enabledOnly=true -> 304 (117ms)
+[2026-03-23T09:12:03.762Z] GET /api/users?page=1&pageSize=200 -> 304 (85ms)
+[2026-03-23T09:12:03.764Z] GET /api/work/demands?page=1&pageSize=10 -> 304 (82ms)
+[2026-03-23T09:12:03.784Z] GET /api/config/dict/items?typeKey=business_group&enabledOnly=true -> 304 (93ms)
+[2026-03-23T10:19:00.590Z] GET /api/rbac/menu-visibility/me -> 304 (67ms)
+[2026-03-23T10:19:00.635Z] GET /api/rbac/menu-visibility/me -> 304 (39ms)
+[2026-03-23T10:19:01.219Z] GET /api/users?page=1&pageSize=200 -> 200 (42ms)
+[2026-03-23T10:19:01.221Z] GET /api/config/dict/items?typeKey=business_group&enabledOnly=true -> 304 (39ms)
+[2026-03-23T10:19:01.222Z] GET /api/work/demands?page=1&pageSize=10 -> 200 (41ms)
+[2026-03-23T11:24:00.527Z] GET /api/health -> 404 (8ms)
+[2026-03-23T11:24:40.887Z] GET /api/ping -> 200 (3ms)
+[2026-03-23T11:33:44.647Z] GET /health -> 200 (2ms)
