@@ -907,8 +907,9 @@ const Workflow = {
     }
   },
 
-  async listMyOpenTasks(userId, { limit = 30 } = {}) {
+  async listMyOpenTasks(userId, { limit = 30, accessProjectId = null } = {}) {
     const normalizedUserId = toPositiveInt(userId)
+    const scopedProjectId = toPositiveInt(accessProjectId)
     if (!normalizedUserId) return []
 
     try {
@@ -934,6 +935,16 @@ const Workflow = {
            AND t.status IN (?, ?)
            AND i.biz_type = ?
            AND i.status IN (?, ?)
+           ${
+             scopedProjectId
+               ? `AND EXISTS (
+                    SELECT 1
+                    FROM pm_user_business_lines ubl_scope
+                    WHERE ubl_scope.user_id = d.owner_user_id
+                      AND ubl_scope.project_id = ?
+                  )`
+               : ''
+           }
          ORDER BY
            CASE WHEN t.due_at IS NULL THEN 1 ELSE 0 END ASC,
            t.due_at ASC,
@@ -946,6 +957,7 @@ const Workflow = {
           DEMAND_BIZ_TYPE,
           INSTANCE_STATUS.NOT_STARTED,
           INSTANCE_STATUS.IN_PROGRESS,
+          ...(scopedProjectId ? [scopedProjectId] : []),
           Math.max(1, Number(limit || 30)),
         ],
       )

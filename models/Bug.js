@@ -28,13 +28,26 @@ function buildStatusTimestampValues(status) {
   }
 }
 
+async function generateBugCode(executor) {
+  const db = executor && typeof executor.query === 'function' ? executor : pool
+  const [[row]] = await db.query(
+    `SELECT MAX(CAST(SUBSTRING(bug_code, 4) AS UNSIGNED)) AS max_no
+     FROM pm_bugs
+     WHERE bug_code REGEXP '^BUG[0-9]+$'`,
+  )
+  const nextNo = Number(row?.max_no || 0) + 1
+  return `BUG${String(nextNo).padStart(3, '0')}`
+}
+
 const Bug = {
   async findAll({
     page = 1,
     pageSize = 10,
     keyword = '',
+    bugCode = '',
     projectId = null,
     requirementId = null,
+    demandId = '',
     status = '',
     severity = '',
     assigneeUserId = null,
@@ -43,10 +56,15 @@ const Bug = {
   }) {
     const offset = (page - 1) * pageSize
     const like = `%${keyword}%`
-    const params = [like, like, like]
+    const params = [like, like, like, like]
 
     let where =
-      "WHERE b.is_deleted = 0 AND (b.title LIKE ? OR COALESCE(b.description, '') LIKE ? OR COALESCE(b.reproduce_steps, '') LIKE ?)"
+      "WHERE b.is_deleted = 0 AND (b.title LIKE ? OR COALESCE(b.description, '') LIKE ? OR COALESCE(b.reproduce_steps, '') LIKE ? OR COALESCE(b.bug_code, '') LIKE ?)"
+
+    if (bugCode) {
+      where += ' AND b.bug_code = ?'
+      params.push(String(bugCode).trim().toUpperCase())
+    }
 
     if (projectId) {
       where += ' AND b.project_id = ?'
@@ -59,6 +77,10 @@ const Bug = {
     if (requirementId) {
       where += ' AND b.requirement_id = ?'
       params.push(requirementId)
+    }
+    if (demandId) {
+      where += ' AND b.demand_id = ?'
+      params.push(String(demandId).trim().toUpperCase())
     }
     if (status) {
       where += ' AND b.status = ?'
@@ -82,10 +104,13 @@ const Bug = {
       SELECT
         b.*,
         p.name AS project_name,
+        d.name AS demand_name,
         r.title AS requirement_title,
+        COALESCE(d.name, r.title) AS linked_requirement_title,
         COALESCE(NULLIF(u.real_name, ''), u.username) AS assignee_name
       FROM pm_bugs b
       INNER JOIN pm_projects p ON p.id = b.project_id AND p.is_deleted = 0
+      LEFT JOIN work_demands d ON d.id = b.demand_id
       LEFT JOIN pm_requirements r ON r.id = b.requirement_id AND r.is_deleted = 0
       LEFT JOIN users u ON u.id = b.assignee_user_id
       ${where}
@@ -100,6 +125,7 @@ const Bug = {
       SELECT COUNT(*) AS total
       FROM pm_bugs b
       INNER JOIN pm_projects p ON p.id = b.project_id AND p.is_deleted = 0
+      LEFT JOIN work_demands d ON d.id = b.demand_id
       LEFT JOIN pm_requirements r ON r.id = b.requirement_id AND r.is_deleted = 0
       ${where}
       `,
@@ -118,10 +144,13 @@ const Bug = {
       SELECT
         b.*,
         p.name AS project_name,
+        d.name AS demand_name,
         r.title AS requirement_title,
+        COALESCE(d.name, r.title) AS linked_requirement_title,
         COALESCE(NULLIF(u.real_name, ''), u.username) AS assignee_name
       FROM pm_bugs b
       INNER JOIN pm_projects p ON p.id = b.project_id AND p.is_deleted = 0
+      LEFT JOIN work_demands d ON d.id = b.demand_id
       LEFT JOIN pm_requirements r ON r.id = b.requirement_id AND r.is_deleted = 0
       LEFT JOIN users u ON u.id = b.assignee_user_id
       WHERE b.id = ? AND b.is_deleted = 0
@@ -134,38 +163,52 @@ const Bug = {
 
   async create(payload) {
     const timestamps = buildStatusTimestampValues(payload.status)
-    const [result] = await pool.query(
-      `
-      INSERT INTO pm_bugs
-      (
-        project_id, requirement_id, title, description, reproduce_steps,
-        severity, status, stage, assignee_user_id, estimated_hours,
-        actual_hours, due_date, resolved_at, verified_at, closed_at,
-        created_by, updated_by
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const finalBugCode = String(payload.bug_code || '').trim().toUpperCase() || (await generateBugCode(conn))
+
+      const [result] = await conn.query(
+        `
+        INSERT INTO pm_bugs
+        (
+          bug_code, project_id, requirement_id, demand_id, title, description, reproduce_steps,
+          severity, status, stage, assignee_user_id, estimated_hours,
+          actual_hours, due_date, resolved_at, verified_at, closed_at,
+          created_by, updated_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        [
+          finalBugCode,
+          payload.project_id,
+          toPositiveInt(payload.requirement_id),
+          payload.demand_id || null,
+          payload.title,
+          payload.description || null,
+          payload.reproduce_steps || null,
+          payload.severity,
+          payload.status,
+          payload.stage,
+          toPositiveInt(payload.assignee_user_id),
+          Number(payload.estimated_hours || 0),
+          Number(payload.actual_hours || 0),
+          payload.due_date || null,
+          timestamps.resolved_at === 'NOW' ? new Date() : null,
+          timestamps.verified_at === 'NOW' ? new Date() : null,
+          timestamps.closed_at === 'NOW' ? new Date() : null,
+          toPositiveInt(payload.created_by),
+          toPositiveInt(payload.updated_by),
+        ],
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-      [
-        payload.project_id,
-        toPositiveInt(payload.requirement_id),
-        payload.title,
-        payload.description || null,
-        payload.reproduce_steps || null,
-        payload.severity,
-        payload.status,
-        payload.stage,
-        toPositiveInt(payload.assignee_user_id),
-        Number(payload.estimated_hours || 0),
-        Number(payload.actual_hours || 0),
-        payload.due_date || null,
-        timestamps.resolved_at === 'NOW' ? new Date() : null,
-        timestamps.verified_at === 'NOW' ? new Date() : null,
-        timestamps.closed_at === 'NOW' ? new Date() : null,
-        toPositiveInt(payload.created_by),
-        toPositiveInt(payload.updated_by),
-      ],
-    )
-    return Number(result.insertId)
+      await conn.commit()
+      return Number(result.insertId)
+    } catch (err) {
+      await conn.rollback()
+      throw err
+    } finally {
+      conn.release()
+    }
   },
 
   async update(id, payload) {
@@ -174,8 +217,10 @@ const Bug = {
       `
       UPDATE pm_bugs
       SET
+        bug_code = ?,
         project_id = ?,
         requirement_id = ?,
+        demand_id = ?,
         title = ?,
         description = ?,
         reproduce_steps = ?,
@@ -193,8 +238,10 @@ const Bug = {
       WHERE id = ? AND is_deleted = 0
       `,
       [
+        String(payload.bug_code || '').trim().toUpperCase() || null,
         payload.project_id,
         toPositiveInt(payload.requirement_id),
+        payload.demand_id || null,
         payload.title,
         payload.description || null,
         payload.reproduce_steps || null,

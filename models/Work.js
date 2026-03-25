@@ -246,9 +246,25 @@ function parseMorningTabKey(tabKey) {
   return { type: 'DEPARTMENT', departmentId }
 }
 
-async function resolveOwnerScope(ownerUserId, { isSuperAdmin = false } = {}) {
+async function resolveOwnerScope(ownerUserId, { isSuperAdmin = false, accessProjectId = null } = {}) {
+  const scopedProjectId = toPositiveInt(accessProjectId)
   if (isSuperAdmin) {
-    const teamMemberIds = await listActiveUserIds()
+    let teamMemberIds = []
+    if (scopedProjectId) {
+      const [rows] = await pool.query(
+        `SELECT u.id
+         FROM users u
+         INNER JOIN pm_user_business_lines ubl
+           ON ubl.user_id = u.id
+          AND ubl.project_id = ?
+         WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+         ORDER BY u.id ASC`,
+        [scopedProjectId],
+      )
+      teamMemberIds = normalizeUserIds(rows || [])
+    } else {
+      teamMemberIds = await listActiveUserIds()
+    }
     return {
       scope_type: 'ALL',
       department_id: null,
@@ -278,30 +294,52 @@ async function resolveOwnerScope(ownerUserId, { isSuperAdmin = false } = {}) {
     .filter((id) => Number.isInteger(id) && id > 0)
   const managedDepartmentNames = managedDepartments.map((item) => item.name).filter(Boolean)
 
-  const [rows] = await pool.query(
-    `SELECT u.id
-     FROM users u
-     WHERE u.department_id IN (?)
-       AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
-     ORDER BY u.id ASC`,
-    [managedDepartmentIds],
-  )
+  const memberSql = scopedProjectId
+    ? `SELECT u.id, u.department_id
+       FROM users u
+       INNER JOIN pm_user_business_lines ubl
+         ON ubl.user_id = u.id
+        AND ubl.project_id = ?
+       WHERE u.department_id IN (?)
+         AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+       ORDER BY u.id ASC`
+    : `SELECT u.id, u.department_id
+       FROM users u
+       WHERE u.department_id IN (?)
+         AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+       ORDER BY u.id ASC`
+  const memberParams = scopedProjectId ? [scopedProjectId, managedDepartmentIds] : [managedDepartmentIds]
+  const [rows] = await pool.query(memberSql, memberParams)
 
-  const teamMemberIds = normalizeUserIds(rows)
-  const isSingleDepartment = managedDepartmentIds.length === 1
-  const departmentId = isSingleDepartment ? managedDepartmentIds[0] : null
-  const departmentName = isSingleDepartment ? managedDepartmentNames[0] || null : null
+  const teamMemberIds = normalizeUserIds(rows || [])
+  const effectiveManagedDepartmentIds = Array.from(
+    new Set(
+      (rows || [])
+        .map((row) => Number(row.department_id))
+        .filter((id) => Number.isInteger(id) && id > 0),
+    ),
+  )
+  const effectiveManagedDepartmentNames = managedDepartments
+    .filter((item) => effectiveManagedDepartmentIds.includes(Number(item.id)))
+    .map((item) => item.name)
+    .filter(Boolean)
+  const isSingleDepartment = effectiveManagedDepartmentIds.length === 1
+  const departmentId = isSingleDepartment ? effectiveManagedDepartmentIds[0] : null
+  const departmentName = isSingleDepartment ? effectiveManagedDepartmentNames[0] || null : null
 
   return {
     scope_type: 'MANAGED_DEPARTMENTS',
     department_id: departmentId,
     department_name: departmentName,
-    scope_label: isSingleDepartment
-      ? departmentName || `部门#${departmentId}`
-      : `${managedDepartmentIds.length}个负责部门`,
+    scope_label:
+      effectiveManagedDepartmentIds.length === 0
+        ? '未负责部门'
+        : isSingleDepartment
+          ? departmentName || `部门#${departmentId}`
+          : `${effectiveManagedDepartmentIds.length}个负责部门`,
     team_member_ids: teamMemberIds,
-    managed_department_ids: managedDepartmentIds,
-    managed_department_names: managedDepartmentNames,
+    managed_department_ids: effectiveManagedDepartmentIds,
+    managed_department_names: effectiveManagedDepartmentNames,
   }
 }
 
@@ -368,6 +406,7 @@ function buildDemandInsightWhere({
   ownerUserId = null,
   memberUserId = null,
   keyword = '',
+  accessProjectId = null,
 } = {}) {
   const conditions = [
     'l.demand_id IS NOT NULL',
@@ -385,6 +424,10 @@ function buildDemandInsightWhere({
   if (businessGroupCode) {
     conditions.push('d.business_group_code = ?')
     params.push(businessGroupCode)
+  }
+  if (toPositiveInt(accessProjectId)) {
+    conditions.push('ubl.project_id = ?')
+    params.push(toPositiveInt(accessProjectId))
   }
 
   if (ownerUserId) {
@@ -418,6 +461,7 @@ function buildMemberInsightWhere({
   ownerUserId = null,
   memberUserId = null,
   keyword = '',
+  accessProjectId = null,
 } = {}) {
   const conditions = ["COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'", 'l.log_date >= ?', 'l.log_date <= ?']
   const params = [startDate, endDate]
@@ -430,6 +474,10 @@ function buildMemberInsightWhere({
   if (businessGroupCode) {
     conditions.push('d.business_group_code = ?')
     params.push(businessGroupCode)
+  }
+  if (toPositiveInt(accessProjectId)) {
+    conditions.push('ubl.project_id = ?')
+    params.push(toPositiveInt(accessProjectId))
   }
 
   if (ownerUserId) {
@@ -466,12 +514,25 @@ const Work = {
     return rows.length > 0
   },
 
-  async canManageAssigneeByOwner(ownerUserId, assigneeUserId, { isSuperAdmin = false } = {}) {
+  async canManageAssigneeByOwner(ownerUserId, assigneeUserId, { isSuperAdmin = false, accessProjectId = null } = {}) {
     const targetUserId = toPositiveInt(assigneeUserId)
     if (!targetUserId) return false
+    const scopedProjectId = toPositiveInt(accessProjectId)
+
+    if (scopedProjectId) {
+      const [[bindingRow]] = await pool.query(
+        `SELECT 1 AS matched
+         FROM pm_user_business_lines
+         WHERE user_id = ? AND project_id = ?
+         LIMIT 1`,
+        [targetUserId, scopedProjectId],
+      )
+      if (!bindingRow?.matched) return false
+    }
+
     if (isSuperAdmin) return true
 
-    const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin: false })
+    const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin: false, accessProjectId: scopedProjectId })
     const teamMemberIds = Array.isArray(scope.team_member_ids) ? scope.team_member_ids : []
     if (teamMemberIds.includes(targetUserId)) return true
 
@@ -651,6 +712,7 @@ const Work = {
     updatedStartDate = '',
     updatedEndDate = '',
     mineUserId = null,
+    accessProjectId = null,
   } = {}) {
     const offset = (page - 1) * pageSize
     const conditions = ['1 = 1']
@@ -700,6 +762,18 @@ const Work = {
       params.push(mineUserId, mineUserId)
     }
 
+    if (toPositiveInt(accessProjectId)) {
+      conditions.push(
+        `EXISTS (
+          SELECT 1
+          FROM pm_user_business_lines ubl
+          WHERE ubl.user_id = d.owner_user_id
+            AND ubl.project_id = ?
+        )`,
+      )
+      params.push(toPositiveInt(accessProjectId))
+    }
+
     const whereSql = conditions.join(' AND ')
     const normalizedPriorityOrder = String(priorityOrder || '').trim().toLowerCase() === 'desc' ? 'DESC' : 'ASC'
     const listSql = `
@@ -707,6 +781,7 @@ const Work = {
         d.id,
         d.name,
         d.owner_user_id,
+        ubl.project_id AS mapped_project_id,
         COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
         d.business_group_code,
         bg.item_name AS business_group_name,
@@ -723,6 +798,7 @@ const Work = {
         COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours
       FROM work_demands d
       LEFT JOIN users u ON u.id = d.owner_user_id
+      LEFT JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
       LEFT JOIN config_dict_items bg
         ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
        AND bg.item_code = d.business_group_code
@@ -773,6 +849,7 @@ const Work = {
          d.id,
          d.name,
          d.owner_user_id,
+         ubl.project_id AS mapped_project_id,
          COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
          d.business_group_code,
          bg.item_name AS business_group_name,
@@ -786,6 +863,7 @@ const Work = {
          DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at
        FROM work_demands d
        LEFT JOIN users u ON u.id = d.owner_user_id
+       LEFT JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
        LEFT JOIN config_dict_items bg
          ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
         AND bg.item_code = d.business_group_code
@@ -926,6 +1004,7 @@ const Work = {
     startDate = '',
     endDate = '',
     teamScopeUserId = null,
+    accessProjectId = null,
   } = {}) {
     const offset = (page - 1) * pageSize
     const conditions = ['1 = 1']
@@ -973,6 +1052,18 @@ const Work = {
     if (keyword) {
       conditions.push('(l.description LIKE ? OR COALESCE(l.demand_id, \'\') LIKE ?)')
       params.push(`%${keyword}%`, `%${keyword}%`)
+    }
+
+    if (toPositiveInt(accessProjectId)) {
+      conditions.push(
+        `EXISTS (
+          SELECT 1
+          FROM pm_user_business_lines ubl_scope
+          WHERE ubl_scope.user_id = l.user_id
+            AND ubl_scope.project_id = ?
+        )`,
+      )
+      params.push(toPositiveInt(accessProjectId))
     }
 
     const whereSql = conditions.join(' AND ')
@@ -1175,10 +1266,11 @@ const Work = {
     return result.affectedRows
   },
 
-  async canManageLogByDepartmentOwner(ownerUserId, logId, { isSuperAdmin = false } = {}) {
+  async canManageLogByDepartmentOwner(ownerUserId, logId, { isSuperAdmin = false, accessProjectId = null } = {}) {
+    const scopedProjectId = toPositiveInt(accessProjectId)
     if (isSuperAdmin) return true
 
-    const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin: false })
+    const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin: false, accessProjectId: scopedProjectId })
     const teamMemberIds = Array.isArray(scope.team_member_ids) ? scope.team_member_ids : []
     const managedDepartmentIds = Array.isArray(scope.managed_department_ids)
       ? scope.managed_department_ids
@@ -1200,9 +1292,19 @@ const Work = {
          ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
         AND pdi.item_code = l.phase_key
        WHERE l.id = ?
+         ${
+           scopedProjectId
+             ? `AND EXISTS (
+                  SELECT 1
+                  FROM pm_user_business_lines ubl_scope
+                  WHERE ubl_scope.user_id = l.user_id
+                    AND ubl_scope.project_id = ?
+                )`
+             : ''
+         }
          AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
        LIMIT 1`,
-      [logId],
+      scopedProjectId ? [logId, scopedProjectId] : [logId],
     )
     if (rows.length === 0) return false
 
@@ -1235,7 +1337,24 @@ const Work = {
     }
   },
 
-  async getMyWorkbench(userId) {
+  async getMyWorkbench(userId, { accessProjectId = null } = {}) {
+    const scopedProjectId = toPositiveInt(accessProjectId)
+    const scopeWhereSql = scopedProjectId
+      ? `AND EXISTS (
+           SELECT 1
+           FROM pm_user_business_lines ubl_scope
+           WHERE ubl_scope.user_id = work_logs.user_id
+             AND ubl_scope.project_id = ?
+         )`
+      : ''
+    const scopeWhereForAliasL = scopedProjectId
+      ? `AND EXISTS (
+           SELECT 1
+           FROM pm_user_business_lines ubl_scope
+           WHERE ubl_scope.user_id = l.user_id
+             AND ubl_scope.project_id = ?
+         )`
+      : ''
     const [[today]] = await pool.query(
       `SELECT
          COUNT(*) AS log_count_today,
@@ -1243,8 +1362,9 @@ const Work = {
          COALESCE(SUM(actual_hours), 0) AS actual_hours_today,
          COALESCE(SUM(remaining_hours), 0) AS remaining_hours_today
        FROM work_logs
-       WHERE user_id = ? AND log_date = CURDATE()`,
-      [userId],
+       WHERE user_id = ? AND log_date = CURDATE()
+       ${scopeWhereSql}`,
+      scopedProjectId ? [userId, scopedProjectId] : [userId],
     )
 
     const [activeItems] = await pool.query(
@@ -1276,6 +1396,7 @@ const Work = {
          ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
         AND pdi.item_code = l.phase_key
        WHERE l.user_id = ?
+         ${scopeWhereForAliasL}
          AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
        ORDER BY
          CASE COALESCE(l.log_status, 'IN_PROGRESS')
@@ -1287,7 +1408,7 @@ const Work = {
          l.expected_completion_date ASC,
          l.updated_at DESC
        LIMIT 30`,
-      [userId],
+      scopedProjectId ? [userId, scopedProjectId] : [userId],
     )
 
     const [recentLogs] = await pool.query(
@@ -1303,9 +1424,10 @@ const Work = {
        FROM work_logs l
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
        WHERE l.user_id = ?
+       ${scopeWhereForAliasL}
        ORDER BY l.log_date DESC, l.id DESC
        LIMIT 10`,
-      [userId],
+      scopedProjectId ? [userId, scopedProjectId] : [userId],
     )
 
     return {
@@ -1326,10 +1448,35 @@ const Work = {
       canViewAll = false,
       targetDepartmentId = null,
       tabKey = '',
+      activeProjectId = null,
     } = {},
   ) {
     const viewerDepartment = await findUserDepartmentRow(viewerUserId)
-    const allEnabledDepartments = await listEnabledDepartments()
+    const scopedProjectId = toPositiveInt(activeProjectId)
+    let allEnabledDepartments = await listEnabledDepartments()
+
+    if (scopedProjectId) {
+      const [departmentRows] = await pool.query(
+        `SELECT
+           d.id,
+           d.name,
+           MIN(COALESCE(d.sort_order, 0)) AS sort_order
+         FROM users u
+         INNER JOIN pm_user_business_lines ubl
+           ON ubl.user_id = u.id
+          AND ubl.project_id = ?
+         INNER JOIN departments d ON d.id = u.department_id
+         WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+           AND COALESCE(d.enabled, 1) = 1
+         GROUP BY d.id, d.name
+         ORDER BY sort_order ASC, d.id ASC`,
+        [scopedProjectId],
+      )
+      allEnabledDepartments = (departmentRows || []).map((row) => ({
+        id: Number(row.id),
+        name: row.name || `部门#${Number(row.id)}`,
+      }))
+    }
     const allEnabledDepartmentIds = allEnabledDepartments.map((item) => Number(item.id))
 
     const requestedDepartmentId = toPositiveInt(targetDepartmentId)
@@ -1445,6 +1592,17 @@ const Work = {
       return emptyPayload
     }
 
+    const memberParams = []
+    const memberProjectSql = scopedProjectId
+      ? `INNER JOIN pm_user_business_lines ubl
+           ON ubl.user_id = u.id
+          AND ubl.project_id = ?`
+      : ''
+    if (scopedProjectId) {
+      memberParams.push(scopedProjectId)
+    }
+    memberParams.push(scopedDepartmentIds)
+
     const [memberRows] = await pool.query(
       `SELECT
          u.id AS user_id,
@@ -1453,10 +1611,11 @@ const Work = {
          COALESCE(d.name, CONCAT('部门#', u.department_id)) AS department_name
        FROM users u
        LEFT JOIN departments d ON d.id = u.department_id
+       ${memberProjectSql}
        WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
          AND u.department_id IN (?)
        ORDER BY u.department_id ASC, u.id ASC`,
-      [scopedDepartmentIds],
+      memberParams,
     )
 
     const userIds = memberRows
@@ -1648,8 +1807,9 @@ const Work = {
     }
   },
 
-  async getOwnerWorkbench(ownerUserId, { isSuperAdmin = false } = {}) {
-    const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin })
+  async getOwnerWorkbench(ownerUserId, { isSuperAdmin = false, accessProjectId = null } = {}) {
+    const scopedProjectId = toPositiveInt(accessProjectId)
+    const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin, accessProjectId: scopedProjectId })
     const teamMemberIds = Array.isArray(scope.team_member_ids) ? scope.team_member_ids : []
     const managedDepartmentIds = Array.isArray(scope.managed_department_ids)
       ? scope.managed_department_ids
@@ -1736,6 +1896,17 @@ const Work = {
     let ownerEstimateItems = []
     const ownerEstimateQueryConditions = [`COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'`]
     const ownerEstimateQueryParams = []
+    if (scopedProjectId) {
+      ownerEstimateQueryConditions.push(
+        `EXISTS (
+          SELECT 1
+          FROM pm_user_business_lines ubl_scope
+          WHERE ubl_scope.user_id = l.user_id
+            AND ubl_scope.project_id = ?
+        )`,
+      )
+      ownerEstimateQueryParams.push(scopedProjectId)
+    }
 
     if (!isSuperAdmin) {
       const candidateConditions = []
@@ -1939,6 +2110,7 @@ const Work = {
     ownerUserId = null,
     memberUserId = null,
     keyword = '',
+    accessProjectId = null,
   } = {}) {
     const { whereSql, params } = buildDemandInsightWhere({
       startDate,
@@ -1948,6 +2120,7 @@ const Work = {
       ownerUserId,
       memberUserId,
       keyword,
+      accessProjectId,
     })
 
     const demandSql = `
@@ -1970,6 +2143,7 @@ const Work = {
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
       LEFT JOIN users ou ON ou.id = d.owner_user_id
       LEFT JOIN config_dict_items bg
         ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
@@ -2003,6 +2177,7 @@ const Work = {
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
       LEFT JOIN config_dict_items pdi
         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
        AND pdi.item_code = l.phase_key
@@ -2027,6 +2202,7 @@ const Work = {
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
       LEFT JOIN config_dict_items pdi
         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
        AND pdi.item_code = l.phase_key
@@ -2178,6 +2354,7 @@ const Work = {
     ownerUserId = null,
     memberUserId = null,
     keyword = '',
+    accessProjectId = null,
   } = {}) {
     const userConditions = [`COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'`]
     const userParams = []
@@ -2250,6 +2427,10 @@ const Work = {
       logConditions.push('d.owner_user_id = ?')
       logParams.push(ownerUserId)
     }
+    if (toPositiveInt(accessProjectId)) {
+      logConditions.push('ubl.project_id = ?')
+      logParams.push(toPositiveInt(accessProjectId))
+    }
     if (keyword) {
       logConditions.push(
         `(COALESCE(NULLIF(u.real_name, ''), u.username) LIKE ? OR COALESCE(d.name, '') LIKE ? OR COALESCE(l.demand_id, '') LIKE ? OR COALESCE(l.description, '') LIKE ?)`,
@@ -2273,6 +2454,7 @@ const Work = {
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
       WHERE ${logWhereSql}
       GROUP BY l.user_id
       ORDER BY total_actual_hours DESC, l.user_id ASC
@@ -2290,6 +2472,7 @@ const Work = {
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
       WHERE ${logWhereSql}
       GROUP BY l.user_id, DATE_FORMAT(l.log_date, '%Y-%m-%d')
       ORDER BY l.user_id ASC, log_date ASC
@@ -2430,8 +2613,8 @@ const Work = {
     }
   },
 
-  async previewNoFillReminders(ownerUserId, { isSuperAdmin = false } = {}) {
-    const ownerWorkbench = await this.getOwnerWorkbench(ownerUserId, { isSuperAdmin })
+  async previewNoFillReminders(ownerUserId, { isSuperAdmin = false, accessProjectId = null } = {}) {
+    const ownerWorkbench = await this.getOwnerWorkbench(ownerUserId, { isSuperAdmin, accessProjectId })
     return {
       date: new Date().toISOString().slice(0, 10),
       total_members: ownerWorkbench.team_overview.team_size,

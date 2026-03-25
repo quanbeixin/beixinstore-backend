@@ -104,6 +104,7 @@ async function ensureProjectTables() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pm_bugs (
       id INT AUTO_INCREMENT PRIMARY KEY,
+      bug_code VARCHAR(20) DEFAULT NULL,
       project_id INT NOT NULL,
       requirement_id INT DEFAULT NULL,
       title VARCHAR(200) NOT NULL,
@@ -125,6 +126,7 @@ async function ensureProjectTables() {
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       KEY idx_pm_bugs_project_id (project_id),
+      UNIQUE KEY uk_pm_bugs_bug_code (bug_code),
       KEY idx_pm_bugs_requirement_id (requirement_id),
       KEY idx_pm_bugs_status (status),
       KEY idx_pm_bugs_severity (severity),

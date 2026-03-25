@@ -14,6 +14,7 @@
     "migrate:staging:dry-run": "set APP_ENV=staging&& node scripts/runMigrations.js --dry-run",
     "migrate:prod": "set APP_ENV=production&& node scripts/runMigrations.js",
     "migrate:prod:dry-run": "set APP_ENV=production&& node scripts/runMigrations.js --dry-run",
+    "seed:staging:mock": "set APP_ENV=staging&& node scripts/seedStagingMockData.js",
     "deploy:staging": "powershell -ExecutionPolicy Bypass -File ./scripts/deploy-staging.ps1",
     "deploy:production": "powershell -ExecutionPolicy Bypass -File ./scripts/deploy-production.ps1",
     "pm2:start": "pm2 start ecosystem.config.js --only admin-backend",

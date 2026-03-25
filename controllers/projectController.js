@@ -32,7 +32,7 @@ function normalizeDate(value) {
 }
 
 function getScopeProjectId(req) {
-  return req.businessLineScope?.is_super_admin ? null : toPositiveInt(req.businessLineScope?.project_id)
+  return toPositiveInt(req.businessLineScope?.active_project_id || req.businessLineScope?.project_id)
 }
 
 function assertProjectInScope(req, projectId) {
@@ -133,7 +133,7 @@ const createProject = async (req, res) => {
   }
 
   try {
-    if (getScopeProjectId(req)) {
+    if (!req.userAccess?.is_super_admin && getScopeProjectId(req)) {
       return res.status(403).json({ success: false, message: '当前账号仅允许管理所属业务线，不支持新建业务线' })
     }
     if (ownerUserId) {

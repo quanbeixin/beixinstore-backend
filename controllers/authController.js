@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs')
 const User = require('../models/User')
 const Permission = require('../models/Permission')
 const UserPreference = require('../models/UserPreference')
+const UserBusinessLine = require('../models/UserBusinessLine')
 const { generateToken } = require('../utils/jwt')
 
 function normalizeStatusCode(value) {
@@ -73,6 +74,11 @@ function toBoolInt(value) {
   if (value === true || value === 1 || value === '1' || String(value).toLowerCase() === 'true') return 1
   if (value === false || value === 0 || value === '0' || String(value).toLowerCase() === 'false') return 0
   return null
+}
+
+function toPositiveInt(value) {
+  const num = Number(value)
+  return Number.isInteger(num) && num > 0 ? num : null
 }
 
 function buildProfileResponse(user, preference) {
@@ -367,7 +373,39 @@ const updatePreferences = async (req, res) => {
 const getAccess = async (req, res) => {
   try {
     const access = req.userAccess || (await Permission.getUserAccess(req.user.id))
-    return res.json({ success: true, data: access })
+    const userId = toPositiveInt(req.user?.id)
+    const isSuperAdmin = Boolean(access?.is_super_admin)
+    const availableProjects = await UserBusinessLine.listAvailableProjectsForUser({
+      userId,
+      isSuperAdmin,
+    })
+
+    const headerProjectId = toPositiveInt(req.headers['x-business-line-id'])
+    const currentProject =
+      headerProjectId === null
+        ? availableProjects[0] || null
+        : availableProjects.find((item) => Number(item.project_id) === Number(headerProjectId)) || null
+
+    if (headerProjectId && !currentProject) {
+      return res.status(400).json({ success: false, message: '业务线选择无效，请刷新后重试' })
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        ...access,
+        can_switch_business_line: isSuperAdmin,
+        current_business_line_id: currentProject ? Number(currentProject.project_id) : null,
+        current_business_line_name: currentProject?.project_name || '',
+        current_business_line_code: currentProject?.project_code || '',
+        available_business_lines: availableProjects.map((item) => ({
+          id: Number(item.project_id),
+          name: item.project_name || '',
+          code: item.project_code || '',
+          status: item.project_status || '',
+        })),
+      },
+    })
   } catch (err) {
     console.error('获取访问权限失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })

@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 
 const authMiddleware = require('../middleware/auth')
+const businessLineScope = require('../middleware/businessLineScope')
 const {
   listWorkItemTypes,
   listDemandPhaseTypes,
@@ -32,6 +33,7 @@ const {
 } = require('../controllers/workController')
 
 router.use(authMiddleware)
+router.use(businessLineScope)
 
 router.get(
   '/item-types',

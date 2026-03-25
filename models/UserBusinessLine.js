@@ -9,12 +9,72 @@ const UserBusinessLine = {
   async getByUserId(userId) {
     const [rows] = await pool.query(
       `
-      SELECT user_id, project_id
-      FROM pm_user_business_lines
-      WHERE user_id = ?
+      SELECT
+        ubl.user_id,
+        ubl.project_id,
+        p.name AS project_name,
+        p.project_code,
+        p.status AS project_status
+      FROM pm_user_business_lines ubl
+      INNER JOIN pm_projects p ON p.id = ubl.project_id
+      WHERE ubl.user_id = ?
+        AND p.is_deleted = 0
       LIMIT 1
       `,
       [toPositiveInt(userId)],
+    )
+    return rows[0] || null
+  },
+
+  async listAvailableProjectsForUser({ userId, isSuperAdmin = false }) {
+    if (isSuperAdmin) {
+      const [rows] = await pool.query(
+        `
+        SELECT
+          p.id AS project_id,
+          p.name AS project_name,
+          p.project_code,
+          p.status AS project_status
+        FROM pm_projects p
+        WHERE p.is_deleted = 0
+        ORDER BY p.id ASC
+        `,
+      )
+      return rows || []
+    }
+
+    const [rows] = await pool.query(
+      `
+      SELECT
+        ubl.project_id,
+        p.name AS project_name,
+        p.project_code,
+        p.status AS project_status
+      FROM pm_user_business_lines ubl
+      INNER JOIN pm_projects p ON p.id = ubl.project_id
+      WHERE ubl.user_id = ?
+        AND p.is_deleted = 0
+      ORDER BY p.id ASC
+      `,
+      [toPositiveInt(userId)],
+    )
+    return rows || []
+  },
+
+  async findProjectById(projectId) {
+    const [rows] = await pool.query(
+      `
+      SELECT
+        p.id AS project_id,
+        p.name AS project_name,
+        p.project_code,
+        p.status AS project_status
+      FROM pm_projects p
+      WHERE p.id = ?
+        AND p.is_deleted = 0
+      LIMIT 1
+      `,
+      [toPositiveInt(projectId)],
     )
     return rows[0] || null
   },
@@ -36,4 +96,3 @@ const UserBusinessLine = {
 }
 
 module.exports = UserBusinessLine
-

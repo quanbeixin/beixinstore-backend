@@ -1,6 +1,7 @@
 const Bug = require('../models/Bug')
 const Project = require('../models/Project')
 const Requirement = require('../models/Requirement')
+const Work = require('../models/Work')
 const ProjectActivityLog = require('../models/ProjectActivityLog')
 const User = require('../models/User')
 
@@ -42,8 +43,20 @@ function normalizeHours(value, fallback = 0) {
   return Number(num.toFixed(2))
 }
 
+function normalizeDemandId(value) {
+  const demandId = String(value || '').trim().toUpperCase()
+  if (!demandId) return null
+  return /^[A-Z][A-Z0-9_]{1,63}$/.test(demandId) ? demandId : ''
+}
+
+function normalizeBugCode(value) {
+  const bugCode = String(value || '').trim().toUpperCase()
+  if (!bugCode) return null
+  return /^BUG\d{3,}$/.test(bugCode) ? bugCode : ''
+}
+
 function toScopeProjectId(req) {
-  return req.businessLineScope?.is_super_admin ? null : toPositiveInt(req.businessLineScope?.project_id)
+  return toPositiveInt(req.businessLineScope?.active_project_id || req.businessLineScope?.project_id)
 }
 
 function isBugAccessible(req, bug) {
@@ -52,7 +65,7 @@ function isBugAccessible(req, bug) {
   return Number(bug?.project_id) === Number(scopeProjectId)
 }
 
-async function validateReferences(projectId, requirementId, assigneeUserId) {
+async function validateReferences({ projectId, requirementId, demandId, assigneeUserId }) {
   const project = await Project.findById(projectId)
   if (!project) {
     return { error: '项目不存在' }
@@ -62,10 +75,18 @@ async function validateReferences(projectId, requirementId, assigneeUserId) {
   if (requirementId) {
     requirement = await Requirement.findById(requirementId)
     if (!requirement) {
-      return { error: '关联需求不存在' }
+      return { error: '关联需求不存在（旧需求模块）' }
     }
     if (Number(requirement.project_id) !== Number(projectId)) {
-      return { error: '关联需求不属于当前项目' }
+      return { error: '关联需求不属于当前业务线' }
+    }
+  }
+
+  let demand = null
+  if (demandId) {
+    demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return { error: '关联需求池条目不存在' }
     }
   }
 
@@ -76,27 +97,39 @@ async function validateReferences(projectId, requirementId, assigneeUserId) {
     }
   }
 
-  return { project, requirement }
+  return { project, requirement, demand }
 }
 
 const listBugs = async (req, res) => {
   const page = Math.max(Number(req.query.page || 1), 1)
   const pageSize = Math.min(Math.max(Number(req.query.pageSize || 10), 1), 100)
   const keyword = normalizeText(req.query.keyword, 100)
+  const bugCode = normalizeBugCode(req.query.bug_code)
   const projectId = toPositiveInt(req.query.project_id)
   const requirementId = toPositiveInt(req.query.requirement_id)
+  const demandId = normalizeDemandId(req.query.demand_id)
   const assigneeUserId = toPositiveInt(req.query.assignee_user_id)
   const status = req.query.status ? normalizeEnum(req.query.status, STATUS_SET, 'OPEN') : ''
   const severity = req.query.severity ? normalizeEnum(req.query.severity, SEVERITY_SET, 'MEDIUM') : ''
   const stage = req.query.stage ? normalizeEnum(req.query.stage, STAGE_SET, 'DEVELOPMENT') : ''
+
+  if (req.query.bug_code !== undefined && req.query.bug_code !== '' && bugCode === '') {
+    return res.status(400).json({ success: false, message: 'bug_code 格式无效，示例：BUG001' })
+  }
+
+  if (req.query.demand_id !== undefined && req.query.demand_id !== '' && demandId === '') {
+    return res.status(400).json({ success: false, message: 'demand_id 格式无效' })
+  }
 
   try {
     const result = await Bug.findAll({
       page,
       pageSize,
       keyword,
+      bugCode: bugCode || '',
       projectId,
       requirementId,
+      demandId: demandId || '',
       status,
       severity,
       assigneeUserId,
@@ -141,11 +174,16 @@ const getBugById = async (req, res) => {
 }
 
 const createBug = async (req, res) => {
+  const bugCodeRaw = req.body.bug_code
+  const bugCode = normalizeBugCode(bugCodeRaw)
   const projectId = toPositiveInt(req.body.project_id)
   const requirementId =
     req.body.requirement_id === undefined || req.body.requirement_id === null || req.body.requirement_id === ''
       ? null
       : toPositiveInt(req.body.requirement_id)
+  const demandIdRaw =
+    req.body.demand_id === undefined || req.body.demand_id === null ? '' : String(req.body.demand_id)
+  const demandId = normalizeDemandId(demandIdRaw)
   const title = normalizeText(req.body.title, 200)
   const description = normalizeText(req.body.description, 5000)
   const reproduceSteps = normalizeText(req.body.reproduce_steps, 5000)
@@ -159,11 +197,26 @@ const createBug = async (req, res) => {
   const estimatedHours = normalizeHours(req.body.estimated_hours, 0)
   const actualHours = normalizeHours(req.body.actual_hours, 0)
   const dueDate = normalizeDate(req.body.due_date)
+  if (bugCodeRaw !== undefined && bugCodeRaw !== null && String(bugCodeRaw).trim() !== '' && bugCode === '') {
+    return res.status(400).json({ success: false, message: 'bug_code 格式无效，示例：BUG001' })
+  }
+  if (bugCodeRaw !== undefined && bugCodeRaw !== null && String(bugCodeRaw).trim() !== '' && bugCode === '') {
+    return res.status(400).json({ success: false, message: 'bug_code 格式无效，示例：BUG001' })
+  }
+  if (bugCodeRaw !== undefined && bugCodeRaw !== null && String(bugCodeRaw).trim() !== '' && bugCode === '') {
+    return res.status(400).json({ success: false, message: 'bug_code 格式无效，示例：BUG001' })
+  }
+  if (bugCodeRaw !== undefined && bugCodeRaw !== null && String(bugCodeRaw).trim() !== '' && bugCode === '') {
+    return res.status(400).json({ success: false, message: 'bug_code 格式无效，示例：BUG001' })
+  }
 
   if (!projectId) return res.status(400).json({ success: false, message: 'project_id 无效' })
   if (!title) return res.status(400).json({ success: false, message: 'Bug 标题不能为空' })
   if (req.body.requirement_id !== undefined && req.body.requirement_id !== null && req.body.requirement_id !== '' && !requirementId) {
     return res.status(400).json({ success: false, message: 'requirement_id 无效' })
+  }
+  if (demandIdRaw !== '' && demandId === '') {
+    return res.status(400).json({ success: false, message: 'demand_id 格式无效' })
   }
   if (req.body.assignee_user_id !== undefined && req.body.assignee_user_id !== null && req.body.assignee_user_id !== '' && !assigneeUserId) {
     return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
@@ -180,12 +233,19 @@ const createBug = async (req, res) => {
     if (scopeProjectId && Number(scopeProjectId) !== Number(projectId)) {
       return res.status(403).json({ success: false, message: '无权限在其他业务线创建 Bug' })
     }
-    const { error } = await validateReferences(projectId, requirementId, assigneeUserId)
+    const { error } = await validateReferences({
+      projectId,
+      requirementId,
+      demandId: demandId || null,
+      assigneeUserId,
+    })
     if (error) return res.status(400).json({ success: false, message: error })
 
     const id = await Bug.create({
+      bug_code: bugCode || null,
       project_id: projectId,
       requirement_id: requirementId,
+      demand_id: demandId || null,
       title,
       description,
       reproduce_steps: reproduceSteps,
@@ -207,7 +267,7 @@ const createBug = async (req, res) => {
       entity_type: 'BUG',
       entity_id: id,
       action: 'CREATE',
-      action_detail: `创建 Bug：${title}`,
+      action_detail: `创建 Bug：${title}${demandId ? `（需求池：${demandId}）` : ''}`,
       operator_user_id: req.user.id,
     })
 
@@ -220,6 +280,8 @@ const createBug = async (req, res) => {
 }
 
 const updateBug = async (req, res) => {
+  const bugCodeRaw = req.body.bug_code
+  const bugCode = normalizeBugCode(bugCodeRaw)
   const id = toPositiveInt(req.params.id)
   if (!id) return res.status(400).json({ success: false, message: 'Bug ID 无效' })
 
@@ -228,6 +290,9 @@ const updateBug = async (req, res) => {
     req.body.requirement_id === undefined || req.body.requirement_id === null || req.body.requirement_id === ''
       ? null
       : toPositiveInt(req.body.requirement_id)
+  const demandIdRaw =
+    req.body.demand_id === undefined || req.body.demand_id === null ? '' : String(req.body.demand_id)
+  const demandId = normalizeDemandId(demandIdRaw)
   const title = normalizeText(req.body.title, 200)
   const description = normalizeText(req.body.description, 5000)
   const reproduceSteps = normalizeText(req.body.reproduce_steps, 5000)
@@ -246,6 +311,9 @@ const updateBug = async (req, res) => {
   if (!title) return res.status(400).json({ success: false, message: 'Bug 标题不能为空' })
   if (req.body.requirement_id !== undefined && req.body.requirement_id !== null && req.body.requirement_id !== '' && !requirementId) {
     return res.status(400).json({ success: false, message: 'requirement_id 无效' })
+  }
+  if (demandIdRaw !== '' && demandId === '') {
+    return res.status(400).json({ success: false, message: 'demand_id 格式无效' })
   }
   if (req.body.assignee_user_id !== undefined && req.body.assignee_user_id !== null && req.body.assignee_user_id !== '' && !assigneeUserId) {
     return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
@@ -268,12 +336,24 @@ const updateBug = async (req, res) => {
       return res.status(403).json({ success: false, message: '无权限将 Bug 转移到其他业务线' })
     }
 
-    const { error } = await validateReferences(projectId, requirementId, assigneeUserId)
+    const { error } = await validateReferences({
+      projectId,
+      requirementId,
+      demandId: demandId || null,
+      assigneeUserId,
+    })
     if (error) return res.status(400).json({ success: false, message: error })
 
     await Bug.update(id, {
+      bug_code:
+        bugCodeRaw === undefined
+          ? existing.bug_code || null
+          : bugCodeRaw === null || String(bugCodeRaw).trim() === ''
+            ? null
+            : bugCode || existing.bug_code || null,
       project_id: projectId,
       requirement_id: requirementId,
+      demand_id: demandId || null,
       title,
       description,
       reproduce_steps: reproduceSteps,
@@ -294,7 +374,7 @@ const updateBug = async (req, res) => {
       entity_type: 'BUG',
       entity_id: id,
       action: 'UPDATE',
-      action_detail: `更新 Bug：${title}`,
+      action_detail: `更新 Bug：${title}${demandId ? `（需求池：${demandId}）` : ''}`,
       operator_user_id: req.user.id,
     })
 
@@ -474,7 +554,7 @@ const updateBugHours = async (req, res) => {
       entity_type: 'BUG',
       entity_id: id,
       action: 'HOURS_UPDATE',
-      action_detail: `更新工时：预计 ${estimatedHours} 小时，实际 ${actualHours} 小时`,
+      action_detail: `更新工时：预估 ${estimatedHours} 小时，实际 ${actualHours} 小时`,
       operator_user_id: req.user.id,
     })
 

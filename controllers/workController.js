@@ -1,6 +1,7 @@
 ﻿const Work = require('../models/Work')
 const User = require('../models/User')
 const Workflow = require('../models/Workflow')
+const UserBusinessLine = require('../models/UserBusinessLine')
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -33,6 +34,25 @@ function normalizeBusinessGroupCode(value) {
   const code = String(value || '').trim().toUpperCase()
   if (!code) return null
   return /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : ''
+}
+
+function getScopedProjectId(req) {
+  return toPositiveInt(req.businessLineScope?.active_project_id || req.businessLineScope?.project_id)
+}
+
+function isDemandInScope(demand, scopedProjectId) {
+  if (!scopedProjectId) return true
+  return Number(demand?.mapped_project_id) === Number(scopedProjectId)
+}
+
+function rejectDemandOutOfScope(res, action = '访问') {
+  return res.status(403).json({ success: false, message: `无权${action}其他业务线需求` })
+}
+
+async function assertUserInScopedProject({ userId, scopedProjectId }) {
+  if (!scopedProjectId) return true
+  const binding = await UserBusinessLine.getByUserId(userId)
+  return Number(binding?.project_id) === Number(scopedProjectId)
 }
 
 function normalizeDate(value) {
@@ -242,6 +262,7 @@ const listDemands = async (req, res) => {
   const updatedStartDate = normalizeDate(updatedStartDateRaw)
   const updatedEndDate = normalizeDate(updatedEndDateRaw)
   const mine = toBool(req.query.mine, false)
+  const scopedProjectId = getScopedProjectId(req)
 
   if (businessGroupCode === '') {
     return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
@@ -287,6 +308,7 @@ const listDemands = async (req, res) => {
       updatedStartDate: updatedStartDate || '',
       updatedEndDate: updatedEndDate || '',
       mineUserId: mine ? req.user.id : null,
+      accessProjectId: scopedProjectId,
     })
 
     return res.json({
@@ -306,6 +328,7 @@ const listDemands = async (req, res) => {
 
 const getDemandById = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
+  const scopedProjectId = getScopedProjectId(req)
   if (!demandId) {
     return res.status(400).json({ success: false, message: '需求 ID 无效' })
   }
@@ -314,6 +337,9 @@ const getDemandById = async (req, res) => {
     const demand = await Work.findDemandById(demandId)
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    if (!isDemandInScope(demand, scopedProjectId)) {
+      return res.status(403).json({ success: false, message: '无权查看其他业务线需求' })
     }
     return res.json({ success: true, data: demand })
   } catch (err) {
@@ -332,6 +358,7 @@ const createDemand = async (req, res) => {
       ? toPositiveInt(req.user?.id)
       : parsedOwnerUserId
   const businessGroupCode = normalizeBusinessGroupCode(req.body.business_group_code)
+  const scopedProjectId = getScopedProjectId(req)
   const expectedReleaseDateRaw = req.body.expected_release_date
   const expectedReleaseDate = normalizeDate(expectedReleaseDateRaw)
   const status = normalizeStatus(req.body.status)
@@ -375,9 +402,13 @@ const createDemand = async (req, res) => {
     if (!owner) {
       return res.status(400).json({ success: false, message: '负责人用户不存在' })
     }
+    if (!(await assertUserInScopedProject({ userId: ownerUserId, scopedProjectId }))) {
+      return res.status(403).json({ success: false, message: '负责人不属于当前业务线，无法创建需求' })
+    }
 
-    if (businessGroupCode) {
-      const businessGroup = await Work.findBusinessGroupByCode(businessGroupCode, { enabledOnly: true })
+    const finalBusinessGroupCode = businessGroupCode || null
+    if (finalBusinessGroupCode) {
+      const businessGroup = await Work.findBusinessGroupByCode(finalBusinessGroupCode, { enabledOnly: true })
       if (!businessGroup) {
         return res.status(400).json({ success: false, message: '业务组配置不存在或已停用' })
       }
@@ -387,7 +418,7 @@ const createDemand = async (req, res) => {
       demandId,
       name,
       ownerUserId,
-      businessGroupCode,
+      businessGroupCode: finalBusinessGroupCode,
       expectedReleaseDate: expectedReleaseDate || null,
       status,
       priority,
@@ -433,6 +464,7 @@ const createDemand = async (req, res) => {
 
 const updateDemand = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
+  const scopedProjectId = getScopedProjectId(req)
   if (!demandId) {
     return res.status(400).json({ success: false, message: '需求 ID 无效' })
   }
@@ -441,6 +473,9 @@ const updateDemand = async (req, res) => {
     const existing = await Work.findDemandById(demandId)
     if (!existing) {
       return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    if (!isDemandInScope(existing, scopedProjectId)) {
+      return res.status(403).json({ success: false, message: '无权修改其他业务线需求' })
     }
 
     if (!canEditDemand(req, existing)) {
@@ -498,6 +533,9 @@ const updateDemand = async (req, res) => {
     if (!owner) {
       return res.status(400).json({ success: false, message: '负责人用户不存在' })
     }
+    if (!(await assertUserInScopedProject({ userId: ownerUserId, scopedProjectId }))) {
+      return res.status(403).json({ success: false, message: '负责人不属于当前业务线，无法更新需求' })
+    }
 
     if (parsedBusinessGroupCode === '') {
       return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
@@ -535,6 +573,7 @@ const updateDemand = async (req, res) => {
 
 const deleteDemand = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
+  const scopedProjectId = getScopedProjectId(req)
   if (!demandId) {
     return res.status(400).json({ success: false, message: '需求 ID 无效' })
   }
@@ -547,6 +586,9 @@ const deleteDemand = async (req, res) => {
     const existing = await Work.findDemandById(demandId)
     if (!existing) {
       return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    if (!isDemandInScope(existing, scopedProjectId)) {
+      return res.status(403).json({ success: false, message: '无权删除其他业务线需求' })
     }
 
     const result = await Work.deleteDemand(demandId)
@@ -589,6 +631,7 @@ const listLogs = async (req, res) => {
   const requestedUserId = toPositiveInt(req.query.user_id)
   const teamScope = String(req.query.scope || '').trim().toLowerCase() === 'team'
   const canViewTeam = hasPermission(req, 'worklog.view.team')
+  const scopedProjectId = getScopedProjectId(req)
 
   if (requestedUserId && requestedUserId !== req.user.id && !canViewTeam) {
     return res.status(403).json({ success: false, message: '无权限查看其他成员工作记录' })
@@ -613,6 +656,7 @@ const listLogs = async (req, res) => {
       startDate,
       endDate,
       teamScopeUserId,
+      accessProjectId: scopedProjectId,
     })
 
     return res.json({
@@ -810,6 +854,7 @@ const createOwnerAssignedLog = async (req, res) => {
   }
 
   const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+  const scopedProjectId = getScopedProjectId(req)
   if (!isSuperAdmin) {
     const isManager = await Work.isDepartmentManager(req.user.id)
     if (!isManager) {
@@ -822,7 +867,10 @@ const createOwnerAssignedLog = async (req, res) => {
     return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
   }
 
-  const canAssign = await Work.canManageAssigneeByOwner(req.user.id, assigneeUserId, { isSuperAdmin })
+  const canAssign = await Work.canManageAssigneeByOwner(req.user.id, assigneeUserId, {
+    isSuperAdmin,
+    accessProjectId: scopedProjectId,
+  })
   if (!canAssign) {
     return res.status(403).json({ success: false, message: '仅可指派给管理范围内成员' })
   }
@@ -1210,13 +1258,17 @@ const updateLogOwnerEstimate = async (req, res) => {
     }
 
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    const scopedProjectId = getScopedProjectId(req)
     if (!isSuperAdmin) {
       const isManager = await Work.isDepartmentManager(req.user.id)
       if (!isManager) {
         return res.status(403).json({ success: false, message: '仅部门负责人可维护 Owner 预估' })
       }
 
-      const canManage = await Work.canManageLogByDepartmentOwner(req.user.id, id, { isSuperAdmin })
+      const canManage = await Work.canManageLogByDepartmentOwner(req.user.id, id, {
+        isSuperAdmin,
+        accessProjectId: scopedProjectId,
+      })
       if (!canManage) {
         return res.status(403).json({ success: false, message: '仅可维护所负责部门成员的事项预估' })
       }
@@ -1255,6 +1307,7 @@ const getInsightFilterOptions = async (req, res) => {
 
 const getDemandInsight = async (req, res) => {
   if (!ensureSuperAdmin(req, res)) return
+  const scopedProjectId = getScopedProjectId(req)
 
   const { startDate, endDate, error } = resolveInsightDateRange(req.query.start_date, req.query.end_date)
   if (error) {
@@ -1292,6 +1345,7 @@ const getDemandInsight = async (req, res) => {
       ownerUserId,
       memberUserId,
       keyword,
+      accessProjectId: scopedProjectId,
     })
     return res.json({ success: true, data })
   } catch (err) {
@@ -1302,6 +1356,7 @@ const getDemandInsight = async (req, res) => {
 
 const getMemberInsight = async (req, res) => {
   if (!ensureSuperAdmin(req, res)) return
+  const scopedProjectId = getScopedProjectId(req)
 
   const { startDate, endDate, error } = resolveInsightDateRange(req.query.start_date, req.query.end_date)
   if (error) {
@@ -1339,6 +1394,7 @@ const getMemberInsight = async (req, res) => {
       ownerUserId,
       memberUserId,
       keyword,
+      accessProjectId: scopedProjectId,
     })
     return res.json({ success: true, data })
   } catch (err) {
@@ -1349,6 +1405,7 @@ const getMemberInsight = async (req, res) => {
 
 const initDemandWorkflowInstance = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
+  const scopedProjectId = getScopedProjectId(req)
   if (!demandId) {
     return res.status(400).json({ success: false, message: '需求 ID 无效' })
   }
@@ -1357,6 +1414,9 @@ const initDemandWorkflowInstance = async (req, res) => {
     const demand = await Work.findDemandById(demandId)
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    if (!isDemandInScope(demand, scopedProjectId)) {
+      return rejectDemandOutOfScope(res, '操作')
     }
 
     const workflow = await Workflow.initDemandWorkflow({
@@ -1383,6 +1443,7 @@ const initDemandWorkflowInstance = async (req, res) => {
 
 const getDemandWorkflow = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
+  const scopedProjectId = getScopedProjectId(req)
   if (!demandId) {
     return res.status(400).json({ success: false, message: '需求 ID 无效' })
   }
@@ -1391,6 +1452,9 @@ const getDemandWorkflow = async (req, res) => {
     const demand = await Work.findDemandById(demandId)
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    if (!isDemandInScope(demand, scopedProjectId)) {
+      return rejectDemandOutOfScope(res, '查看')
     }
 
     let workflow = await Workflow.getDemandWorkflowByDemandId(demandId)
@@ -1413,6 +1477,7 @@ const getDemandWorkflow = async (req, res) => {
 
 const assignDemandWorkflowCurrentNode = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
+  const scopedProjectId = getScopedProjectId(req)
   if (!demandId) {
     return res.status(400).json({ success: false, message: '需求 ID 无效' })
   }
@@ -1449,6 +1514,9 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
+    if (!isDemandInScope(demand, scopedProjectId)) {
+      return rejectDemandOutOfScope(res, '操作')
+    }
 
     const targetUser = await User.findById(assigneeUserId)
     if (!targetUser) {
@@ -1482,6 +1550,7 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
 
 const assignDemandWorkflowNode = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
+  const scopedProjectId = getScopedProjectId(req)
   const nodeKey = normalizePhaseKey(req.params.nodeKey)
   if (!demandId) {
     return res.status(400).json({ success: false, message: '需求 ID 无效' })
@@ -1521,6 +1590,9 @@ const assignDemandWorkflowNode = async (req, res) => {
     const demand = await Work.findDemandById(demandId)
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    if (!isDemandInScope(demand, scopedProjectId)) {
+      return rejectDemandOutOfScope(res, '操作')
     }
 
     const targetUser = await User.findById(assigneeUserId)
@@ -1562,6 +1634,7 @@ const assignDemandWorkflowNode = async (req, res) => {
 
 const submitDemandWorkflowCurrentNode = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
+  const scopedProjectId = getScopedProjectId(req)
   if (!demandId) {
     return res.status(400).json({ success: false, message: '需求 ID 无效' })
   }
@@ -1572,6 +1645,9 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
     const demand = await Work.findDemandById(demandId)
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    if (!isDemandInScope(demand, scopedProjectId)) {
+      return rejectDemandOutOfScope(res, '操作')
     }
 
     const workflow = await Workflow.submitCurrentNode({
@@ -1602,11 +1678,15 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
 }
 
 const getMyWorkbench = async (req, res) => {
+  const scopedProjectId = getScopedProjectId(req)
   try {
-    const data = await Work.getMyWorkbench(req.user.id)
+    const data = await Work.getMyWorkbench(req.user.id, { accessProjectId: scopedProjectId })
     let workflowTodos = []
     try {
-      workflowTodos = await Workflow.listMyOpenTasks(req.user.id, { limit: 30 })
+      workflowTodos = await Workflow.listMyOpenTasks(req.user.id, {
+        limit: 30,
+        accessProjectId: scopedProjectId,
+      })
     } catch (workflowErr) {
       if (!isWorkflowTablesMissing(workflowErr)) {
         console.error('获取流程待办失败:', workflowErr)
@@ -1626,6 +1706,7 @@ const getMyWorkbench = async (req, res) => {
 }
 
 const getOwnerWorkbench = async (req, res) => {
+  const scopedProjectId = getScopedProjectId(req)
   try {
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
     if (!isSuperAdmin) {
@@ -1637,6 +1718,7 @@ const getOwnerWorkbench = async (req, res) => {
 
     const data = await Work.getOwnerWorkbench(req.user.id, {
       isSuperAdmin,
+      accessProjectId: scopedProjectId,
     })
     return res.json({ success: true, data })
   } catch (err) {
@@ -1649,14 +1731,17 @@ const getMorningStandupBoard = async (req, res) => {
   try {
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
     const isAdmin = hasRole(req, 'ADMIN')
-    const canViewAll = isSuperAdmin || isAdmin
+    const isBusinessLineAdmin = hasRole(req, 'BUSINESS_LINE_ADMIN')
+    const canViewAll = isSuperAdmin || isAdmin || isBusinessLineAdmin
     const targetDepartmentId = toPositiveInt(req.query.department_id)
     const tabKey = normalizeText(req.query.tab_key, 32)
+    const activeProjectId = toPositiveInt(req.businessLineScope?.active_project_id)
 
     const data = await Work.getMorningStandupBoard(req.user.id, {
       canViewAll,
       targetDepartmentId,
       tabKey,
+      activeProjectId,
     })
     return res.json({ success: true, data })
   } catch (err) {
@@ -1666,6 +1751,7 @@ const getMorningStandupBoard = async (req, res) => {
 }
 
 const sendNoFillReminders = async (req, res) => {
+  const scopedProjectId = getScopedProjectId(req)
   try {
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
     if (!isSuperAdmin) {
@@ -1677,6 +1763,7 @@ const sendNoFillReminders = async (req, res) => {
 
     const data = await Work.previewNoFillReminders(req.user.id, {
       isSuperAdmin,
+      accessProjectId: scopedProjectId,
     })
     return res.json({
       success: true,

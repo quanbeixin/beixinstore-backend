@@ -13,44 +13,68 @@ function toPersonDays(hours) {
   return Number((Number(hours || 0) / 8).toFixed(2))
 }
 
+function buildDemandProjectScopeCondition({ accessProjectId = null, alias = 'd' } = {}) {
+  const accessId = toPositiveInt(accessProjectId)
+  if (!accessId) {
+    return {
+      joinSql: `INNER JOIN pm_user_business_lines ubl ON ubl.user_id = ${alias}.owner_user_id`,
+      whereSql: '',
+      params: [],
+    }
+  }
+
+  return {
+    joinSql: `INNER JOIN pm_user_business_lines ubl ON ubl.user_id = ${alias}.owner_user_id`,
+    whereSql: 'WHERE ubl.project_id = ?',
+    params: [accessId],
+  }
+}
+
 const ProjectStats = {
   async getOverview({ accessProjectId = null } = {}) {
     const accessId = toPositiveInt(accessProjectId)
-    const projectWhere = accessId ? 'WHERE is_deleted = 0 AND id = ?' : 'WHERE is_deleted = 0'
-    const requirementWhere = accessId ? 'WHERE is_deleted = 0 AND project_id = ?' : 'WHERE is_deleted = 0'
-    const bugWhere = accessId ? 'WHERE is_deleted = 0 AND project_id = ?' : 'WHERE is_deleted = 0'
+    const projectWhere = accessId ? 'WHERE p.is_deleted = 0 AND p.id = ?' : 'WHERE p.is_deleted = 0'
+    const bugWhere = accessId ? 'WHERE b.is_deleted = 0 AND b.project_id = ?' : 'WHERE b.is_deleted = 0'
 
     const [[projectRow]] = await pool.query(
       `
       SELECT
         COUNT(*) AS total_projects,
-        SUM(CASE WHEN status = 'IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress_projects,
-        SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) AS completed_projects
-      FROM pm_projects
+        SUM(CASE WHEN p.status = 'IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress_projects,
+        SUM(CASE WHEN p.status = 'COMPLETED' THEN 1 ELSE 0 END) AS completed_projects
+      FROM pm_projects p
       ${projectWhere}
       `,
       accessId ? [accessId] : [],
     )
 
+    const demandScope = buildDemandProjectScopeCondition({ accessProjectId: accessId, alias: 'd' })
     const [[requirementRow]] = await pool.query(
       `
       SELECT
         COUNT(*) AS total_requirements,
-        COALESCE(SUM(estimated_hours), 0) AS estimated_hours,
-        COALESCE(SUM(actual_hours), 0) AS actual_hours
-      FROM pm_requirements
-      ${requirementWhere}
+        COALESCE(SUM(COALESCE(d.owner_estimate_hours, 0)), 0) AS estimated_hours,
+        COALESCE(SUM(COALESCE(la.actual_hours, 0)), 0) AS actual_hours
+      FROM work_demands d
+      ${demandScope.joinSql}
+      LEFT JOIN (
+        SELECT demand_id, SUM(actual_hours) AS actual_hours
+        FROM work_logs
+        WHERE demand_id IS NOT NULL
+        GROUP BY demand_id
+      ) la ON la.demand_id = d.id
+      ${demandScope.whereSql}
       `,
-      accessId ? [accessId] : [],
+      demandScope.params,
     )
 
     const [[bugRow]] = await pool.query(
       `
       SELECT
         COUNT(*) AS total_bugs,
-        COALESCE(SUM(estimated_hours), 0) AS estimated_hours,
-        COALESCE(SUM(actual_hours), 0) AS actual_hours
-      FROM pm_bugs
+        COALESCE(SUM(b.estimated_hours), 0) AS estimated_hours,
+        COALESCE(SUM(b.actual_hours), 0) AS actual_hours
+      FROM pm_bugs b
       ${bugWhere}
       `,
       accessId ? [accessId] : [],
@@ -81,7 +105,6 @@ const ProjectStats = {
       where += ' AND p.status = ?'
       params.push(status)
     }
-
     if (ownerUserId) {
       where += ' AND p.owner_user_id = ?'
       params.push(ownerUserId)
@@ -101,30 +124,38 @@ const ProjectStats = {
         p.owner_user_id,
         COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
         COALESCE(req.requirement_count, 0) AS requirement_count,
+        COALESCE(req.demand_actual_hours, 0) AS demand_actual_hours,
+        COALESCE(req.estimated_hours, 0) AS demand_estimated_hours,
         COALESCE(bug.bug_count, 0) AS bug_count,
         COALESCE(req.estimated_hours, 0) + COALESCE(bug.estimated_hours, 0) AS estimated_hours,
-        COALESCE(req.actual_hours, 0) + COALESCE(bug.actual_hours, 0) AS actual_hours
+        COALESCE(req.demand_actual_hours, 0) + COALESCE(bug.actual_hours, 0) AS actual_hours
       FROM pm_projects p
       LEFT JOIN users u ON u.id = p.owner_user_id
       LEFT JOIN (
         SELECT
-          project_id,
+          ubl.project_id,
           COUNT(*) AS requirement_count,
-          COALESCE(SUM(estimated_hours), 0) AS estimated_hours,
-          COALESCE(SUM(actual_hours), 0) AS actual_hours
-        FROM pm_requirements
-        WHERE is_deleted = 0
-        GROUP BY project_id
+          COALESCE(SUM(COALESCE(d.owner_estimate_hours, 0)), 0) AS estimated_hours,
+          COALESCE(SUM(COALESCE(la.actual_hours, 0)), 0) AS demand_actual_hours
+        FROM work_demands d
+        INNER JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
+        LEFT JOIN (
+          SELECT demand_id, SUM(actual_hours) AS actual_hours
+          FROM work_logs
+          WHERE demand_id IS NOT NULL
+          GROUP BY demand_id
+        ) la ON la.demand_id = d.id
+        GROUP BY ubl.project_id
       ) req ON req.project_id = p.id
       LEFT JOIN (
         SELECT
-          project_id,
+          b.project_id,
           COUNT(*) AS bug_count,
-          COALESCE(SUM(estimated_hours), 0) AS estimated_hours,
-          COALESCE(SUM(actual_hours), 0) AS actual_hours
-        FROM pm_bugs
-        WHERE is_deleted = 0
-        GROUP BY project_id
+          COALESCE(SUM(b.estimated_hours), 0) AS estimated_hours,
+          COALESCE(SUM(b.actual_hours), 0) AS actual_hours
+        FROM pm_bugs b
+        WHERE b.is_deleted = 0
+        GROUP BY b.project_id
       ) bug ON bug.project_id = p.id
       ${where}
       ORDER BY p.id DESC
@@ -140,6 +171,8 @@ const ProjectStats = {
         ...row,
         requirement_count: Number(row.requirement_count || 0),
         bug_count: Number(row.bug_count || 0),
+        demand_estimated_hours: toHours(row.demand_estimated_hours || 0),
+        demand_actual_hours: toHours(row.demand_actual_hours || 0),
         estimated_hours: toHours(estimatedHours),
         actual_hours: toHours(actualHours),
         person_days: toPersonDays(actualHours),
@@ -159,7 +192,6 @@ const ProjectStats = {
       filters.push('stat.project_id = ?')
       params.push(toPositiveInt(accessProjectId))
     }
-
     if (userId) {
       filters.push('stat.user_id = ?')
       params.push(userId)
@@ -180,15 +212,21 @@ const ProjectStats = {
         COALESCE(SUM(stat.actual_hours), 0) AS actual_hours
       FROM (
         SELECT
-          r.project_id,
-          r.assignee_user_id AS user_id,
+          ubl.project_id,
+          d.owner_user_id AS user_id,
           COUNT(*) AS requirement_count,
           0 AS bug_count,
-          COALESCE(SUM(r.estimated_hours), 0) AS estimated_hours,
-          COALESCE(SUM(r.actual_hours), 0) AS actual_hours
-        FROM pm_requirements r
-        WHERE r.is_deleted = 0 AND r.assignee_user_id IS NOT NULL
-        GROUP BY r.project_id, r.assignee_user_id
+          COALESCE(SUM(COALESCE(d.owner_estimate_hours, 0)), 0) AS estimated_hours,
+          COALESCE(SUM(COALESCE(la.actual_hours, 0)), 0) AS actual_hours
+        FROM work_demands d
+        INNER JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
+        LEFT JOIN (
+          SELECT demand_id, SUM(actual_hours) AS actual_hours
+          FROM work_logs
+          WHERE demand_id IS NOT NULL
+          GROUP BY demand_id
+        ) la ON la.demand_id = d.id
+        GROUP BY ubl.project_id, d.owner_user_id
 
         UNION ALL
 

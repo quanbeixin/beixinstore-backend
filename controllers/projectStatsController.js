@@ -13,7 +13,7 @@ function normalizeProjectStatus(value) {
 }
 
 function toScopeProjectId(req) {
-  return req.businessLineScope?.is_super_admin ? null : toPositiveInt(req.businessLineScope?.project_id)
+  return toPositiveInt(req.businessLineScope?.active_project_id || req.businessLineScope?.project_id)
 }
 
 const getProjectStatsOverview = async (req, res) => {
