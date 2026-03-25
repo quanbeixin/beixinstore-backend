@@ -132,7 +132,7 @@ async function findActiveDemandInstance(conn, demandId, { forUpdate = false } = 
   return rows[0] || null
 }
 
-async function ensureDefaultTemplate(conn, { createdBy = null } = {}) {
+async function ensureDefaultTemplate(conn, { createdBy = null, forceRebuild = false } = {}) {
   const [rows] = await conn.query(
     `SELECT
        id,
@@ -152,7 +152,7 @@ async function ensureDefaultTemplate(conn, { createdBy = null } = {}) {
   )
 
   let template = rows[0] || null
-  if (template) {
+  if (template && !forceRebuild) {
     const nodes = await loadTemplateNodes(conn, template.id)
     if (nodes.length > 0) return { template, nodes }
   }
@@ -164,7 +164,7 @@ async function ensureDefaultTemplate(conn, { createdBy = null } = {}) {
     throw err
   }
 
-  if (!template) {
+  if (!template || forceRebuild) {
     const [[versionRow]] = await conn.query(
       `SELECT COALESCE(MAX(version), 0) AS max_version
        FROM wf_process_templates
@@ -611,7 +611,13 @@ const Workflow = {
   NODE_STATUS,
   TASK_STATUS,
 
-  async initDemandWorkflow({ demandId, ownerUserId = null, operatorUserId = null } = {}) {
+  async initDemandWorkflow({
+    demandId,
+    ownerUserId = null,
+    operatorUserId = null,
+    autoAssignCurrentNode = false,
+    forceRebuildTemplateFromDict = false,
+  } = {}) {
     const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
     if (!normalizedDemandId) {
       const err = new Error('demand_id_required')
@@ -631,8 +637,10 @@ const Workflow = {
 
       const normalizedOwnerUserId = toPositiveInt(ownerUserId)
       const normalizedOperatorUserId = toPositiveInt(operatorUserId)
+      const shouldAutoAssignCurrentNode = Boolean(autoAssignCurrentNode) && Boolean(normalizedOwnerUserId)
       const { template, nodes } = await ensureDefaultTemplate(conn, {
         createdBy: normalizedOperatorUserId,
+        forceRebuild: Boolean(forceRebuildTemplateFromDict),
       })
 
       if (!Array.isArray(nodes) || nodes.length === 0) {
@@ -670,7 +678,7 @@ const Workflow = {
         const node = nodes[i]
         const isCurrent = i === 0
         const status = isCurrent ? NODE_STATUS.IN_PROGRESS : NODE_STATUS.TODO
-        const assigneeUserId = isCurrent ? normalizedOwnerUserId : null
+        const assigneeUserId = isCurrent && shouldAutoAssignCurrentNode ? normalizedOwnerUserId : null
 
         const [result] = await conn.query(
           `INSERT INTO wf_process_instance_nodes (
@@ -715,7 +723,7 @@ const Workflow = {
         comment: '闇€姹傛祦绋嬪疄渚嬪凡鍒涘缓',
       })
 
-      if (firstInstanceNodeId && normalizedOwnerUserId) {
+      if (firstInstanceNodeId && shouldAutoAssignCurrentNode) {
         await createTaskForNode(conn, {
           instanceId,
           instanceNodeId: firstInstanceNodeId,
@@ -776,6 +784,106 @@ const Workflow = {
     }
   },
 
+  async replaceDemandWorkflowWithLatestTemplate({
+    demandId,
+    operatorUserId = null,
+    autoAssignCurrentNode = false,
+  } = {}) {
+    const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
+    const normalizedOperatorUserId = toPositiveInt(operatorUserId)
+    if (!normalizedDemandId) {
+      const err = new Error('demand_id_required')
+      err.code = 'DEMAND_ID_REQUIRED'
+      throw err
+    }
+
+    const conn = await pool.getConnection()
+    let replacedInstanceId = null
+    try {
+      await conn.beginTransaction()
+
+      const existing = await findActiveDemandInstance(conn, normalizedDemandId, { forUpdate: true })
+      if (!existing) {
+        const err = new Error('workflow_instance_not_found')
+        err.code = 'WORKFLOW_INSTANCE_NOT_FOUND'
+        throw err
+      }
+      replacedInstanceId = Number(existing.id)
+
+      const [nodeRows] = await conn.query(
+        `SELECT id, node_key, status
+         FROM wf_process_instance_nodes
+         WHERE instance_id = ?
+         ORDER BY sort_order ASC, id ASC
+         FOR UPDATE`,
+        [replacedInstanceId],
+      )
+
+      const doneNodeCount = (nodeRows || []).filter((row) => row.status === NODE_STATUS.DONE).length
+      if (doneNodeCount > 0) {
+        const err = new Error('workflow_replace_unsafe')
+        err.code = 'WORKFLOW_REPLACE_UNSAFE'
+        err.data = { done_node_count: doneNodeCount }
+        throw err
+      }
+
+      await conn.query(
+        `UPDATE wf_process_tasks
+         SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+         WHERE instance_id = ?
+           AND status IN (?, ?)`,
+        [TASK_STATUS.CANCELLED, replacedInstanceId, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+      )
+
+      await conn.query(
+        `UPDATE wf_process_instance_nodes
+         SET status = ?,
+             completed_at = COALESCE(completed_at, NOW()),
+             updated_at = NOW()
+         WHERE instance_id = ?
+           AND status <> ?`,
+        [NODE_STATUS.CANCELLED, replacedInstanceId, NODE_STATUS.DONE],
+      )
+
+      await conn.query(
+        `UPDATE wf_process_instances
+         SET status = ?, ended_at = COALESCE(ended_at, NOW()), current_node_key = NULL, updated_at = NOW()
+         WHERE id = ?`,
+        [INSTANCE_STATUS.TERMINATED, replacedInstanceId],
+      )
+
+      await insertAction(conn, {
+        instanceId: replacedInstanceId,
+        instanceNodeId: null,
+        actionType: 'REPLACE_TEMPLATE',
+        fromNodeKey: normalizeText(existing.current_node_key, 64) || null,
+        toNodeKey: null,
+        operatorUserId: normalizedOperatorUserId,
+        comment: '强制替换为最新流程模板',
+      })
+
+      await conn.commit()
+    } catch (err) {
+      await conn.rollback()
+      throw wrapWorkflowError(err)
+    } finally {
+      conn.release()
+    }
+
+    const nextWorkflow = await this.initDemandWorkflow({
+      demandId: normalizedDemandId,
+      ownerUserId: null,
+      operatorUserId: normalizedOperatorUserId,
+      autoAssignCurrentNode,
+      forceRebuildTemplateFromDict: true,
+    })
+
+    return {
+      replaced_instance_id: replacedInstanceId,
+      workflow: nextWorkflow,
+    }
+  },
+
   async getDemandWorkflowByInstanceId(instanceId, { includeActionsLimit = 50 } = {}) {
     const normalizedInstanceId = toPositiveInt(instanceId)
     if (!normalizedInstanceId) return null
@@ -815,6 +923,11 @@ const Workflow = {
              n.node_name_snapshot,
              n.node_type,
              n.phase_key,
+             COALESCE(
+               pdi_phase.item_name,
+               pdi_node.item_name,
+               NULL
+             ) AS phase_name,
              n.sort_order,
              n.status,
              n.assignee_user_id,
@@ -825,6 +938,12 @@ const Workflow = {
              n.remark
            FROM wf_process_instance_nodes n
            LEFT JOIN users u ON u.id = n.assignee_user_id
+           LEFT JOIN config_dict_items pdi_phase
+             ON pdi_phase.type_key = '${DEMAND_PHASE_DICT_KEY}'
+            AND pdi_phase.item_code = n.phase_key
+           LEFT JOIN config_dict_items pdi_node
+             ON pdi_node.type_key = '${DEMAND_PHASE_DICT_KEY}'
+            AND pdi_node.item_code = n.node_key
            WHERE n.instance_id = ?
            ORDER BY n.sort_order ASC, n.id ASC`,
           [normalizedInstanceId],
@@ -1565,4 +1684,3 @@ const Workflow = {
 }
 
 module.exports = Workflow
-

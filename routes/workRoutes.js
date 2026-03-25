@@ -31,6 +31,7 @@ const {
   assignDemandWorkflowCurrentNode,
   assignDemandWorkflowNode,
   submitDemandWorkflowCurrentNode,
+  replaceDemandWorkflowLatestTemplate,
   getMyWorkbench,
   getMyWeeklyReport,
   getOwnerWorkbench,
@@ -75,6 +76,11 @@ router.post(
   '/demands/:id/workflow/current/submit',
   authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
   submitDemandWorkflowCurrentNode,
+)
+router.post(
+  '/demands/:id/workflow/replace-latest',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  replaceDemandWorkflowLatestTemplate,
 )
 
 router.get('/logs', authMiddleware.requirePermission('worklog.view.self'), listLogs)

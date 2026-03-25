@@ -4,6 +4,7 @@ const dotenv = require('dotenv')
 dotenv.config()
 
 const DB_TIME_ZONE = process.env.DB_TIME_ZONE || '+08:00'
+const SKIP_DB_TEST_CONNECTION = process.env.SKIP_DB_TEST_CONNECTION === 'true'
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
@@ -41,6 +42,8 @@ async function testConnection() {
   }
 }
 
-testConnection()
+if (!SKIP_DB_TEST_CONNECTION) {
+  testConnection()
+}
 
 module.exports = pool

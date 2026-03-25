@@ -516,6 +516,22 @@ function parseDateOnlyAtLocalMidnight(value) {
   return date
 }
 
+function getBeijingCurrentHour() {
+  try {
+    const hourText = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Shanghai',
+      hour: '2-digit',
+      hour12: false,
+    }).format(new Date())
+    const hour = Number(hourText)
+    if (Number.isFinite(hour)) return hour
+  } catch {
+    // ignore and fallback to local runtime hour
+  }
+  const fallbackHour = new Date().getHours()
+  return Number.isFinite(fallbackHour) ? fallbackHour : 0
+}
+
 function calcCrossDayProgress({
   logStatus,
   expectedStartDate,
@@ -573,7 +589,14 @@ function calcCrossDayProgress({
   }
 
   const gap = toPercent2(expectedProgress - actualProgress)
-  const risk = gap > 10
+  const riskBaselineDays = Math.max(0, Math.min(totalDays, elapsedDays - 1))
+  const riskBaselineProgress = toPercent2((riskBaselineDays / totalDays) * 100)
+  const riskBaselineGap = toPercent2(riskBaselineProgress - actualProgress)
+  const beijingHour = getBeijingCurrentHour()
+  const riskCheckEnabled = beijingHour >= 18
+  const isOverdue = Boolean(expectedCompletionDate && todayDate && String(expectedCompletionDate) < String(todayDate))
+  const hasCarryoverLag = riskBaselineGap > 0
+  const risk = isOverdue || hasCarryoverLag || (riskCheckEnabled && gap > 0)
 
   return {
     progress_show: true,
@@ -1366,6 +1389,7 @@ const Work = {
     itemTypeId = null,
     startDate = '',
     endDate = '',
+    logStatus = '',
     teamScopeUserId = null,
   } = {}) {
     const offset = (page - 1) * pageSize
@@ -1409,6 +1433,11 @@ const Work = {
     if (endDate) {
       conditions.push('l.log_date <= ?')
       params.push(endDate)
+    }
+
+    if (logStatus) {
+      conditions.push(`COALESCE(l.log_status, 'IN_PROGRESS') = ?`)
+      params.push(logStatus)
     }
 
     if (keyword) {
@@ -1582,7 +1611,7 @@ const Work = {
          expected_completion_date = ?,
          log_completed_at = CASE
            WHEN ? = 'DONE' THEN COALESCE(?, log_completed_at, NOW())
-           ELSE NULL
+           ELSE ?
          END
        WHERE id = ?`,
       [
@@ -1604,6 +1633,7 @@ const Work = {
         WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
           ? String(logStatus).toUpperCase()
           : 'IN_PROGRESS',
+        logCompletedAt,
         logCompletedAt,
         id,
       ],
@@ -2116,7 +2146,7 @@ const Work = {
          COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
          l.description,
          l.personal_estimate_hours,
-         COALESCE(tt.total_actual_hours, l.actual_hours, 0) AS actual_hours,
+         COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS actual_hours,
          l.remaining_hours,
          COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
          COALESCE(l.task_source, 'SELF') AS task_source,
@@ -2131,7 +2161,7 @@ const Work = {
          COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
          ${todayPlannedHoursSql} AS today_planned_hours,
          ${todayActualHoursSql} AS today_actual_hours,
-         COALESCE(tt.total_actual_hours, l.actual_hours, 0) AS cumulative_actual_hours
+         COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS cumulative_actual_hours
        FROM work_logs l
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
        LEFT JOIN users au ON au.id = l.assigned_by_user_id
@@ -2213,7 +2243,7 @@ const Work = {
          l.id,
          DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
          l.personal_estimate_hours,
-         COALESCE(tt.total_actual_hours, l.actual_hours, 0) AS actual_hours,
+         COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS actual_hours,
          l.remaining_hours,
          l.description,
          l.demand_id,
@@ -2761,7 +2791,7 @@ const Work = {
          l.phase_key,
          COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
          l.personal_estimate_hours,
-         COALESCE(tt.total_actual_hours, l.actual_hours, 0) AS cumulative_actual_hours,
+         COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS cumulative_actual_hours,
          ${todayPlannedHoursSql} AS today_planned_hours,
          ${todayActualHoursSql} AS today_actual_hours
        FROM work_logs l
@@ -2821,7 +2851,7 @@ const Work = {
          l.phase_key,
          COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
          l.personal_estimate_hours,
-         COALESCE(tt.total_actual_hours, l.actual_hours, 0) AS cumulative_actual_hours
+         COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS cumulative_actual_hours
        FROM work_logs l
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
        LEFT JOIN work_demands d ON d.id = l.demand_id
@@ -3019,13 +3049,26 @@ const Work = {
       })
       .map((item) => buildFocusItem(item))
       .sort((a, b) => {
-        const riskDiff = Number(Boolean(b.progress_risk)) - Number(Boolean(a.progress_risk))
-        if (riskDiff !== 0) return riskDiff
-        const levelDiff = (focusLevelRank[a.focus_level] || 9) - (focusLevelRank[b.focus_level] || 9)
-        if (levelDiff !== 0) return levelDiff
-        const priorityA = a.demand_priority ? priorityRank[a.demand_priority] : 99
-        const priorityB = b.demand_priority ? priorityRank[b.demand_priority] : 99
-        if (priorityA !== priorityB) return priorityA - priorityB
+        const getPriorityBucket = (row) => {
+          if (row?.progress_risk) return 0
+          if (row?.focus_level === 'OVERDUE') return 1
+          if (row?.focus_level === 'DUE_TODAY') return 2
+          return 3
+        }
+
+        const bucketA = getPriorityBucket(a)
+        const bucketB = getPriorityBucket(b)
+        if (bucketA !== bucketB) return bucketA - bucketB
+
+        const phaseA = String(a.phase_name || a.phase_key || '').trim() || '~'
+        const phaseB = String(b.phase_name || b.phase_key || '').trim() || '~'
+        const phaseDiff = phaseA.localeCompare(phaseB, 'zh-Hans-CN')
+        if (phaseDiff !== 0) return phaseDiff
+
+        const progressA = Number.isFinite(Number(a.progress_percent)) ? Number(a.progress_percent) : -1
+        const progressB = Number.isFinite(Number(b.progress_percent)) ? Number(b.progress_percent) : -1
+        if (progressA !== progressB) return progressB - progressA
+
         const dateA = a.expected_completion_date || '9999-12-31'
         const dateB = b.expected_completion_date || '9999-12-31'
         if (dateA !== dateB) return dateA.localeCompare(dateB)
@@ -3991,4 +4034,3 @@ const Work = {
 }
 
 module.exports = Work
-

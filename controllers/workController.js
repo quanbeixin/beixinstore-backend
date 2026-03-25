@@ -464,6 +464,7 @@ const createDemand = async (req, res) => {
         demandId: finalDemandId,
         ownerUserId,
         operatorUserId: req.user.id,
+        autoAssignCurrentNode: false,
       })
     } catch (workflowErr) {
       if (isWorkflowTablesMissing(workflowErr)) {
@@ -743,9 +744,18 @@ const listLogs = async (req, res) => {
   const itemTypeId = toPositiveInt(req.query.item_type_id)
   const startDate = normalizeDate(req.query.start_date)
   const endDate = normalizeDate(req.query.end_date)
+  const logStatusRaw = req.query.log_status
+  const logStatus =
+    logStatusRaw === undefined || logStatusRaw === null || String(logStatusRaw).trim() === ''
+      ? ''
+      : String(logStatusRaw).trim().toUpperCase()
   const requestedUserId = toPositiveInt(req.query.user_id)
   const teamScope = String(req.query.scope || '').trim().toLowerCase() === 'team'
   const canViewTeam = hasPermission(req, 'worklog.view.team')
+
+  if (logStatus && !Work.WORK_LOG_STATUSES.includes(logStatus)) {
+    return res.status(400).json({ success: false, message: 'log_status 无效' })
+  }
 
   if (requestedUserId && requestedUserId !== req.user.id && !canViewTeam) {
     return res.status(403).json({ success: false, message: '无权限查看其他成员工作记录' })
@@ -769,6 +779,7 @@ const listLogs = async (req, res) => {
       itemTypeId,
       startDate,
       endDate,
+      logStatus,
       teamScopeUserId,
     })
 
@@ -814,7 +825,11 @@ const createLog = async (req, res) => {
   let expectedStartDate = normalizeDate(expectedStartDateRaw)
   const expectedCompletionDateRaw = req.body.expected_completion_date
   const expectedCompletionDate = normalizeDate(expectedCompletionDateRaw)
-  const logStatus = normalizeLogStatus(req.body.log_status)
+  const hasManualLogStatus =
+    req.body.log_status !== undefined &&
+    req.body.log_status !== null &&
+    String(req.body.log_status).trim() !== ''
+  let logStatus = hasManualLogStatus ? normalizeLogStatus(req.body.log_status) : ''
   const logCompletedAtRaw = req.body.log_completed_at
   const logCompletedAt = normalizeDateTime(logCompletedAtRaw)
 
@@ -876,6 +891,11 @@ const createLog = async (req, res) => {
   try {
     if (!expectedStartDate) {
       expectedStartDate = logDate
+    }
+
+    if (!hasManualLogStatus) {
+      const today = formatDate(new Date())
+      logStatus = expectedStartDate > today ? 'TODO' : 'IN_PROGRESS'
     }
 
     const itemType = await Work.findItemTypeById(itemTypeId)
@@ -1022,7 +1042,11 @@ const createOwnerAssignedLog = async (req, res) => {
   let expectedStartDate = normalizeDate(expectedStartDateRaw)
   const expectedCompletionDateRaw = req.body.expected_completion_date
   const expectedCompletionDate = normalizeDate(expectedCompletionDateRaw)
-  const logStatus = normalizeLogStatus(req.body.log_status || 'TODO')
+  const hasManualLogStatus =
+    req.body.log_status !== undefined &&
+    req.body.log_status !== null &&
+    String(req.body.log_status).trim() !== ''
+  let logStatus = hasManualLogStatus ? normalizeLogStatus(req.body.log_status) : ''
   const logCompletedAtRaw = req.body.log_completed_at
   const logCompletedAt = normalizeDateTime(logCompletedAtRaw)
 
@@ -1067,6 +1091,11 @@ const createOwnerAssignedLog = async (req, res) => {
 
   if (!expectedStartDate) {
     expectedStartDate = logDate
+  }
+
+  if (!hasManualLogStatus) {
+    const today = formatDate(new Date())
+    logStatus = expectedStartDate > today ? 'TODO' : 'IN_PROGRESS'
   }
 
   if (logStatus === 'DONE' && Number(actualHours || 0) === 0) {
@@ -1251,6 +1280,12 @@ const updateLog = async (req, res) => {
         return res.status(400).json({ success: false, message: 'expected_completion_date 格式错误，需为 YYYY-MM-DD' })
       }
       expectedCompletionDate = normalized || null
+    }
+
+    // 仅通过“状态切换”接口把事项改为非 DONE 且未显式传入完成日期时，默认清空完成日期。
+    // 若前端显式传入 log_completed_at（例如在“修改记录”弹窗中维护），则以用户输入为准。
+    if (req.body.log_status !== undefined && req.body.log_completed_at === undefined && logStatus !== 'DONE') {
+      logCompletedAt = null
     }
 
     if (!description) {
@@ -1989,6 +2024,52 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
   }
 }
 
+const replaceDemandWorkflowLatestTemplate = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  if (!req.userAccess?.is_super_admin) {
+    return res.status(403).json({ success: false, message: '仅超级管理员可强制替换流程' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const result = await Workflow.replaceDemandWorkflowWithLatestTemplate({
+      demandId,
+      operatorUserId: req.user.id,
+      autoAssignCurrentNode: false,
+    })
+
+    return res.json({
+      success: true,
+      message: '已强制替换为最新流程模板',
+      data: result,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_REPLACE_UNSAFE') {
+      const doneCount = Number(err?.data?.done_node_count || 0)
+      return res.status(400).json({
+        success: false,
+        message: doneCount > 0 ? `当前流程已有 ${doneCount} 个已完成节点，不允许强制替换` : '当前流程状态不允许替换',
+      })
+    }
+    console.error('强制替换流程模板失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getMyWorkbench = async (req, res) => {
   try {
     const data = await Work.getMyWorkbench(req.user.id)
@@ -2124,6 +2205,7 @@ module.exports = {
   assignDemandWorkflowCurrentNode,
   assignDemandWorkflowNode,
   submitDemandWorkflowCurrentNode,
+  replaceDemandWorkflowLatestTemplate,
   getMyWorkbench,
   getMyWeeklyReport,
   getOwnerWorkbench,
