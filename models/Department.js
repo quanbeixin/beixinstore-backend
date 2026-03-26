@@ -41,7 +41,7 @@ const Department = {
          d.manager_user_id,
          d.sort_order,
          d.enabled,
-         u.username AS manager_name
+         COALESCE(NULLIF(TRIM(u.real_name), ''), u.username) AS manager_name
        FROM departments d
        LEFT JOIN users u ON u.id = d.manager_user_id
        ORDER BY d.sort_order ASC, d.id ASC`,
@@ -64,7 +64,7 @@ const Department = {
          d.manager_user_id,
          d.sort_order,
          d.enabled,
-         u.username AS manager_name
+         COALESCE(NULLIF(TRIM(u.real_name), ''), u.username) AS manager_name
        FROM departments d
        LEFT JOIN users u ON u.id = d.manager_user_id
        WHERE d.id = ?`,

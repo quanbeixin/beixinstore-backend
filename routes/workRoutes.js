@@ -5,6 +5,7 @@ const authMiddleware = require('../middleware/auth')
 const {
   listWorkItemTypes,
   listDemandPhaseTypes,
+  listWorkflowAssignees,
   createWorkItemType,
   listDemands,
   getDemandById,
@@ -50,6 +51,11 @@ router.get(
   '/phase-types',
   authMiddleware.requireAnyPermission(['worklog.view.self', 'demand.view']),
   listDemandPhaseTypes,
+)
+router.get(
+  '/workflow/assignees',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  listWorkflowAssignees,
 )
 router.post('/item-types', authMiddleware.requirePermission('demand.manage'), createWorkItemType)
 

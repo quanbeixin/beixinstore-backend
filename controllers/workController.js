@@ -199,6 +199,25 @@ function isDemandOpen(status) {
   return status === 'TODO' || status === 'IN_PROGRESS'
 }
 
+function isDemandFollowupItemType(itemType) {
+  if (!itemType) return false
+  const typeKey = String(itemType?.type_key || '').trim().toUpperCase()
+  const typeName = String(itemType?.name || '').replace(/\s+/g, '')
+  if (typeKey.includes('DEMAND') && typeKey.includes('FOLLOW')) return true
+  return typeName.includes('需求跟进')
+}
+
+async function getUserDepartmentId(userId) {
+  const user = await User.findById(userId)
+  return toPositiveInt(user?.department_id)
+}
+
+function canSelectPhaseByDepartment(phaseOwnerDepartmentId, userDepartmentId) {
+  const ownerDepartmentId = toPositiveInt(phaseOwnerDepartmentId)
+  if (!ownerDepartmentId) return true
+  return ownerDepartmentId === toPositiveInt(userDepartmentId)
+}
+
 function hasPermission(req, code) {
   const access = req.userAccess || {}
   if (access.is_super_admin) return true
@@ -251,6 +270,60 @@ const listDemandPhaseTypes = async (req, res) => {
     return res.json({ success: true, data: rows })
   } catch (err) {
     console.error('获取需求阶段字典失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listWorkflowAssignees = async (req, res) => {
+  const keyword = normalizeText(req.query.keyword, 100)
+  const PAGE_SIZE = 1000
+  const MAX_PAGES = 50
+
+  try {
+    const usersMap = new Map()
+    let total = 0
+
+    for (let page = 1; page <= MAX_PAGES; page += 1) {
+      const { rows, total: count } = await User.findAll({
+        page,
+        pageSize: PAGE_SIZE,
+        keyword,
+        sortBy: 'real_name',
+        sortOrder: 'asc',
+      })
+
+      if (page === 1) {
+        total = Number(count || 0)
+      }
+
+      const list = Array.isArray(rows) ? rows : []
+      list.forEach((item) => {
+        const userId = toPositiveInt(item?.id)
+        if (!userId || usersMap.has(userId)) return
+        usersMap.set(userId, {
+          id: userId,
+          username: item?.username || '',
+          real_name: item?.real_name || '',
+          status_code: item?.status_code || 'ACTIVE',
+          include_in_metrics: Number(item?.include_in_metrics ?? 1) === 1 ? 1 : 0,
+          department_id: toPositiveInt(item?.department_id),
+          department_name: item?.department_name || '',
+        })
+      })
+
+      if (list.length < PAGE_SIZE) break
+      if (total > 0 && usersMap.size >= total) break
+    }
+
+    const data = Array.from(usersMap.values()).sort((a, b) => {
+      const nameA = String(a.real_name || a.username || '').trim()
+      const nameB = String(b.real_name || b.username || '').trim()
+      return nameA.localeCompare(nameB, 'zh-CN')
+    })
+
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取流程可指派成员失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -921,6 +994,16 @@ const createLog = async (req, res) => {
       if (!phase) {
         return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
       }
+
+      if (isDemandFollowupItemType(itemType)) {
+        const userDepartmentId = await getUserDepartmentId(req.user.id)
+        if (!canSelectPhaseByDepartment(phase?.owner_department_id, userDepartmentId)) {
+          return res.status(400).json({
+            success: false,
+            message: '所选需求任务仅限责任部门成员填写；未设置责任部门的任务才可全员选择',
+          })
+        }
+      }
     } else {
       phaseKey = null
     }
@@ -1132,6 +1215,16 @@ const createOwnerAssignedLog = async (req, res) => {
       if (!phase) {
         return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
       }
+
+      if (isDemandFollowupItemType(itemType)) {
+        const assigneeDepartmentId = await getUserDepartmentId(assigneeUserId)
+        if (!canSelectPhaseByDepartment(phase?.owner_department_id, assigneeDepartmentId)) {
+          return res.status(400).json({
+            success: false,
+            message: '所选需求任务仅限责任部门成员填写；未设置责任部门的任务才可全员选择',
+          })
+        }
+      }
     } else {
       phaseKey = null
     }
@@ -1330,6 +1423,20 @@ const updateLog = async (req, res) => {
       const phase = await Work.findDemandPhaseTypeByKey(phaseKey)
       if (!phase) {
         return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
+      }
+
+      if (isDemandFollowupItemType(itemType)) {
+        const userDepartmentId = await getUserDepartmentId(req.user.id)
+        const keepOriginalBinding =
+          String(demandId || '') === String(existing.demand_id || '') &&
+          String(phaseKey || '') === String(normalizePhaseKey(existing.phase_key) || '') &&
+          Number(itemTypeId || 0) === Number(existing.item_type_id || 0)
+        if (!canSelectPhaseByDepartment(phase?.owner_department_id, userDepartmentId) && !keepOriginalBinding) {
+          return res.status(400).json({
+            success: false,
+            message: '所选需求任务仅限责任部门成员填写；未设置责任部门的任务才可全员选择',
+          })
+        }
       }
     } else {
       phaseKey = null
@@ -1567,8 +1674,8 @@ const createLogDailyEntry = async (req, res) => {
   }
 
   const actualHours = normalizeHours(req.body.actual_hours, null)
-  if (actualHours === null || actualHours <= 0) {
-    return res.status(400).json({ success: false, message: 'actual_hours 必须大于 0' })
+  if (actualHours === null || actualHours < 0) {
+    return res.status(400).json({ success: false, message: 'actual_hours 不能小于 0' })
   }
   const description = normalizeText(req.body.description, 2000)
 
@@ -2179,6 +2286,7 @@ const sendNoFillReminders = async (req, res) => {
 module.exports = {
   listWorkItemTypes,
   listDemandPhaseTypes,
+  listWorkflowAssignees,
   createWorkItemType,
   listDemands,
   getDemandById,

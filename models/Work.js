@@ -176,6 +176,16 @@ function parseOwnerEstimateRule(extraJson, fallback = 'NONE') {
   return fallback
 }
 
+function parsePhaseOwnerDepartmentId(extraJson) {
+  if (!extraJson || typeof extraJson !== 'object') return null
+  const candidates = [extraJson.owner_department_id, extraJson.ownerDepartmentId]
+  for (const item of candidates) {
+    const normalized = toPositiveInt(item)
+    if (normalized) return normalized
+  }
+  return null
+}
+
 function mapIssueTypeDictRow(row) {
   const extraJson = parseExtraJson(row.extra_json)
   return {
@@ -354,6 +364,23 @@ function buildDateRange(startDate, endDate) {
   return result.length > 0 ? result : [start]
 }
 
+function isWeekendDate(dateText) {
+  const normalized = normalizeDateOnly(dateText)
+  if (!normalized) return false
+  const date = new Date(`${normalized}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return false
+  const weekDay = date.getDay()
+  return weekDay === 0 || weekDay === 6
+}
+
+function buildWorkDateRange(startDate, endDate, { fallbackToStart = true } = {}) {
+  const fullDateList = buildDateRange(startDate, endDate)
+  const workDateList = fullDateList.filter((date) => !isWeekendDate(date))
+  if (workDateList.length > 0) return workDateList
+  if (fallbackToStart && fullDateList.length > 0) return [fullDateList[0]]
+  return []
+}
+
 function splitHoursAcrossDates(totalHours, dateCount) {
   const total = Math.max(0, Number(normalizeDecimal(totalHours, 0) || 0))
   const count = Math.max(1, Number(dateCount || 1))
@@ -370,6 +397,7 @@ function splitHoursAcrossDates(totalHours, dateCount) {
 function getTodayPlannedHoursSql(dateExpr = 'CURDATE()') {
   return `COALESCE(pt.today_planned_hours, CASE
     WHEN l.expected_start_date IS NOT NULL
+      AND WEEKDAY(${dateExpr}) < 5
       AND l.expected_start_date <= ${dateExpr}
       AND (l.expected_completion_date IS NULL OR l.expected_completion_date >= ${dateExpr})
     THEN CASE
@@ -822,7 +850,8 @@ const Work = {
          i.item_code,
          i.item_name,
          i.enabled,
-         i.sort_order
+         i.sort_order,
+         i.extra_json
        FROM config_dict_items i
        INNER JOIN config_dict_types t ON t.type_key = i.type_key
        WHERE i.type_key = ?
@@ -832,7 +861,13 @@ const Work = {
        LIMIT 1`,
       [DEMAND_PHASE_DICT_KEY, phaseKey],
     )
-    return rows[0] || null
+    const row = rows[0]
+    if (!row) return null
+    const extraJson = parseExtraJson(row.extra_json)
+    return {
+      ...row,
+      owner_department_id: parsePhaseOwnerDepartmentId(extraJson),
+    }
   },
 
   async listItemTypes({ enabledOnly = true } = {}) {
@@ -861,14 +896,24 @@ const Work = {
          i.item_code AS phase_key,
          i.item_name AS phase_name,
          i.sort_order,
-         i.enabled
+         i.enabled,
+         i.extra_json
        FROM config_dict_items i
        INNER JOIN config_dict_types t ON t.type_key = i.type_key
        WHERE i.type_key = ? AND t.enabled = 1 ${whereEnabled}
        ORDER BY i.sort_order ASC, i.id ASC`,
       [DEMAND_PHASE_DICT_KEY],
     )
-    return rows
+    return (rows || []).map((row) => {
+      const extraJson = parseExtraJson(row.extra_json)
+      return {
+        phase_key: row.phase_key,
+        phase_name: row.phase_name,
+        sort_order: Number(row.sort_order) || 0,
+        enabled: Number(row.enabled) === 1 ? 1 : 0,
+        owner_department_id: parsePhaseOwnerDepartmentId(extraJson),
+      }
+    })
   },
 
   async findItemTypeById(id) {
@@ -1657,7 +1702,7 @@ const Work = {
     const startDate = normalizeDateOnly(expectedStartDate)
     if (!normalizedLogId || !normalizedUserId || !startDate) return 0
 
-    const dateList = buildDateRange(startDate, normalizeDateOnly(expectedCompletionDate) || startDate)
+    const dateList = buildWorkDateRange(startDate, normalizeDateOnly(expectedCompletionDate) || startDate)
     if (dateList.length === 0) return 0
 
     const hoursList = splitHoursAcrossDates(totalPlannedHours, dateList.length)
@@ -1808,7 +1853,7 @@ const Work = {
     if (!normalizedLogId || !normalizedUserId || !normalizedStart) return 0
 
     const normalizedEnd = normalizeDateOnly(expectedCompletionDate) || normalizedStart
-    const dateList = buildDateRange(normalizedStart, normalizedEnd)
+    const dateList = buildWorkDateRange(normalizedStart, normalizedEnd)
     if (dateList.length === 0) return 0
 
     await ensureDailyTables()
@@ -2118,6 +2163,11 @@ const Work = {
     const normalizedUserId = toPositiveInt(userId)
     if (!normalizedUserId) {
       return {
+        current_user: {
+          id: null,
+          department_id: null,
+          department_name: '',
+        },
         today: {
           log_count_today: 0,
           personal_estimate_hours_today: 0,
@@ -2134,6 +2184,7 @@ const Work = {
     }
 
     await ensureDailyTables()
+    const currentUserDepartment = await findUserDepartmentRow(normalizedUserId)
 
     const todayPlannedHoursSql = getTodayPlannedHoursSql('CURDATE()')
     const todayActualHoursSql = getTodayActualHoursSql()
@@ -2225,17 +2276,42 @@ const Work = {
       }
     })
 
-    const todayPlannedHours = toDecimal1(
-      activeItems.reduce((sum, item) => sum + Number(item.today_planned_hours || 0), 0),
+    const [todaySummaryRows] = await pool.query(
+      `SELECT
+         ROUND(COALESCE(SUM(${todayPlannedHoursSql}), 0), 1) AS planned_hours_today,
+         ROUND(COALESCE(SUM(${todayActualHoursSql}), 0), 1) AS actual_hours_today,
+         SUM(CASE WHEN ${todayPlannedHoursSql} > 0 THEN 1 ELSE 0 END) AS scheduled_item_count_today,
+         SUM(CASE WHEN ${todayActualHoursSql} > 0 THEN 1 ELSE 0 END) AS filled_item_count_today
+       FROM work_logs l
+       LEFT JOIN (
+         SELECT log_id, ROUND(COALESCE(SUM(planned_hours), 0), 1) AS today_planned_hours
+         FROM work_log_daily_plans
+         WHERE plan_date = CURDATE()
+         GROUP BY log_id
+       ) pt ON pt.log_id = l.id
+       LEFT JOIN (
+         SELECT e.log_id, ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS today_actual_hours
+         FROM work_log_daily_entries e
+         INNER JOIN (
+           SELECT log_id, entry_date, MAX(id) AS latest_id
+           FROM work_log_daily_entries
+           GROUP BY log_id, entry_date
+         ) le ON le.latest_id = e.id
+         WHERE e.entry_date = CURDATE()
+         GROUP BY log_id
+       ) et ON et.log_id = l.id
+       WHERE l.user_id = ?`,
+      [normalizedUserId],
     )
-    const todayActualHours = toDecimal1(
-      activeItems.reduce((sum, item) => sum + Number(item.today_actual_hours || 0), 0),
-    )
+
+    const todaySummary = todaySummaryRows?.[0] || {}
+    const todayPlannedHours = toDecimal1(todaySummary.planned_hours_today)
+    const todayActualHours = toDecimal1(todaySummary.actual_hours_today)
     const todayRemainingHours = toDecimal1(
       activeItems.reduce((sum, item) => sum + Number(item.remaining_hours || 0), 0),
     )
-    const scheduledItemCount = activeItems.filter((item) => Number(item.today_planned_hours || 0) > 0).length
-    const filledItemCount = activeItems.filter((item) => Number(item.today_actual_hours || 0) > 0).length
+    const scheduledItemCount = Number(todaySummary.scheduled_item_count_today || 0)
+    const filledItemCount = Number(todaySummary.filled_item_count_today || 0)
     const assignableHours = toDecimal1(Math.max(0, DEFAULT_DAILY_CAPACITY_HOURS - Number(todayPlannedHours || 0)))
 
     const [recentLogs] = await pool.query(
@@ -2267,6 +2343,11 @@ const Work = {
     )
 
     return {
+      current_user: {
+        id: normalizedUserId,
+        department_id: Number(currentUserDepartment?.id || 0) || null,
+        department_name: currentUserDepartment?.name || '',
+      },
       today: {
         log_count_today: filledItemCount,
         personal_estimate_hours_today: todayPlannedHours,
@@ -2480,7 +2561,7 @@ const Work = {
         const fallbackLogDate = normalizeDateOnly(row.log_date)
 
         if (fallbackEstimateHours > 0 && expectedStartDate) {
-          const fullDateList = buildDateRange(expectedStartDate, expectedEndDate || expectedStartDate)
+          const fullDateList = buildWorkDateRange(expectedStartDate, expectedEndDate || expectedStartDate)
           const hoursPerDay = splitHoursAcrossDates(fallbackEstimateHours, Math.max(1, fullDateList.length))
           fullDateList.forEach((date, index) => {
             if (!reportDateSet.has(date)) return
@@ -2870,10 +2951,61 @@ const Work = {
       [userIds],
     )
 
+    const [dailyAggRows] = await pool.query(
+      `SELECT
+         l.user_id,
+         ROUND(COALESCE(SUM(${todayPlannedHoursSql}), 0), 1) AS today_planned_hours,
+         ROUND(COALESCE(SUM(${todayActualHoursSql}), 0), 1) AS today_actual_hours
+       FROM work_logs l
+       LEFT JOIN (
+         SELECT log_id, ROUND(COALESCE(SUM(planned_hours), 0), 1) AS today_planned_hours
+         FROM work_log_daily_plans
+         WHERE plan_date = CURDATE()
+         GROUP BY log_id
+       ) pt ON pt.log_id = l.id
+       LEFT JOIN (
+         SELECT e.log_id, ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS today_actual_hours
+         FROM work_log_daily_entries e
+         INNER JOIN (
+           SELECT log_id, entry_date, MAX(id) AS latest_id
+           FROM work_log_daily_entries
+           GROUP BY log_id, entry_date
+         ) le ON le.latest_id = e.id
+         WHERE e.entry_date = CURDATE()
+         GROUP BY e.log_id
+       ) et ON et.log_id = l.id
+       WHERE l.user_id IN (?)
+       GROUP BY l.user_id`,
+      [userIds],
+    )
+
+    const dailyAggByUser = new Map()
+    ;(dailyAggRows || []).forEach((row) => {
+      const userId = Number(row.user_id)
+      if (!Number.isInteger(userId) || userId <= 0) return
+      dailyAggByUser.set(userId, {
+        today_planned_hours: toDecimal1(row.today_planned_hours),
+        today_actual_hours: toDecimal1(row.today_actual_hours),
+      })
+    })
+
+    const [[todayRow]] = await pool.query(
+      `SELECT
+         DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today_date,
+         DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '%Y-%m-%d') AS yesterday_date`,
+    )
+    const todayDate = String(todayRow?.today_date || '')
+    const yesterdayDate = String(todayRow?.yesterday_date || '')
+    const isInProgressAlignmentItem = (item) => {
+      const status = String(item?.log_status || '').trim().toUpperCase()
+      const expectedStartDate = String(item?.expected_start_date || item?.log_date || '').trim()
+      const expectedDate = String(item?.expected_completion_date || '').trim()
+      if (expectedDate && expectedDate === yesterdayDate) return false
+      const startedTodayOrBefore = Boolean(expectedStartDate) && expectedStartDate <= todayDate
+      return (status === 'IN_PROGRESS' || status === 'TODO') && startedTodayOrBefore
+    }
     const activeItemsByUser = new Map()
-    const plannedHoursByUser = new Map()
-    const actualHoursByUser = new Map()
-    activeItemRows.forEach((row) => {
+    ;(activeItemRows || []).filter((row) => isInProgressAlignmentItem(row)).forEach((row) => {
       const userId = Number(row.user_id)
       if (!activeItemsByUser.has(userId)) {
         activeItemsByUser.set(userId, [])
@@ -2884,23 +3016,8 @@ const Work = {
         today_actual_hours: toDecimal1(row.today_actual_hours),
       }
       activeItemsByUser.get(userId).push(normalizedRow)
-      plannedHoursByUser.set(
-        userId,
-        Number((plannedHoursByUser.get(userId) || 0) + Number(normalizedRow.today_planned_hours || 0)),
-      )
-      actualHoursByUser.set(
-        userId,
-        Number((actualHoursByUser.get(userId) || 0) + Number(normalizedRow.today_actual_hours || 0)),
-      )
     })
 
-    const [[todayRow]] = await pool.query(
-      `SELECT
-         DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today_date,
-         DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '%Y-%m-%d') AS yesterday_date`,
-    )
-    const todayDate = String(todayRow?.today_date || '')
-    const yesterdayDate = String(todayRow?.yesterday_date || '')
     let activeItemCount = 0
     let overdueItemCount = 0
     let dueTodayItemCount = 0
@@ -2913,8 +3030,9 @@ const Work = {
     const members = memberRows.map((row) => {
       const userId = Number(row.user_id)
       const activeItems = activeItemsByUser.get(userId) || []
-      const todayPlannedHours = toDecimal1(plannedHoursByUser.get(userId) || 0)
-      const todayActualHours = toDecimal1(actualHoursByUser.get(userId) || 0)
+      const dailyAgg = dailyAggByUser.get(userId) || {}
+      const todayPlannedHours = toDecimal1(dailyAgg.today_planned_hours)
+      const todayActualHours = toDecimal1(dailyAgg.today_actual_hours)
       const todayScheduled = Number(todayPlannedHours || 0) > 0
       const todayFilled = todayScheduled && Number(todayActualHours || 0) > 0
       const assignableHours = toDecimal1(Math.max(0, DEFAULT_DAILY_CAPACITY_HOURS - Number(todayPlannedHours || 0)))
@@ -3040,13 +3158,9 @@ const Work = {
       })
       .slice(0, 200)
 
-    const inProgressItems = (activeItemRows || [])
-      .filter((item) => {
-        const status = String(item.log_status || '').trim().toUpperCase()
-        const expectedDate = String(item.expected_completion_date || '').trim()
-        if (expectedDate && expectedDate === yesterdayDate) return false
-        return status === 'IN_PROGRESS'
-      })
+    const inProgressCandidateRows = [...(activeItemRows || [])]
+    const inProgressItems = inProgressCandidateRows
+      .filter((item) => isInProgressAlignmentItem(item))
       .map((item) => buildFocusItem(item))
       .sort((a, b) => {
         const getPriorityBucket = (row) => {
@@ -3083,7 +3197,7 @@ const Work = {
         const expectedDate = String(item.expected_completion_date || '').trim()
         if (expectedDate && expectedDate === yesterdayDate) return false
         if (status !== 'TODO') return false
-        return Boolean(expectedStartDate) && expectedStartDate !== todayDate
+        return Boolean(expectedStartDate) && expectedStartDate > todayDate
       })
       .map((item) => {
         const mapped = buildFocusItem(item)
