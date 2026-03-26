@@ -1,6 +1,7 @@
 ﻿const Work = require('../models/Work')
 const User = require('../models/User')
 const Workflow = require('../models/Workflow')
+const WorkflowInstance = require('../models/WorkflowInstance')
 const UserBusinessLine = require('../models/UserBusinessLine')
 
 function toPositiveInt(value) {
@@ -43,6 +44,11 @@ function getScopedProjectId(req) {
 function isDemandInScope(demand, scopedProjectId) {
   if (!scopedProjectId) return true
   return Number(demand?.mapped_project_id) === Number(scopedProjectId)
+}
+
+function canAccessDemandByScope(req, demand, scopedProjectId) {
+  if (req.userAccess?.is_super_admin) return true
+  return isDemandInScope(demand, scopedProjectId)
 }
 
 function rejectDemandOutOfScope(res, action = '访问') {
@@ -189,6 +195,10 @@ function ensureSuperAdmin(req, res) {
 
 function isWorkflowTablesMissing(err) {
   return err?.code === 'WORKFLOW_TABLES_MISSING'
+}
+
+function isWorkflowTemplateTablesMissing(err) {
+  return err?.code === 'ER_NO_SUCH_TABLE' || err?.errno === 1146
 }
 
 const listWorkItemTypes = async (req, res) => {
@@ -338,7 +348,7 @@ const getDemandById = async (req, res) => {
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
-    if (!isDemandInScope(demand, scopedProjectId)) {
+    if (!canAccessDemandByScope(req, demand, scopedProjectId)) {
       return res.status(403).json({ success: false, message: '无权查看其他业务线需求' })
     }
     return res.json({ success: true, data: demand })
@@ -402,7 +412,8 @@ const createDemand = async (req, res) => {
     if (!owner) {
       return res.status(400).json({ success: false, message: '负责人用户不存在' })
     }
-    if (!(await assertUserInScopedProject({ userId: ownerUserId, scopedProjectId }))) {
+    const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    if (!isSuperAdmin && !(await assertUserInScopedProject({ userId: ownerUserId, scopedProjectId }))) {
       return res.status(403).json({ success: false, message: '负责人不属于当前业务线，无法创建需求' })
     }
 
@@ -427,30 +438,43 @@ const createDemand = async (req, res) => {
     })
 
     let workflow = null
-    let workflowInitWarning = ''
-    try {
-      workflow = await Workflow.initDemandWorkflow({
-        demandId: finalDemandId,
-        ownerUserId,
-        operatorUserId: req.user.id,
-      })
-    } catch (workflowErr) {
-      if (isWorkflowTablesMissing(workflowErr)) {
-        workflowInitWarning = '流程表尚未初始化，本次未自动创建流程实例'
-      } else {
-        workflowInitWarning = '流程实例初始化失败，请稍后重试或联系管理员'
-        console.error('需求创建后初始化流程失败:', workflowErr)
+    let workflowTemplateInstance = null
+    let workflowTemplateInitWarning = ''
+
+    if (scopedProjectId) {
+      try {
+        workflowTemplateInstance = await WorkflowInstance.createByDemand({
+          demandId: finalDemandId,
+          projectId: scopedProjectId,
+          operatorUserId: req.user.id,
+        })
+      } catch (workflowTemplateErr) {
+        if (isWorkflowTemplateTablesMissing(workflowTemplateErr)) {
+          workflowTemplateInitWarning = '流程模板表尚未初始化，本次未自动创建模板流程实例'
+        } else if (workflowTemplateErr?.code === 'WORKFLOW_DEFAULT_TEMPLATE_MISSING') {
+          workflowTemplateInitWarning = '当前业务线未设置默认流程模板，本次未自动创建模板流程实例'
+        } else if (workflowTemplateErr?.code === 'WORKFLOW_TEMPLATE_HAS_NO_NODES') {
+          workflowTemplateInitWarning = '当前默认流程模板未配置节点，本次未自动创建模板流程实例'
+        } else {
+          workflowTemplateInitWarning = '流程模板实例初始化失败，请稍后重试或联系管理员'
+          console.error('需求创建后初始化模板流程实例失败:', workflowTemplateErr)
+        }
       }
+    } else {
+      workflowTemplateInitWarning = '当前业务线上下文缺失，本次未自动创建模板流程实例'
     }
 
     const created = await Work.findDemandById(finalDemandId)
+    const warningMessages = [workflowTemplateInitWarning].filter(Boolean)
     return res.status(201).json({
       success: true,
-      message: workflowInitWarning ? `需求创建成功（${workflowInitWarning}）` : '需求创建成功',
+      message: warningMessages.length > 0 ? `需求创建成功（${warningMessages.join('；')}）` : '需求创建成功',
       data: {
         ...created,
         workflow,
-        workflow_init_warning: workflowInitWarning || null,
+        workflow_init_warning: null,
+        workflow_template_instance: workflowTemplateInstance,
+        workflow_template_init_warning: workflowTemplateInitWarning || null,
       },
     })
   } catch (err) {
@@ -474,7 +498,7 @@ const updateDemand = async (req, res) => {
     if (!existing) {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
-    if (!isDemandInScope(existing, scopedProjectId)) {
+    if (!canAccessDemandByScope(req, existing, scopedProjectId)) {
       return res.status(403).json({ success: false, message: '无权修改其他业务线需求' })
     }
 
@@ -533,7 +557,8 @@ const updateDemand = async (req, res) => {
     if (!owner) {
       return res.status(400).json({ success: false, message: '负责人用户不存在' })
     }
-    if (!(await assertUserInScopedProject({ userId: ownerUserId, scopedProjectId }))) {
+    const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    if (!isSuperAdmin && !(await assertUserInScopedProject({ userId: ownerUserId, scopedProjectId }))) {
       return res.status(403).json({ success: false, message: '负责人不属于当前业务线，无法更新需求' })
     }
 
@@ -587,7 +612,7 @@ const deleteDemand = async (req, res) => {
     if (!existing) {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
-    if (!isDemandInScope(existing, scopedProjectId)) {
+    if (!canAccessDemandByScope(req, existing, scopedProjectId)) {
       return res.status(403).json({ success: false, message: '无权删除其他业务线需求' })
     }
 
@@ -1415,7 +1440,7 @@ const initDemandWorkflowInstance = async (req, res) => {
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
-    if (!isDemandInScope(demand, scopedProjectId)) {
+    if (!canAccessDemandByScope(req, demand, scopedProjectId)) {
       return rejectDemandOutOfScope(res, '操作')
     }
 
@@ -1453,17 +1478,13 @@ const getDemandWorkflow = async (req, res) => {
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
-    if (!isDemandInScope(demand, scopedProjectId)) {
+    if (!canAccessDemandByScope(req, demand, scopedProjectId)) {
       return rejectDemandOutOfScope(res, '查看')
     }
 
-    let workflow = await Workflow.getDemandWorkflowByDemandId(demandId)
+    const workflow = await Workflow.getDemandWorkflowByDemandId(demandId)
     if (!workflow) {
-      workflow = await Workflow.initDemandWorkflow({
-        demandId,
-        ownerUserId: demand.owner_user_id,
-        operatorUserId: req.user.id,
-      })
+      return res.status(404).json({ success: false, message: '旧版流程实例不存在' })
     }
     return res.json({ success: true, data: workflow })
   } catch (err) {
@@ -1514,7 +1535,7 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
-    if (!isDemandInScope(demand, scopedProjectId)) {
+    if (!canAccessDemandByScope(req, demand, scopedProjectId)) {
       return rejectDemandOutOfScope(res, '操作')
     }
 
@@ -1591,7 +1612,7 @@ const assignDemandWorkflowNode = async (req, res) => {
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
-    if (!isDemandInScope(demand, scopedProjectId)) {
+    if (!canAccessDemandByScope(req, demand, scopedProjectId)) {
       return rejectDemandOutOfScope(res, '操作')
     }
 
@@ -1646,7 +1667,7 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
     if (!demand) {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
-    if (!isDemandInScope(demand, scopedProjectId)) {
+    if (!canAccessDemandByScope(req, demand, scopedProjectId)) {
       return rejectDemandOutOfScope(res, '操作')
     }
 

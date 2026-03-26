@@ -117,11 +117,12 @@ const User = {
     return rows[0] || null
   },
 
-  findAll: async ({ page = 1, pageSize = 10, keyword = '', sortBy = 'real_name', sortOrder = 'asc' }) => {
+  findAll: async ({ page = 1, pageSize = 10, keyword = '', sortBy = 'real_name', sortOrder = 'asc', businessLineId = null }) => {
     const offset = (page - 1) * pageSize
     const like = `%${keyword}%`
     const normalizedSortOrder = String(sortOrder || '').toLowerCase() === 'asc' ? 'ASC' : 'DESC'
     const normalizedSortBy = String(sortBy || '').toLowerCase()
+    const scopedBusinessLineId = Number.isInteger(Number(businessLineId)) && Number(businessLineId) > 0 ? Number(businessLineId) : null
 
     const primarySortMap = {
       created_at: `u.created_at ${normalizedSortOrder}, u.id DESC`,
@@ -136,6 +137,10 @@ const User = {
     const primaryOrderClause = primarySortMap[normalizedSortBy] || primarySortMap.real_name
     const fallbackOrderClause = fallbackSortMap[normalizedSortBy] || fallbackSortMap.real_name
 
+    const userBusinessLineJoinSql = scopedBusinessLineId
+      ? 'INNER JOIN pm_user_business_lines ubl ON ubl.user_id = u.id AND ubl.project_id = ?'
+      : ''
+
     const primarySql = `
       SELECT
         u.id,
@@ -148,10 +153,11 @@ const User = {
         d.name AS department_name,
         GROUP_CONCAT(DISTINCT r.name) AS role_names
       FROM users u
+      ${userBusinessLineJoinSql}
       LEFT JOIN departments d ON u.department_id = d.id
       LEFT JOIN user_roles ur ON u.id = ur.user_id
       LEFT JOIN roles r ON ur.role_id = r.id
-      WHERE u.username LIKE ? OR u.real_name LIKE ? OR u.email LIKE ?
+      WHERE (u.username LIKE ? OR u.real_name LIKE ? OR u.email LIKE ?)
       GROUP BY u.id
       ORDER BY ${primaryOrderClause}
       LIMIT ? OFFSET ?
@@ -168,36 +174,62 @@ const User = {
         d.name AS department_name,
         GROUP_CONCAT(DISTINCT r.name) AS role_names
       FROM users u
+      ${userBusinessLineJoinSql}
       LEFT JOIN departments d ON u.department_id = d.id
       LEFT JOIN user_roles ur ON u.id = ur.user_id
       LEFT JOIN roles r ON ur.role_id = r.id
-      WHERE u.username LIKE ? OR u.email LIKE ?
+      WHERE (u.username LIKE ? OR u.email LIKE ?)
       GROUP BY u.id
       ORDER BY ${fallbackOrderClause}
       LIMIT ? OFFSET ?
     `
 
+    const primaryParams = scopedBusinessLineId
+      ? [scopedBusinessLineId, like, like, like, pageSize, offset]
+      : [like, like, like, pageSize, offset]
+    const fallbackParams = scopedBusinessLineId
+      ? [scopedBusinessLineId, like, like, pageSize, offset]
+      : [like, like, pageSize, offset]
+
     let rows
     try {
-      ;[rows] = await pool.query(primarySql, [like, like, like, pageSize, offset])
+      ;[rows] = await pool.query(primarySql, primaryParams)
     } catch (err) {
+      if (scopedBusinessLineId && isMissingTableError(err)) {
+        return { rows: [], total: 0 }
+      }
       if (!isMissingColumnError(err)) throw err
-      ;[rows] = await pool.query(fallbackSql, [like, like, pageSize, offset])
+      ;[rows] = await pool.query(fallbackSql, fallbackParams)
     }
 
     let total = 0
     try {
-      const [[row]] = await pool.query(
-        'SELECT COUNT(*) AS total FROM users WHERE username LIKE ? OR real_name LIKE ? OR email LIKE ?',
-        [like, like, like],
-      )
+      const countPrimarySql = scopedBusinessLineId
+        ? `SELECT COUNT(*) AS total
+           FROM users u
+           INNER JOIN pm_user_business_lines ubl ON ubl.user_id = u.id AND ubl.project_id = ?
+           WHERE u.username LIKE ? OR u.real_name LIKE ? OR u.email LIKE ?`
+        : 'SELECT COUNT(*) AS total FROM users WHERE username LIKE ? OR real_name LIKE ? OR email LIKE ?'
+      const countPrimaryParams = scopedBusinessLineId
+        ? [scopedBusinessLineId, like, like, like]
+        : [like, like, like]
+      const [[row]] = await pool.query(countPrimarySql, countPrimaryParams)
       total = Number(row?.total || 0)
     } catch (err) {
+      if (scopedBusinessLineId && isMissingTableError(err)) {
+        return { rows: [], total: 0 }
+      }
       if (!isMissingColumnError(err)) throw err
-      const [[row]] = await pool.query('SELECT COUNT(*) AS total FROM users WHERE username LIKE ? OR email LIKE ?', [
-        like,
-        like,
-      ])
+      const countFallbackSql = scopedBusinessLineId
+        ? `SELECT COUNT(*) AS total
+           FROM users u
+           INNER JOIN pm_user_business_lines ubl ON ubl.user_id = u.id AND ubl.project_id = ?
+           WHERE u.username LIKE ? OR u.email LIKE ?`
+        : 'SELECT COUNT(*) AS total FROM users WHERE username LIKE ? OR email LIKE ?'
+      const countFallbackParams = scopedBusinessLineId
+        ? [scopedBusinessLineId, like, like]
+        : [like, like]
+      const [[row]] = await pool.query(countFallbackSql, countFallbackParams)
       total = Number(row?.total || 0)
     }
 

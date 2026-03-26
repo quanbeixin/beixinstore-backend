@@ -1,6 +1,7 @@
-﻿const bcrypt = require('bcryptjs')
+const bcrypt = require('bcryptjs')
 const User = require('../models/User')
 const Department = require('../models/Department')
+const UserBusinessLine = require('../models/UserBusinessLine')
 
 function normalizeStatusCode(value) {
   const normalized = typeof value === 'string' ? value.trim().toUpperCase() : ''
@@ -40,19 +41,68 @@ function normalizeSortOrder(value) {
   return 'asc'
 }
 
+function normalizeBusinessLineId(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return null
+  const num = Number(value)
+  return Number.isInteger(num) && num > 0 ? num : null
+}
+
+function isMissingTableError(err) {
+  return err && (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146)
+}
+
 // 获取用户列表（支持分页和关键字搜索）
 const getUsers = async (req, res) => {
   const { page = 1, pageSize = 10, keyword = '' } = req.query
   const sortBy = normalizeSortBy(req.query.sort_by)
   const sortOrder = normalizeSortOrder(req.query.sort_order)
+  const businessLineId = normalizeBusinessLineId(req.query.business_line_id)
 
   try {
+    if (req.query.business_line_id !== undefined && req.query.business_line_id !== null && req.query.business_line_id !== '' && !businessLineId) {
+      return res.status(400).json({ success: false, message: 'business_line_id 无效' })
+    }
+
+    if (businessLineId) {
+      const userId = Number(req.user?.id)
+      if (!Number.isInteger(userId) || userId <= 0) {
+        return res.status(401).json({ success: false, message: '未授权访问' })
+      }
+
+      const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+      let availableProjects = []
+      try {
+        availableProjects = await UserBusinessLine.listAvailableProjectsForUser({
+          userId,
+          isSuperAdmin,
+        })
+      } catch (err) {
+        if (isMissingTableError(err)) {
+          return res.json({
+            success: true,
+            data: {
+              list: [],
+              total: 0,
+              page: parseInt(page, 10),
+              pageSize: parseInt(pageSize, 10),
+            },
+          })
+        }
+        throw err
+      }
+      const canAccess = availableProjects.some((item) => Number(item.project_id) === Number(businessLineId))
+      if (!canAccess) {
+        return res.status(403).json({ success: false, message: '无权限查看该业务线成员' })
+      }
+    }
+
     const { rows, total } = await User.findAll({
       page: parseInt(page, 10),
       pageSize: parseInt(pageSize, 10),
       keyword,
       sortBy,
       sortOrder,
+      businessLineId,
     })
 
     res.json({

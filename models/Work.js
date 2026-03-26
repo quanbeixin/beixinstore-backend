@@ -764,14 +764,22 @@ const Work = {
 
     if (toPositiveInt(accessProjectId)) {
       conditions.push(
-        `EXISTS (
-          SELECT 1
-          FROM pm_user_business_lines ubl
-          WHERE ubl.user_id = d.owner_user_id
-            AND ubl.project_id = ?
+        `(
+          EXISTS (
+            SELECT 1
+            FROM pm_user_business_lines ubl
+            WHERE ubl.user_id = d.owner_user_id
+              AND ubl.project_id = ?
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM pm_workflow_instances wfi
+            WHERE wfi.demand_id = d.id
+              AND wfi.project_id = ?
+          )
         )`,
       )
-      params.push(toPositiveInt(accessProjectId))
+      params.push(toPositiveInt(accessProjectId), toPositiveInt(accessProjectId))
     }
 
     const whereSql = conditions.join(' AND ')
@@ -781,7 +789,7 @@ const Work = {
         d.id,
         d.name,
         d.owner_user_id,
-        ubl.project_id AS mapped_project_id,
+        COALESCE(wfi.project_id, ubl.project_id) AS mapped_project_id,
         COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
         d.business_group_code,
         bg.item_name AS business_group_name,
@@ -799,6 +807,7 @@ const Work = {
       FROM work_demands d
       LEFT JOIN users u ON u.id = d.owner_user_id
       LEFT JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
+      LEFT JOIN pm_workflow_instances wfi ON wfi.demand_id = d.id
       LEFT JOIN config_dict_items bg
         ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
        AND bg.item_code = d.business_group_code
@@ -849,7 +858,7 @@ const Work = {
          d.id,
          d.name,
          d.owner_user_id,
-         ubl.project_id AS mapped_project_id,
+         COALESCE(wfi.project_id, ubl.project_id) AS mapped_project_id,
          COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
          d.business_group_code,
          bg.item_name AS business_group_name,
@@ -864,6 +873,7 @@ const Work = {
        FROM work_demands d
        LEFT JOIN users u ON u.id = d.owner_user_id
        LEFT JOIN pm_user_business_lines ubl ON ubl.user_id = d.owner_user_id
+       LEFT JOIN pm_workflow_instances wfi ON wfi.demand_id = d.id
        LEFT JOIN config_dict_items bg
          ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
         AND bg.item_code = d.business_group_code

@@ -16,6 +16,8 @@ const projectRoutes = require('./routes/projectRoutes')
 const requirementRoutes = require('./routes/requirementRoutes')
 const bugRoutes = require('./routes/bugRoutes')
 const projectStatsRoutes = require('./routes/projectStatsRoutes')
+const workflowTemplateRoutes = require('./routes/workflowTemplateRoutes')
+const workflowInstanceRoutes = require('./routes/workflowInstanceRoutes')
 const { initializeProjectManagementModule, isLegacyBootstrapEnabled } = require('./models/ProjectManagementInit')
 
 const app = express()
@@ -81,6 +83,8 @@ app.use('/api/projects', projectRoutes)
 app.use('/api/requirements', requirementRoutes)
 app.use('/api/bugs', bugRoutes)
 app.use('/api/project-stats', projectStatsRoutes)
+app.use('/api/workflow/templates', workflowTemplateRoutes)
+app.use('/api/workflow/instances', workflowInstanceRoutes)
 app.use('/api', testRoutes)
 
 app.get('/', (req, res) => {
