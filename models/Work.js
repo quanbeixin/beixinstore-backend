@@ -343,6 +343,14 @@ function normalizeDateOnly(value) {
   return text
 }
 
+function formatLocalDateOnly(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return ''
+  const year = String(date.getFullYear())
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 function buildDateRange(startDate, endDate) {
   const start = normalizeDateOnly(startDate)
   const end = normalizeDateOnly(endDate)
@@ -357,7 +365,7 @@ function buildDateRange(startDate, endDate) {
   const cursor = new Date(startObj)
   let guard = 0
   while (cursor <= endObj && guard < 366) {
-    result.push(cursor.toISOString().slice(0, 10))
+    result.push(formatLocalDateOnly(cursor))
     cursor.setDate(cursor.getDate() + 1)
     guard += 1
   }
@@ -2814,11 +2822,13 @@ const Work = {
         yesterday_due_not_done_count: 0,
         yesterday_due_late_done_count: 0,
         in_progress_count: 0,
+        done_today_count: 0,
         todo_pending_count: 0,
       },
       focus_items: [],
       focus_yesterday_due_items: [],
       focus_in_progress_items: [],
+      focus_done_today_items: [],
       focus_todo_items: [],
       members: [],
       no_fill_members: [],
@@ -2946,6 +2956,57 @@ const Work = {
        ) tt ON tt.log_id = l.id
        WHERE l.user_id IN (?)
          AND l.expected_completion_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+       ORDER BY l.updated_at DESC, l.id DESC
+       LIMIT 2000`,
+      [userIds],
+    )
+
+    const [doneTodayRows] = await pool.query(
+      `SELECT
+         l.id,
+         l.user_id,
+         DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+         COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+         l.description,
+         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+         DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+         l.demand_id,
+         d.name AS demand_name,
+         d.priority AS demand_priority,
+         l.phase_key,
+         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
+         l.personal_estimate_hours,
+         COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS cumulative_actual_hours,
+         ${todayPlannedHoursSql} AS today_planned_hours,
+         ${todayActualHoursSql} AS today_actual_hours
+       FROM work_logs l
+       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+       LEFT JOIN work_demands d ON d.id = l.demand_id
+       LEFT JOIN config_dict_items pdi
+         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+        AND pdi.item_code = l.phase_key
+       LEFT JOIN (
+         SELECT log_id, ROUND(COALESCE(SUM(planned_hours), 0), 1) AS today_planned_hours
+         FROM work_log_daily_plans
+         WHERE plan_date = CURDATE()
+         GROUP BY log_id
+       ) pt ON pt.log_id = l.id
+       LEFT JOIN (
+         SELECT log_id, ROUND(COALESCE(SUM(actual_hours), 0), 1) AS today_actual_hours
+         FROM work_log_daily_entries
+         WHERE entry_date = CURDATE()
+         GROUP BY log_id
+       ) et ON et.log_id = l.id
+       LEFT JOIN (
+         SELECT log_id, ROUND(COALESCE(SUM(actual_hours), 0), 1) AS total_actual_hours
+         FROM work_log_daily_entries
+         GROUP BY log_id
+       ) tt ON tt.log_id = l.id
+       WHERE l.user_id IN (?)
+         AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'
+         AND DATE(COALESCE(l.log_completed_at, l.updated_at)) = CURDATE()
        ORDER BY l.updated_at DESC, l.id DESC
        LIMIT 2000`,
       [userIds],
@@ -3190,6 +3251,25 @@ const Work = {
       })
       .slice(0, 200)
 
+    const doneTodayItems = (doneTodayRows || [])
+      .map((item) => buildFocusItem(item))
+      .sort((a, b) => {
+        const phaseA = String(a.phase_name || a.phase_key || '').trim() || '~'
+        const phaseB = String(b.phase_name || b.phase_key || '').trim() || '~'
+        const phaseDiff = phaseA.localeCompare(phaseB, 'zh-Hans-CN')
+        if (phaseDiff !== 0) return phaseDiff
+
+        const progressA = Number.isFinite(Number(a.progress_percent)) ? Number(a.progress_percent) : -1
+        const progressB = Number.isFinite(Number(b.progress_percent)) ? Number(b.progress_percent) : -1
+        if (progressA !== progressB) return progressB - progressA
+
+        const dateA = a.expected_completion_date || '9999-12-31'
+        const dateB = b.expected_completion_date || '9999-12-31'
+        if (dateA !== dateB) return dateA.localeCompare(dateB)
+        return Number(b.id || 0) - Number(a.id || 0)
+      })
+      .slice(0, 200)
+
     const todoPendingItems = (activeItemRows || [])
       .filter((item) => {
         const status = String(item.log_status || '').trim().toUpperCase()
@@ -3256,11 +3336,13 @@ const Work = {
         yesterday_due_not_done_count: yesterdayDueNotDoneCount,
         yesterday_due_late_done_count: yesterdayDueLateDoneCount,
         in_progress_count: inProgressItems.length,
+        done_today_count: doneTodayItems.length,
         todo_pending_count: todoPendingItems.length,
       },
       focus_items: focusItems,
       focus_yesterday_due_items: yesterdayDueItems,
       focus_in_progress_items: inProgressItems,
+      focus_done_today_items: doneTodayItems,
       focus_todo_items: todoPendingItems,
       members,
       no_fill_members: noFillMembers,
