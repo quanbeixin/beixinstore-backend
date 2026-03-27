@@ -54,29 +54,7 @@ const ITEM_TYPE_LOOKUP_SQL = `
   )
 `
 
-const PHASE_OWNER_DEPARTMENT_ID_SQL = `CAST(NULLIF(COALESCE(
-  JSON_UNQUOTE(JSON_EXTRACT(pdi.extra_json, '$.owner_department_id')),
-  JSON_UNQUOTE(JSON_EXTRACT(pdi.extra_json, '$.ownerDepartmentId')),
-  ''
-), '') AS UNSIGNED)`
-
-const PHASE_OWNER_ESTIMATE_REQUIRED_SQL = `CASE
-  WHEN LOWER(COALESCE(
-    JSON_UNQUOTE(JSON_EXTRACT(pdi.extra_json, '$.owner_estimate_required')),
-    JSON_UNQUOTE(JSON_EXTRACT(pdi.extra_json, '$.ownerEstimateRequired')),
-    ''
-  )) IN ('1', 'true', 'yes', 'y', 'on')
-    THEN 1
-  ELSE 0
-END`
-
 const OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL = `CASE
-  WHEN l.demand_id IS NOT NULL AND COALESCE(NULLIF(l.phase_key, ''), '') <> '' THEN
-    CASE
-      WHEN ${PHASE_OWNER_DEPARTMENT_ID_SQL} IS NOT NULL AND ${PHASE_OWNER_DEPARTMENT_ID_SQL} > 0
-        THEN ${PHASE_OWNER_ESTIMATE_REQUIRED_SQL}
-      ELSE 1
-    END
   WHEN COALESCE(t.owner_estimate_rule, 'NONE') = 'NONE' THEN 0
   ELSE 1
 END`
@@ -174,16 +152,6 @@ function parseOwnerEstimateRule(extraJson, fallback = 'NONE') {
     return normalizeOwnerEstimateRule(item, fallback)
   }
   return fallback
-}
-
-function parsePhaseOwnerDepartmentId(extraJson) {
-  if (!extraJson || typeof extraJson !== 'object') return null
-  const candidates = [extraJson.owner_department_id, extraJson.ownerDepartmentId]
-  for (const item of candidates) {
-    const normalized = toPositiveInt(item)
-    if (normalized) return normalized
-  }
-  return null
 }
 
 function mapIssueTypeDictRow(row) {
@@ -493,31 +461,13 @@ function isOwnerEstimateTargetRow(
   row,
   {
     isSuperAdmin = false,
-    managedDepartmentIds = [],
     teamMemberIds = [],
   } = {},
 ) {
-  const managedSet = new Set((managedDepartmentIds || []).map((id) => Number(id)))
   const teamSet = new Set((teamMemberIds || []).map((id) => Number(id)))
 
-  const isDemandLinked = Boolean(row?.demand_id)
-  const hasPhaseKey = Boolean(String(row?.phase_key || '').trim())
-  const phaseOwnerDepartmentId = toPositiveInt(row?.phase_owner_department_id)
-  const phaseOwnerEstimateRequired = Number(row?.phase_owner_estimate_required || 0) === 1
   const issueTypeOwnerEstimateRule = normalizeOwnerEstimateRule(row?.owner_estimate_rule, 'NONE')
   const rowUserId = toPositiveInt(row?.user_id)
-
-  if (isDemandLinked && hasPhaseKey && phaseOwnerDepartmentId) {
-    if (!phaseOwnerEstimateRequired) return false
-    if (isSuperAdmin) return true
-    return managedSet.has(phaseOwnerDepartmentId)
-  }
-
-  if (isDemandLinked && hasPhaseKey) {
-    if (isSuperAdmin) return true
-    if (!rowUserId) return false
-    return teamSet.has(rowUserId)
-  }
 
   if (issueTypeOwnerEstimateRule === 'NONE') return false
   if (isSuperAdmin) return true
@@ -858,8 +808,7 @@ const Work = {
          i.item_code,
          i.item_name,
          i.enabled,
-         i.sort_order,
-         i.extra_json
+         i.sort_order
        FROM config_dict_items i
        INNER JOIN config_dict_types t ON t.type_key = i.type_key
        WHERE i.type_key = ?
@@ -871,11 +820,7 @@ const Work = {
     )
     const row = rows[0]
     if (!row) return null
-    const extraJson = parseExtraJson(row.extra_json)
-    return {
-      ...row,
-      owner_department_id: parsePhaseOwnerDepartmentId(extraJson),
-    }
+    return row
   },
 
   async listItemTypes({ enabledOnly = true } = {}) {
@@ -904,24 +849,19 @@ const Work = {
          i.item_code AS phase_key,
          i.item_name AS phase_name,
          i.sort_order,
-         i.enabled,
-         i.extra_json
+         i.enabled
        FROM config_dict_items i
        INNER JOIN config_dict_types t ON t.type_key = i.type_key
        WHERE i.type_key = ? AND t.enabled = 1 ${whereEnabled}
        ORDER BY i.sort_order ASC, i.id ASC`,
       [DEMAND_PHASE_DICT_KEY],
     )
-    return (rows || []).map((row) => {
-      const extraJson = parseExtraJson(row.extra_json)
-      return {
-        phase_key: row.phase_key,
-        phase_name: row.phase_name,
-        sort_order: Number(row.sort_order) || 0,
-        enabled: Number(row.enabled) === 1 ? 1 : 0,
-        owner_department_id: parsePhaseOwnerDepartmentId(extraJson),
-      }
-    })
+    return (rows || []).map((row) => ({
+      phase_key: row.phase_key,
+      phase_name: row.phase_name,
+      sort_order: Number(row.sort_order) || 0,
+      enabled: Number(row.enabled) === 1 ? 1 : 0,
+    }))
   },
 
   async findItemTypeById(id) {
@@ -2112,10 +2052,7 @@ const Work = {
 
     const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin: false })
     const teamMemberIds = Array.isArray(scope.team_member_ids) ? scope.team_member_ids : []
-    const managedDepartmentIds = Array.isArray(scope.managed_department_ids)
-      ? scope.managed_department_ids
-      : []
-    if (teamMemberIds.length === 0 && managedDepartmentIds.length === 0) return false
+    if (teamMemberIds.length === 0) return false
 
     const [rows] = await pool.query(
       `SELECT
@@ -2123,14 +2060,9 @@ const Work = {
          l.user_id,
          l.demand_id,
          l.phase_key,
-         COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule,
-         ${PHASE_OWNER_DEPARTMENT_ID_SQL} AS phase_owner_department_id,
-         ${PHASE_OWNER_ESTIMATE_REQUIRED_SQL} AS phase_owner_estimate_required
+         COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule
        FROM work_logs l
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
-       LEFT JOIN config_dict_items pdi
-         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
-        AND pdi.item_code = l.phase_key
        WHERE l.id = ?
          AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
        LIMIT 1`,
@@ -2140,7 +2072,6 @@ const Work = {
 
     return isOwnerEstimateTargetRow(rows[0], {
       isSuperAdmin: false,
-      managedDepartmentIds,
       teamMemberIds,
     })
   },
@@ -3356,7 +3287,7 @@ const Work = {
       ? scope.managed_department_ids
       : []
 
-    if (!isSuperAdmin && teamMemberIds.length === 0 && managedDepartmentIds.length === 0) {
+    if (!isSuperAdmin && teamMemberIds.length === 0) {
       return {
         data_scope: {
           scope_type: scope.scope_type,
@@ -3517,10 +3448,6 @@ const Work = {
         candidateConditions.push('l.user_id IN (?)')
         ownerEstimateQueryParams.push(teamMemberIds)
       }
-      if (managedDepartmentIds.length > 0) {
-        candidateConditions.push(`${PHASE_OWNER_DEPARTMENT_ID_SQL} IN (?)`)
-        ownerEstimateQueryParams.push(managedDepartmentIds)
-      }
       if (candidateConditions.length === 0) {
         candidateConditions.push('1 = 0')
       }
@@ -3550,9 +3477,7 @@ const Work = {
        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
-       COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule,
-       ${PHASE_OWNER_DEPARTMENT_ID_SQL} AS phase_owner_department_id,
-       ${PHASE_OWNER_ESTIMATE_REQUIRED_SQL} AS phase_owner_estimate_required
+       COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule
      FROM work_logs l
      INNER JOIN users u ON u.id = l.user_id
      LEFT JOIN users au ON au.id = l.assigned_by_user_id
@@ -3591,9 +3516,7 @@ const Work = {
        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
-       COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule,
-       ${PHASE_OWNER_DEPARTMENT_ID_SQL} AS phase_owner_department_id,
-       ${PHASE_OWNER_ESTIMATE_REQUIRED_SQL} AS phase_owner_estimate_required
+       COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule
      FROM work_logs l
      INNER JOIN users u ON u.id = l.user_id
      LEFT JOIN users au ON au.id = l.assigned_by_user_id
@@ -3617,7 +3540,6 @@ const Work = {
       .filter((row) =>
         isOwnerEstimateTargetRow(row, {
           isSuperAdmin,
-          managedDepartmentIds,
           teamMemberIds,
         }),
       )

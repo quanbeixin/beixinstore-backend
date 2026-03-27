@@ -199,25 +199,6 @@ function isDemandOpen(status) {
   return status === 'TODO' || status === 'IN_PROGRESS'
 }
 
-function isDemandFollowupItemType(itemType) {
-  if (!itemType) return false
-  const typeKey = String(itemType?.type_key || '').trim().toUpperCase()
-  const typeName = String(itemType?.name || '').replace(/\s+/g, '')
-  if (typeKey.includes('DEMAND') && typeKey.includes('FOLLOW')) return true
-  return typeName.includes('需求跟进')
-}
-
-async function getUserDepartmentId(userId) {
-  const user = await User.findById(userId)
-  return toPositiveInt(user?.department_id)
-}
-
-function canSelectPhaseByDepartment(phaseOwnerDepartmentId, userDepartmentId) {
-  const ownerDepartmentId = toPositiveInt(phaseOwnerDepartmentId)
-  if (!ownerDepartmentId) return true
-  return ownerDepartmentId === toPositiveInt(userDepartmentId)
-}
-
 function hasPermission(req, code) {
   const access = req.userAccess || {}
   if (access.is_super_admin) return true
@@ -995,15 +976,6 @@ const createLog = async (req, res) => {
         return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
       }
 
-      if (isDemandFollowupItemType(itemType)) {
-        const userDepartmentId = await getUserDepartmentId(req.user.id)
-        if (!canSelectPhaseByDepartment(phase?.owner_department_id, userDepartmentId)) {
-          return res.status(400).json({
-            success: false,
-            message: '所选需求任务仅限责任部门成员填写；未设置责任部门的任务才可全员选择',
-          })
-        }
-      }
     } else {
       phaseKey = null
     }
@@ -1216,15 +1188,6 @@ const createOwnerAssignedLog = async (req, res) => {
         return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
       }
 
-      if (isDemandFollowupItemType(itemType)) {
-        const assigneeDepartmentId = await getUserDepartmentId(assigneeUserId)
-        if (!canSelectPhaseByDepartment(phase?.owner_department_id, assigneeDepartmentId)) {
-          return res.status(400).json({
-            success: false,
-            message: '所选需求任务仅限责任部门成员填写；未设置责任部门的任务才可全员选择',
-          })
-        }
-      }
     } else {
       phaseKey = null
     }
@@ -1425,19 +1388,6 @@ const updateLog = async (req, res) => {
         return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
       }
 
-      if (isDemandFollowupItemType(itemType)) {
-        const userDepartmentId = await getUserDepartmentId(req.user.id)
-        const keepOriginalBinding =
-          String(demandId || '') === String(existing.demand_id || '') &&
-          String(phaseKey || '') === String(normalizePhaseKey(existing.phase_key) || '') &&
-          Number(itemTypeId || 0) === Number(existing.item_type_id || 0)
-        if (!canSelectPhaseByDepartment(phase?.owner_department_id, userDepartmentId) && !keepOriginalBinding) {
-          return res.status(400).json({
-            success: false,
-            message: '所选需求任务仅限责任部门成员填写；未设置责任部门的任务才可全员选择',
-          })
-        }
-      }
     } else {
       phaseKey = null
     }
