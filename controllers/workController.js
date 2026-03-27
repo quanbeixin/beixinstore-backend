@@ -1654,6 +1654,9 @@ const createLogDailyEntry = async (req, res) => {
       description,
       createdBy: req.user.id,
     })
+    if (!entryId) {
+      return res.status(500).json({ success: false, message: '创建事项日投入失败，请稍后重试' })
+    }
     const rows = await Work.listDailyEntriesForLog(id, {
       startDate: entryDate,
       endDate: entryDate,

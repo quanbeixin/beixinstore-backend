@@ -2024,7 +2024,7 @@ const Work = {
     const normalizedEntryDate = normalizeDateOnly(entryDate)
     const normalizedActualHours = normalizeDecimal(actualHours, null)
     if (!normalizedLogId || !normalizedUserId || !normalizedEntryDate) return null
-    if (normalizedActualHours === null || normalizedActualHours <= 0) return null
+    if (normalizedActualHours === null || normalizedActualHours < 0) return null
 
     const normalizedDescription = String(description || '').trim().slice(0, 2000) || null
     const normalizedCreatedBy = toPositiveInt(createdBy)
