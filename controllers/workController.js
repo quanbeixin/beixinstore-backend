@@ -803,12 +803,20 @@ const listLogs = async (req, res) => {
     logStatusRaw === undefined || logStatusRaw === null || String(logStatusRaw).trim() === ''
       ? ''
       : String(logStatusRaw).trim().toUpperCase()
+  const unifiedStatusRaw = req.query.unified_status
+  const unifiedStatus =
+    unifiedStatusRaw === undefined || unifiedStatusRaw === null || String(unifiedStatusRaw).trim() === ''
+      ? ''
+      : String(unifiedStatusRaw).trim().toUpperCase()
   const requestedUserId = toPositiveInt(req.query.user_id)
   const teamScope = String(req.query.scope || '').trim().toLowerCase() === 'team'
   const canViewTeam = hasPermission(req, 'worklog.view.team')
 
   if (logStatus && !Work.WORK_LOG_STATUSES.includes(logStatus)) {
     return res.status(400).json({ success: false, message: 'log_status 无效' })
+  }
+  if (unifiedStatus && !Work.WORK_UNIFIED_STATUSES.includes(unifiedStatus)) {
+    return res.status(400).json({ success: false, message: 'unified_status 无效' })
   }
 
   if (requestedUserId && requestedUserId !== req.user.id && !canViewTeam) {
@@ -834,6 +842,7 @@ const listLogs = async (req, res) => {
       startDate,
       endDate,
       logStatus,
+      unifiedStatus,
       teamScopeUserId,
     })
 

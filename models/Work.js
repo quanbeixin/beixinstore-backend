@@ -9,6 +9,15 @@ const ISSUE_TYPE_DICT_KEY = 'issue_type'
 const BUSINESS_GROUP_DICT_KEY = 'business_group'
 const OWNER_ESTIMATE_RULES = ['NONE', 'OPTIONAL', 'REQUIRED']
 const TRUE_LIKE_VALUES = new Set(['1', 'true', 'yes', 'y', 'on'])
+const WORK_UNIFIED_STATUS = {
+  RISK: 'RISK',
+  OVERDUE: 'OVERDUE',
+  DUE_TODAY: 'DUE_TODAY',
+  LATE_DONE: 'LATE_DONE',
+  ON_TIME_DONE: 'ON_TIME_DONE',
+  NORMAL: 'NORMAL',
+}
+const WORK_UNIFIED_STATUS_VALUES = Object.values(WORK_UNIFIED_STATUS)
 
 const ITEM_TYPE_LOOKUP_SQL = `
   SELECT
@@ -66,7 +75,7 @@ END`
 
 const DEFAULT_DAILY_CAPACITY_HOURS = Number.isFinite(Number(process.env.DAILY_CAPACITY_HOURS))
   ? Math.max(1, Number(process.env.DAILY_CAPACITY_HOURS))
-  : 8
+  : 8.5
 
 let ensureDailyTablesPromise = null
 let isDailyTablesReady = false
@@ -393,6 +402,9 @@ function getTodayPlannedHoursSql(dateExpr = 'CURDATE()') {
 function getTodayActualHoursSql() {
   return `COALESCE(et.today_actual_hours, CASE
     WHEN l.log_date = CURDATE() THEN COALESCE(l.actual_hours, 0)
+    WHEN COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'
+      AND DATE(COALESCE(l.log_completed_at, l.updated_at)) = CURDATE()
+    THEN COALESCE(l.actual_hours, 0)
     ELSE 0
   END)`
 }
@@ -485,6 +497,94 @@ function toPercent2(value) {
   const num = Number(value || 0)
   if (!Number.isFinite(num)) return 0
   return Number(num.toFixed(2))
+}
+
+function calcAssignableHours(todayPlannedHours, todayActualHours) {
+  const planned = Number(todayPlannedHours || 0)
+  const actual = Number(todayActualHours || 0)
+  const baseline = Math.max(
+    Number.isFinite(planned) ? planned : 0,
+    Number.isFinite(actual) ? actual : 0,
+  )
+  return toDecimal1(Math.max(0, DEFAULT_DAILY_CAPACITY_HOURS - baseline))
+}
+
+function getBeijingTodayDateString() {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    })
+    const parts = formatter.formatToParts(new Date())
+    const map = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+    if (map.year && map.month && map.day) {
+      return `${map.year}-${map.month}-${map.day}`
+    }
+  } catch {
+    // ignore and fallback to local runtime date
+  }
+
+  const now = new Date()
+  const yyyy = String(now.getFullYear())
+  const mm = String(now.getMonth() + 1).padStart(2, '0')
+  const dd = String(now.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
+
+function normalizeDatePrefix(value) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text
+  if (/^\d{4}-\d{2}-\d{2}[ T]/.test(text)) return text.slice(0, 10)
+  return normalizeDateOnly(text)
+}
+
+function calcUnifiedWorkStatus({
+  logStatus,
+  expectedCompletionDate,
+  logCompletedAt,
+  updatedAt,
+  todayDate,
+  progressRisk = false,
+} = {}) {
+  const status = String(logStatus || 'IN_PROGRESS')
+    .trim()
+    .toUpperCase()
+  const today = normalizeDateOnly(todayDate) || getBeijingTodayDateString()
+  const expectedDate = normalizeDatePrefix(expectedCompletionDate)
+  const completedDate = normalizeDatePrefix(logCompletedAt) || normalizeDatePrefix(updatedAt)
+
+  if (status !== 'DONE' && Boolean(progressRisk)) {
+    return WORK_UNIFIED_STATUS.RISK
+  }
+
+  if (status !== 'DONE') {
+    if (expectedDate && expectedDate < today) return WORK_UNIFIED_STATUS.OVERDUE
+    if (expectedDate && expectedDate === today) return WORK_UNIFIED_STATUS.DUE_TODAY
+    return WORK_UNIFIED_STATUS.NORMAL
+  }
+
+  if (expectedDate && completedDate && completedDate > expectedDate) {
+    return WORK_UNIFIED_STATUS.LATE_DONE
+  }
+  return WORK_UNIFIED_STATUS.ON_TIME_DONE
+}
+
+function withUnifiedWorkStatus(row, { todayDate, progressRisk } = {}) {
+  if (!row || typeof row !== 'object') return row
+  return {
+    ...row,
+    unified_status: calcUnifiedWorkStatus({
+      logStatus: row.log_status,
+      expectedCompletionDate: row.expected_completion_date,
+      logCompletedAt: row.log_completed_at,
+      updatedAt: row.updated_at,
+      todayDate,
+      progressRisk: progressRisk ?? row.progress_risk,
+    }),
+  }
 }
 
 function calcVarianceRate(actualHours, estimateHours) {
@@ -706,6 +806,7 @@ const Work = {
   DEMAND_STATUSES,
   DEMAND_PRIORITIES,
   WORK_LOG_STATUSES,
+  WORK_UNIFIED_STATUSES: WORK_UNIFIED_STATUS_VALUES,
   WORK_LOG_TASK_SOURCES,
 
   async isDepartmentManager(userId) {
@@ -1018,7 +1119,11 @@ const Work = {
       params,
     )
 
-    return { rows, total }
+    const todayDate = getBeijingTodayDateString()
+    const normalizedRows = (rows || []).map((row) =>
+      withUnifiedWorkStatus(row, { todayDate }),
+    )
+    return { rows: normalizedRows, total }
   },
 
   async findDemandById(id) {
@@ -1046,7 +1151,8 @@ const Work = {
        WHERE d.id = ?`,
       [id],
     )
-    return rows[0] || null
+    const todayDate = getBeijingTodayDateString()
+    return withUnifiedWorkStatus(rows[0] || null, { todayDate })
   },
 
   async createDemand({
@@ -1383,6 +1489,7 @@ const Work = {
     startDate = '',
     endDate = '',
     logStatus = '',
+    unifiedStatus = '',
     teamScopeUserId = null,
   } = {}) {
     const offset = (page - 1) * pageSize
@@ -1439,7 +1546,7 @@ const Work = {
     }
 
     const whereSql = conditions.join(' AND ')
-    const listSql = `
+    const listBaseSql = `
       SELECT
         l.id,
         l.user_id,
@@ -1475,10 +1582,25 @@ const Work = {
         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
        AND pdi.item_code = l.phase_key
       WHERE ${whereSql}
-      ORDER BY l.log_date DESC, l.id DESC
-      LIMIT ? OFFSET ?`
+      ORDER BY l.log_date DESC, l.id DESC`
 
-    const [rows] = await pool.query(listSql, [...params, pageSize, offset])
+    const todayDate = getBeijingTodayDateString()
+    const normalizedUnifiedStatus = String(unifiedStatus || '').trim().toUpperCase()
+
+    if (normalizedUnifiedStatus && WORK_UNIFIED_STATUS_VALUES.includes(normalizedUnifiedStatus)) {
+      const [allRows] = await pool.query(listBaseSql, params)
+      const normalizedRows = (allRows || []).map((row) =>
+        withUnifiedWorkStatus(row, { todayDate }),
+      )
+      const filteredRows = normalizedRows.filter(
+        (row) => String(row.unified_status || '').toUpperCase() === normalizedUnifiedStatus,
+      )
+      const total = filteredRows.length
+      const pagedRows = filteredRows.slice(offset, offset + pageSize)
+      return { rows: pagedRows, total }
+    }
+
+    const [rows] = await pool.query(`${listBaseSql} LIMIT ? OFFSET ?`, [...params, pageSize, offset])
     const [[{ total }]] = await pool.query(
       `SELECT COUNT(*) AS total
        FROM work_logs l
@@ -1486,8 +1608,10 @@ const Work = {
        WHERE ${whereSql}`,
       params,
     )
-
-    return { rows, total }
+    const normalizedRows = (rows || []).map((row) =>
+      withUnifiedWorkStatus(row, { todayDate }),
+    )
+    return { rows: normalizedRows, total }
   },
 
   async findLogById(id) {
@@ -2201,18 +2325,33 @@ const Work = {
       [normalizedUserId],
     )
 
+    const todayDate = getBeijingTodayDateString()
+
     const activeItems = (activeItemsRaw || []).map((item) => {
       const todayPlanned = Number(item.today_planned_hours || 0)
       const todayActual = Number(item.today_actual_hours || 0)
       const cumulativeActual = Number(item.cumulative_actual_hours || item.actual_hours || 0)
-      return {
+      const progress = calcCrossDayProgress({
+        logStatus: item.log_status,
+        expectedStartDate: item.expected_start_date,
+        expectedCompletionDate: item.expected_completion_date,
+        todayDate,
+        personalEstimateHours: item.personal_estimate_hours,
+        cumulativeActualHours: cumulativeActual,
+      })
+      const normalizedItem = {
         ...item,
         today_planned_hours: toDecimal1(todayPlanned),
         today_actual_hours: toDecimal1(todayActual),
         cumulative_actual_hours: toDecimal1(cumulativeActual),
         today_scheduled: todayPlanned > 0,
         today_filled: todayActual > 0,
+        ...progress,
       }
+      return withUnifiedWorkStatus(normalizedItem, {
+        todayDate,
+        progressRisk: progress.progress_risk,
+      })
     })
 
     const [todaySummaryRows] = await pool.query(
@@ -2251,7 +2390,7 @@ const Work = {
     )
     const scheduledItemCount = Number(todaySummary.scheduled_item_count_today || 0)
     const filledItemCount = Number(todaySummary.filled_item_count_today || 0)
-    const assignableHours = toDecimal1(Math.max(0, DEFAULT_DAILY_CAPACITY_HOURS - Number(todayPlannedHours || 0)))
+    const assignableHours = calcAssignableHours(todayPlannedHours, todayActualHours)
 
     const [recentLogs] = await pool.query(
       `SELECT
@@ -3002,12 +3141,28 @@ const Work = {
       if (!activeItemsByUser.has(userId)) {
         activeItemsByUser.set(userId, [])
       }
+      const cumulativeActual = toDecimal1(row.cumulative_actual_hours)
+      const progress = calcCrossDayProgress({
+        logStatus: row.log_status,
+        expectedStartDate: row.expected_start_date,
+        expectedCompletionDate: row.expected_completion_date,
+        todayDate,
+        personalEstimateHours: row.personal_estimate_hours,
+        cumulativeActualHours: cumulativeActual,
+      })
       const normalizedRow = {
         ...row,
         today_planned_hours: toDecimal1(row.today_planned_hours),
         today_actual_hours: toDecimal1(row.today_actual_hours),
+        cumulative_actual_hours: cumulativeActual,
+        ...progress,
       }
-      activeItemsByUser.get(userId).push(normalizedRow)
+      activeItemsByUser.get(userId).push(
+        withUnifiedWorkStatus(normalizedRow, {
+          todayDate,
+          progressRisk: progress.progress_risk,
+        }),
+      )
     })
 
     let activeItemCount = 0
@@ -3027,7 +3182,7 @@ const Work = {
       const todayActualHours = toDecimal1(dailyAgg.today_actual_hours)
       const todayScheduled = Number(todayPlannedHours || 0) > 0
       const todayFilled = todayScheduled && Number(todayActualHours || 0) > 0
-      const assignableHours = toDecimal1(Math.max(0, DEFAULT_DAILY_CAPACITY_HOURS - Number(todayPlannedHours || 0)))
+      const assignableHours = calcAssignableHours(todayPlannedHours, todayActualHours)
 
       activeItemCount += activeItems.length
       totalPlannedHoursToday += Number(todayPlannedHours || 0)
@@ -3101,7 +3256,7 @@ const Work = {
         cumulativeActualHours: item.cumulative_actual_hours,
       })
 
-      return {
+      const mappedItem = {
         id: Number(item.id),
         user_id: Number(item.user_id),
         username: usernameById.get(Number(item.user_id)) || `用户${Number(item.user_id)}`,
@@ -3120,6 +3275,10 @@ const Work = {
         cumulative_actual_hours: toDecimal1(item.cumulative_actual_hours),
         ...progress,
       }
+      return withUnifiedWorkStatus(mappedItem, {
+        todayDate,
+        progressRisk: progress.progress_risk,
+      })
     }
 
     const yesterdayCheckRank = {
@@ -3394,7 +3553,7 @@ const Work = {
         const todayActualHours = toDecimal1(agg.today_actual_hours)
         const todayScheduled = Number(todayPlannedHours || 0) > 0
         const todayFilled = todayScheduled && Number(todayActualHours || 0) > 0
-        const assignableHours = toDecimal1(Math.max(0, DEFAULT_DAILY_CAPACITY_HOURS - Number(todayPlannedHours || 0)))
+        const assignableHours = calcAssignableHours(todayPlannedHours, todayActualHours)
 
         totalPlannedHoursToday += Number(todayPlannedHours || 0)
         totalActualHoursToday += Number(todayActualHours || 0)
@@ -3536,6 +3695,7 @@ const Work = {
       ;[ownerEstimateItems] = await pool.query(ownerEstimateFallbackSql, ownerEstimateQueryParams)
     }
 
+    const todayDate = getBeijingTodayDateString()
     ownerEstimateItems = ownerEstimateItems
       .filter((row) =>
         isOwnerEstimateTargetRow(row, {
@@ -3543,6 +3703,7 @@ const Work = {
           teamMemberIds,
         }),
       )
+      .map((row) => withUnifiedWorkStatus(row, { todayDate }))
       .slice(0, 120)
 
     return {
