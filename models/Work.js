@@ -4310,6 +4310,71 @@ const Work = {
       no_fill_members: ownerWorkbench.no_fill_members,
     }
   },
+
+  // 方案5：混合模式冲突检测
+  async checkActualHoursConflict(logId, newActualHours) {
+    if (!newActualHours || newActualHours === 0) return { hasConflict: false }
+
+    const [entries] = await pool.query(
+      'SELECT COUNT(*) as count FROM work_log_daily_entries WHERE log_id = ?',
+      [logId]
+    )
+
+    if (entries[0].count > 0) {
+      return {
+        hasConflict: true,
+        message: '该工作已有每日实际用时记录，不能一次性填写总实际用时。请删除每日记录后再试，或继续使用每日记录模式。'
+      }
+    }
+
+    return { hasConflict: false }
+  },
+
+  // 方案7：预估修改后重新计算每日计划
+  async recalculateDailyPlans(logId) {
+    const [logs] = await pool.query(
+      'SELECT personal_estimate_hours, expected_start_date, expected_completion_date FROM work_logs WHERE id = ?',
+      [logId]
+    )
+
+    if (logs.length === 0) return
+
+    const log = logs[0]
+    const today = new Date().toISOString().split('T')[0]
+
+    // 删除今天及未来的自动计划
+    await pool.query(
+      'DELETE FROM work_log_daily_plans WHERE log_id = ? AND plan_date >= ? AND source = ?',
+      [logId, today, 'AUTO']
+    )
+
+    // 重新生成每日计划
+    if (log.expected_start_date && log.expected_completion_date && log.personal_estimate_hours > 0) {
+      const startDate = new Date(Math.max(new Date(log.expected_start_date), new Date(today)))
+      const endDate = new Date(log.expected_completion_date)
+
+      // 计算工作日数量（排除周末）
+      let workDays = 0
+      for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+        if (d.getDay() !== 0 && d.getDay() !== 6) workDays++
+      }
+
+      if (workDays > 0) {
+        const dailyHours = (log.personal_estimate_hours / workDays).toFixed(1)
+
+        // 插入新的每日计划
+        for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+          if (d.getDay() !== 0 && d.getDay() !== 6) {
+            const planDate = d.toISOString().split('T')[0]
+            await pool.query(
+              'INSERT INTO work_log_daily_plans (log_id, plan_date, planned_hours, source) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE planned_hours = ?, source = ?',
+              [logId, planDate, dailyHours, 'AUTO', dailyHours, 'AUTO']
+            )
+          }
+        }
+      }
+    }
+  },
 }
 
 module.exports = Work
