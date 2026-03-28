@@ -2,6 +2,15 @@
 const User = require('../models/User')
 const Workflow = require('../models/Workflow')
 
+const NOTIFICATION_SCENES = new Set([
+  'node_assign',
+  'node_reject',
+  'task_assign',
+  'task_deadline',
+  'task_complete',
+  'node_complete',
+])
+
 function toPositiveInt(value) {
   const num = Number(value)
   return Number.isInteger(num) && num > 0 ? num : null
@@ -176,6 +185,56 @@ function normalizePriority(value) {
   return Work.DEMAND_PRIORITIES.includes(priority) ? priority : 'P2'
 }
 
+function normalizeDemandManagementMode(value) {
+  const mode = String(value || 'simple').trim().toLowerCase()
+  return Work.DEMAND_MANAGEMENT_MODES.includes(mode) ? mode : 'simple'
+}
+
+function normalizeDemandHealthStatus(value) {
+  const status = String(value || 'green').trim().toLowerCase()
+  return Work.DEMAND_HEALTH_STATUSES.includes(status) ? status : 'green'
+}
+
+function normalizeTemplateNodeConfig(value) {
+  if (value === undefined) return { ok: true, value: undefined }
+  if (value === null) return { ok: true, value: [] }
+  if (typeof value === 'object') return { ok: true, value }
+  if (typeof value !== 'string') return { ok: false, value: null }
+  const text = value.trim()
+  if (!text) return { ok: true, value: [] }
+  try {
+    const parsed = JSON.parse(text)
+    if (parsed && typeof parsed === 'object') return { ok: true, value: parsed }
+    return { ok: false, value: null }
+  } catch (err) {
+    return { ok: false, value: null }
+  }
+}
+
+function normalizeNotificationReceiverRoles(value) {
+  if (value === undefined) return { ok: true, value: undefined }
+  if (value === null) return { ok: true, value: [] }
+
+  let list = value
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (!text) return { ok: true, value: [] }
+    try {
+      list = JSON.parse(text)
+    } catch (err) {
+      return { ok: false, value: null }
+    }
+  }
+
+  if (!Array.isArray(list)) return { ok: false, value: null }
+
+  const normalized = list
+    .map((item) => normalizeText(item, 64))
+    .filter(Boolean)
+
+  return { ok: true, value: normalized }
+}
+
 function normalizePriorityOrder(value) {
   const order = String(value || '').trim().toLowerCase()
   if (!order) return ''
@@ -193,6 +252,14 @@ function normalizeHours(value, fallback = null) {
   const num = Number(value)
   if (!Number.isFinite(num)) return fallback
   return Number(num.toFixed(1))
+}
+
+function parseOptionalNonNegativeNumber(value, { scale = 2 } = {}) {
+  if (value === undefined) return { ok: true, value: undefined }
+  if (value === null || value === '') return { ok: true, value: null }
+  const num = Number(value)
+  if (!Number.isFinite(num) || num < 0) return { ok: false, value: null }
+  return { ok: true, value: Number(num.toFixed(scale)) }
 }
 
 function isDemandOpen(status) {
@@ -343,6 +410,196 @@ const createWorkItemType = async (req, res) => {
   }
 }
 
+const listProjectTemplates = async (req, res) => {
+  const page = toPositiveInt(req.query.page) || 1
+  const pageSize = toPositiveInt(req.query.pageSize) || 20
+  const keyword = normalizeText(req.query.keyword, 100)
+  const statusRaw = req.query.status
+  let status = null
+  if (statusRaw !== undefined && statusRaw !== null && String(statusRaw).trim() !== '') {
+    if (String(statusRaw) !== '0' && String(statusRaw) !== '1') {
+      return res.status(400).json({ success: false, message: 'status 仅支持 0 或 1' })
+    }
+    status = Number(statusRaw)
+  }
+
+  try {
+    const data = await Work.listProjectTemplates({
+      page,
+      pageSize,
+      keyword,
+      status,
+    })
+    return res.json({
+      success: true,
+      data: {
+        list: data.rows,
+        total: data.total,
+        page: data.page,
+        pageSize: data.pageSize,
+      },
+    })
+  } catch (err) {
+    console.error('获取项目模板列表失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getProjectTemplateById = async (req, res) => {
+  const templateId = toPositiveInt(req.params.id)
+  if (!templateId) {
+    return res.status(400).json({ success: false, message: '模板 ID 无效' })
+  }
+
+  try {
+    const template = await Work.findProjectTemplateById(templateId)
+    if (!template) {
+      return res.status(404).json({ success: false, message: '模板不存在' })
+    }
+    return res.json({ success: true, data: template })
+  } catch (err) {
+    console.error('获取项目模板详情失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const createProjectTemplate = async (req, res) => {
+  const name = normalizeText(req.body.name, 100)
+  const description = normalizeText(req.body.description, 4000)
+  const status = toBool(req.body.status, true) ? 1 : 0
+  const nodeConfigResult = normalizeTemplateNodeConfig(req.body.node_config)
+
+  if (!name) {
+    return res.status(400).json({ success: false, message: '模板名称不能为空' })
+  }
+  if (!nodeConfigResult.ok) {
+    return res.status(400).json({ success: false, message: 'node_config 必须是 JSON 对象/数组' })
+  }
+
+  try {
+    const templateId = await Work.createProjectTemplate({
+      name,
+      description,
+      nodeConfig: nodeConfigResult.value || [],
+      status,
+    })
+    const created = await Work.findProjectTemplateById(templateId)
+    return res.status(201).json({ success: true, message: '模板创建成功', data: created })
+  } catch (err) {
+    console.error('创建项目模板失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const updateProjectTemplate = async (req, res) => {
+  const templateId = toPositiveInt(req.params.id)
+  if (!templateId) {
+    return res.status(400).json({ success: false, message: '模板 ID 无效' })
+  }
+
+  try {
+    const existing = await Work.findProjectTemplateById(templateId)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '模板不存在' })
+    }
+
+    const name = req.body.name === undefined ? existing.name : normalizeText(req.body.name, 100)
+    const description =
+      req.body.description === undefined ? existing.description : normalizeText(req.body.description, 4000)
+    const status = req.body.status === undefined ? existing.status : (toBool(req.body.status, true) ? 1 : 0)
+    const nodeConfigResult = normalizeTemplateNodeConfig(
+      req.body.node_config === undefined ? existing.node_config : req.body.node_config,
+    )
+
+    if (!name) {
+      return res.status(400).json({ success: false, message: '模板名称不能为空' })
+    }
+    if (!nodeConfigResult.ok) {
+      return res.status(400).json({ success: false, message: 'node_config 必须是 JSON 对象/数组' })
+    }
+
+    await Work.updateProjectTemplate(templateId, {
+      name,
+      description,
+      nodeConfig: nodeConfigResult.value || [],
+      status,
+    })
+
+    const updated = await Work.findProjectTemplateById(templateId)
+    return res.json({ success: true, message: '模板更新成功', data: updated })
+  } catch (err) {
+    console.error('更新项目模板失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listNotificationConfigs = async (req, res) => {
+  try {
+    const rows = await Work.listNotificationConfigs()
+    return res.json({ success: true, data: rows })
+  } catch (err) {
+    console.error('获取通知配置失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const updateNotificationConfig = async (req, res) => {
+  const scene = normalizeText(req.params.scene, 50).toLowerCase()
+  if (!scene || !NOTIFICATION_SCENES.has(scene)) {
+    return res.status(400).json({ success: false, message: 'scene 无效或不在支持范围内' })
+  }
+
+  const receiverRolesResult = normalizeNotificationReceiverRoles(req.body.receiver_roles)
+  if (!receiverRolesResult.ok) {
+    return res.status(400).json({ success: false, message: 'receiver_roles 必须是字符串数组或 JSON 数组' })
+  }
+
+  const advanceDaysRaw = req.body.advance_days
+  const hasAdvanceDays = advanceDaysRaw !== undefined
+  let parsedAdvanceDays = null
+  if (hasAdvanceDays) {
+    const num = Number(advanceDaysRaw)
+    if (!Number.isInteger(num) || num < 0 || num > 30) {
+      return res.status(400).json({ success: false, message: 'advance_days 仅支持 0-30 的整数' })
+    }
+    parsedAdvanceDays = num
+  }
+
+  try {
+    const existing = await Work.findNotificationConfigByScene(scene)
+    const nextEnabled = req.body.enabled === undefined ? Number(existing?.enabled || 1) : (toBool(req.body.enabled, true) ? 1 : 0)
+    const nextRoles =
+      receiverRolesResult.value === undefined
+        ? Array.isArray(existing?.receiver_roles)
+          ? existing.receiver_roles
+          : []
+        : receiverRolesResult.value
+    const nextAdvanceDays =
+      parsedAdvanceDays === null ? Number(existing?.advance_days || 0) : parsedAdvanceDays
+
+    await Work.upsertNotificationConfig(scene, {
+      enabled: nextEnabled,
+      receiverRoles: nextRoles,
+      advanceDays: nextAdvanceDays,
+    })
+
+    const updated = await Work.findNotificationConfigByScene(scene)
+    return res.json({
+      success: true,
+      message: '通知配置更新成功',
+      data: updated || {
+        scene,
+        enabled: nextEnabled,
+        receiver_roles: nextRoles,
+        advance_days: nextAdvanceDays,
+      },
+    })
+  } catch (err) {
+    console.error('更新通知配置失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const listDemands = async (req, res) => {
   const page = toPositiveInt(req.query.page) || 1
   const pageSize = toPositiveInt(req.query.pageSize) || 10
@@ -438,6 +695,85 @@ const getDemandById = async (req, res) => {
   }
 }
 
+const listDemandMembers = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    const members = await Work.listDemandMembers(demandId)
+    return res.json({ success: true, data: members })
+  } catch (err) {
+    console.error('获取项目成员失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const addDemandMember = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const userId = toPositiveInt(req.body.user_id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!userId) {
+    return res.status(400).json({ success: false, message: 'user_id 无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const user = await User.findById(userId)
+    if (!user) {
+      return res.status(400).json({ success: false, message: '成员用户不存在' })
+    }
+
+    const member = await Work.addDemandMember(demandId, userId)
+    return res.status(201).json({ success: true, message: '项目成员添加成功', data: member })
+  } catch (err) {
+    console.error('添加项目成员失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const removeDemandMember = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const userId = toPositiveInt(req.params.userId)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!userId) {
+    return res.status(400).json({ success: false, message: 'userId 无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const affectedRows = await Work.removeDemandMember(demandId, userId)
+    if (affectedRows === 0) {
+      return res.status(404).json({ success: false, message: '成员关系不存在' })
+    }
+    return res.json({
+      success: true,
+      message: '项目成员移除成功',
+      data: { demand_id: demandId, user_id: userId },
+    })
+  } catch (err) {
+    console.error('移除项目成员失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const createDemand = async (req, res) => {
   const demandId = normalizeDemandId(req.body.id)
   const name = normalizeText(req.body.name, 200)
@@ -448,6 +784,23 @@ const createDemand = async (req, res) => {
       ? toPositiveInt(req.user?.id)
       : parsedOwnerUserId
   const businessGroupCode = normalizeBusinessGroupCode(req.body.business_group_code)
+  const managementMode = normalizeDemandManagementMode(req.body.management_mode)
+  const templateIdRaw = req.body.template_id
+  const templateId =
+    templateIdRaw === undefined || templateIdRaw === null || templateIdRaw === ''
+      ? null
+      : toPositiveInt(templateIdRaw)
+  const projectManagerRaw = req.body.project_manager
+  const projectManager =
+    projectManagerRaw === undefined || projectManagerRaw === null || projectManagerRaw === ''
+      ? null
+      : toPositiveInt(projectManagerRaw)
+  const healthStatus = normalizeDemandHealthStatus(req.body.health_status)
+  const actualStartTimeRaw = req.body.actual_start_time
+  const actualStartTime = normalizeDateTime(actualStartTimeRaw)
+  const actualEndTimeRaw = req.body.actual_end_time
+  const actualEndTime = normalizeDateTime(actualEndTimeRaw)
+  const docLink = normalizeText(req.body.doc_link, 500)
   const expectedReleaseDateRaw = req.body.expected_release_date
   const expectedReleaseDate = normalizeDate(expectedReleaseDateRaw)
   const status = normalizeStatus(req.body.status)
@@ -472,6 +825,35 @@ const createDemand = async (req, res) => {
 
   if (businessGroupCode === '') {
     return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
+  }
+  if (templateIdRaw !== undefined && templateId === null) {
+    return res.status(400).json({ success: false, message: 'template_id 无效' })
+  }
+  if (projectManagerRaw !== undefined && projectManager === null) {
+    return res.status(400).json({ success: false, message: 'project_manager 无效' })
+  }
+  if (
+    actualStartTimeRaw !== undefined &&
+    actualStartTimeRaw !== null &&
+    String(actualStartTimeRaw).trim() !== '' &&
+    !actualStartTime
+  ) {
+    return res
+      .status(400)
+      .json({ success: false, message: 'actual_start_time 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm[:ss]' })
+  }
+  if (
+    actualEndTimeRaw !== undefined &&
+    actualEndTimeRaw !== null &&
+    String(actualEndTimeRaw).trim() !== '' &&
+    !actualEndTime
+  ) {
+    return res
+      .status(400)
+      .json({ success: false, message: 'actual_end_time 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm[:ss]' })
+  }
+  if (actualStartTime && actualEndTime && actualStartTime > actualEndTime) {
+    return res.status(400).json({ success: false, message: '实际时间范围不合法：actual_start_time 不能大于 actual_end_time' })
   }
   if (
     expectedReleaseDateRaw !== undefined &&
@@ -499,10 +881,31 @@ const createDemand = async (req, res) => {
       }
     }
 
+    if (templateId) {
+      const template = await Work.findProjectTemplateById(templateId, { enabledOnly: true })
+      if (!template) {
+        return res.status(400).json({ success: false, message: 'template_id 对应模板不存在或未启用' })
+      }
+    }
+
+    if (projectManager) {
+      const manager = await User.findById(projectManager)
+      if (!manager) {
+        return res.status(400).json({ success: false, message: 'project_manager 用户不存在' })
+      }
+    }
+
     const finalDemandId = await Work.createDemand({
       demandId,
       name,
       ownerUserId,
+      managementMode,
+      templateId,
+      projectManager,
+      healthStatus,
+      actualStartTime: actualStartTime || null,
+      actualEndTime: actualEndTime || null,
+      docLink: docLink || null,
       businessGroupCode,
       expectedReleaseDate: expectedReleaseDate || null,
       status,
@@ -586,9 +989,78 @@ const updateDemand = async (req, res) => {
     const ownerUserId = parsedOwnerUserId === undefined ? existing.owner_user_id : parsedOwnerUserId
     const status = req.body.status ? normalizeStatus(req.body.status) : existing.status
     const priority = req.body.priority ? normalizePriority(req.body.priority) : existing.priority
+    const managementMode =
+      req.body.management_mode === undefined
+        ? normalizeDemandManagementMode(existing.management_mode)
+        : normalizeDemandManagementMode(req.body.management_mode)
+    const healthStatus =
+      req.body.health_status === undefined
+        ? normalizeDemandHealthStatus(existing.health_status)
+        : normalizeDemandHealthStatus(req.body.health_status)
+    const parsedTemplateId =
+      req.body.template_id === undefined
+        ? undefined
+        : req.body.template_id === null || String(req.body.template_id).trim() === ''
+          ? null
+          : toPositiveInt(req.body.template_id)
+    if (req.body.template_id !== undefined && req.body.template_id !== null && req.body.template_id !== '' && !parsedTemplateId) {
+      return res.status(400).json({ success: false, message: 'template_id 无效' })
+    }
+    const templateId = parsedTemplateId === undefined ? toPositiveInt(existing.template_id) : parsedTemplateId
+    const parsedProjectManager =
+      req.body.project_manager === undefined
+        ? undefined
+        : req.body.project_manager === null || String(req.body.project_manager).trim() === ''
+          ? null
+          : toPositiveInt(req.body.project_manager)
+    if (
+      req.body.project_manager !== undefined &&
+      req.body.project_manager !== null &&
+      req.body.project_manager !== '' &&
+      !parsedProjectManager
+    ) {
+      return res.status(400).json({ success: false, message: 'project_manager 无效' })
+    }
+    const projectManager =
+      parsedProjectManager === undefined ? toPositiveInt(existing.project_manager) : parsedProjectManager
     const parsedBusinessGroupCode = normalizeBusinessGroupCode(req.body.business_group_code)
     const businessGroupCode =
       parsedBusinessGroupCode === undefined ? existing.business_group_code : parsedBusinessGroupCode
+    let actualStartTime = existing.actual_start_time || null
+    if (req.body.actual_start_time !== undefined) {
+      const raw = req.body.actual_start_time
+      if (raw === null || String(raw).trim() === '') {
+        actualStartTime = null
+      } else {
+        const normalized = normalizeDateTime(raw)
+        if (!normalized) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'actual_start_time 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm[:ss]' })
+        }
+        actualStartTime = normalized
+      }
+    }
+    let actualEndTime = existing.actual_end_time || null
+    if (req.body.actual_end_time !== undefined) {
+      const raw = req.body.actual_end_time
+      if (raw === null || String(raw).trim() === '') {
+        actualEndTime = null
+      } else {
+        const normalized = normalizeDateTime(raw)
+        if (!normalized) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'actual_end_time 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm[:ss]' })
+        }
+        actualEndTime = normalized
+      }
+    }
+    if (actualStartTime && actualEndTime && actualStartTime > actualEndTime) {
+      return res.status(400).json({ success: false, message: '实际时间范围不合法：actual_start_time 不能大于 actual_end_time' })
+    }
+    const docLink =
+      req.body.doc_link === undefined ? existing.doc_link : normalizeText(req.body.doc_link, 500) || null
     let expectedReleaseDate = existing.expected_release_date || null
     if (req.body.expected_release_date !== undefined) {
       const raw = req.body.expected_release_date
@@ -627,6 +1099,20 @@ const updateDemand = async (req, res) => {
       }
     }
 
+    if (templateId) {
+      const template = await Work.findProjectTemplateById(templateId, { enabledOnly: true })
+      if (!template) {
+        return res.status(400).json({ success: false, message: 'template_id 对应模板不存在或未启用' })
+      }
+    }
+
+    if (projectManager) {
+      const manager = await User.findById(projectManager)
+      if (!manager) {
+        return res.status(400).json({ success: false, message: 'project_manager 用户不存在' })
+      }
+    }
+
     const completedAt = isDemandOpen(status)
       ? null
       : req.body.completed_at || existing.completed_at || new Date()
@@ -634,6 +1120,13 @@ const updateDemand = async (req, res) => {
     await Work.updateDemand(demandId, {
       name,
       ownerUserId,
+      managementMode,
+      templateId: templateId || null,
+      projectManager: projectManager || null,
+      healthStatus,
+      actualStartTime,
+      actualEndTime,
+      docLink,
       businessGroupCode,
       expectedReleaseDate,
       status,
@@ -785,6 +1278,31 @@ const purgeArchivedDemand = async (req, res) => {
       return res.status(400).json({ success: false, message: '仅已归档需求可彻底删除' })
     }
     console.error('彻底删除归档需求失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const restoreArchivedDemand = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  try {
+    const result = await Work.restoreArchivedDemand(demandId)
+    return res.json({
+      success: true,
+      message: '归档需求已恢复',
+      data: result,
+    })
+  } catch (err) {
+    if (err?.code === 'DEMAND_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+    if (err?.code === 'DEMAND_NOT_ARCHIVED') {
+      return res.status(400).json({ success: false, message: '仅已归档需求可恢复' })
+    }
+    console.error('恢复归档需求失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -2093,6 +2611,433 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
   }
 }
 
+const rejectDemandWorkflowCurrentNode = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  const rejectReason = normalizeText(req.body.reject_reason, 2000)
+  const comment = normalizeText(req.body.comment, 500)
+  if (!rejectReason) {
+    return res.status(400).json({ success: false, message: '驳回原因不能为空' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.rejectCurrentNode({
+      demandId,
+      operatorUserId: req.user.id,
+      rejectReason,
+      comment,
+    })
+
+    return res.json({
+      success: true,
+      message: '当前节点已驳回到上一节点',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_PREVIOUS_NODE_NOT_FOUND') {
+      return res.status(400).json({ success: false, message: '当前已是首节点，无法驳回' })
+    }
+    if (err?.code === 'REJECT_REASON_REQUIRED') {
+      return res.status(400).json({ success: false, message: '驳回原因不能为空' })
+    }
+    console.error('驳回流程节点失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const forceCompleteDemandWorkflowCurrentNode = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  const comment = normalizeText(req.body.comment, 500)
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.submitCurrentNode({
+      demandId,
+      operatorUserId: req.user.id,
+      comment: comment || '管理员强制完成当前节点',
+      sourceType: 'FORCE',
+      skipAssigneeCheck: true,
+    })
+
+    return res.json({
+      success: true,
+      message: '当前节点已强制完成',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    console.error('强制完成流程节点失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const updateDemandWorkflowNodeHours = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const nodeKey = normalizePhaseKey(req.params.nodeKey)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!nodeKey) {
+    return res.status(400).json({ success: false, message: '节点标识无效' })
+  }
+
+  const ownerHours = parseOptionalNonNegativeNumber(req.body.owner_estimated_hours, { scale: 2 })
+  const personalHours = parseOptionalNonNegativeNumber(req.body.personal_estimated_hours, { scale: 2 })
+  const actualHours = parseOptionalNonNegativeNumber(req.body.actual_hours, { scale: 2 })
+  const plannedStartRaw = req.body.planned_start_time
+  const plannedStart = normalizeDateTime(plannedStartRaw)
+  const plannedEndRaw = req.body.planned_end_time
+  const plannedEnd = normalizeDateTime(plannedEndRaw)
+  const actualStartRaw = req.body.actual_start_time
+  const actualStart = normalizeDateTime(actualStartRaw)
+  const actualEndRaw = req.body.actual_end_time
+  const actualEnd = normalizeDateTime(actualEndRaw)
+  const rejectReason =
+    req.body.reject_reason === undefined ? undefined : normalizeText(req.body.reject_reason, 2000) || null
+  const comment = normalizeText(req.body.comment, 500)
+
+  if (!ownerHours.ok) return res.status(400).json({ success: false, message: 'owner_estimated_hours 不能小于 0' })
+  if (!personalHours.ok) return res.status(400).json({ success: false, message: 'personal_estimated_hours 不能小于 0' })
+  if (!actualHours.ok) return res.status(400).json({ success: false, message: 'actual_hours 不能小于 0' })
+  if (plannedStartRaw !== undefined && plannedStartRaw !== null && String(plannedStartRaw).trim() !== '' && !plannedStart) {
+    return res.status(400).json({ success: false, message: 'planned_start_time 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm[:ss]' })
+  }
+  if (plannedEndRaw !== undefined && plannedEndRaw !== null && String(plannedEndRaw).trim() !== '' && !plannedEnd) {
+    return res.status(400).json({ success: false, message: 'planned_end_time 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm[:ss]' })
+  }
+  if (actualStartRaw !== undefined && actualStartRaw !== null && String(actualStartRaw).trim() !== '' && !actualStart) {
+    return res.status(400).json({ success: false, message: 'actual_start_time 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm[:ss]' })
+  }
+  if (actualEndRaw !== undefined && actualEndRaw !== null && String(actualEndRaw).trim() !== '' && !actualEnd) {
+    return res.status(400).json({ success: false, message: 'actual_end_time 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm[:ss]' })
+  }
+  if (plannedStart && plannedEnd && plannedStart > plannedEnd) {
+    return res.status(400).json({ success: false, message: '计划时间范围不合法：planned_start_time 不能大于 planned_end_time' })
+  }
+  if (actualStart && actualEnd && actualStart > actualEnd) {
+    return res.status(400).json({ success: false, message: '实际时间范围不合法：actual_start_time 不能大于 actual_end_time' })
+  }
+
+  const hasAnyField =
+    req.body.owner_estimated_hours !== undefined ||
+    req.body.personal_estimated_hours !== undefined ||
+    req.body.actual_hours !== undefined ||
+    req.body.planned_start_time !== undefined ||
+    req.body.planned_end_time !== undefined ||
+    req.body.actual_start_time !== undefined ||
+    req.body.actual_end_time !== undefined ||
+    req.body.reject_reason !== undefined
+  if (!hasAnyField) {
+    return res.status(400).json({ success: false, message: '至少提供一个要更新的字段' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.updateNodeHours({
+      demandId,
+      nodeKey,
+      ownerEstimatedHours: ownerHours.value,
+      personalEstimatedHours: personalHours.value,
+      actualHours: actualHours.value,
+      plannedStartTime: plannedStart,
+      plannedEndTime: plannedEnd,
+      actualStartTime: actualStart,
+      actualEndTime: actualEnd,
+      rejectReason,
+      operatorUserId: req.user.id,
+      comment,
+    })
+
+    return res.json({
+      success: true,
+      message: '节点工时更新成功',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_NODE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程节点不存在' })
+    }
+    if (err?.code === 'WORKFLOW_NODE_HOURS_INVALID_INPUT') {
+      return res.status(400).json({ success: false, message: '节点工时参数不合法' })
+    }
+    if (err?.code === 'WORKFLOW_NODE_HOURS_NO_FIELDS') {
+      return res.status(400).json({ success: false, message: '至少提供一个要更新的字段' })
+    }
+    console.error('更新流程节点工时失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const updateDemandWorkflowTaskHours = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const taskId = toPositiveInt(req.params.taskId)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!taskId) {
+    return res.status(400).json({ success: false, message: 'taskId 无效' })
+  }
+
+  const personalHours = parseOptionalNonNegativeNumber(req.body.personal_estimated_hours, { scale: 2 })
+  const actualHours = parseOptionalNonNegativeNumber(req.body.actual_hours, { scale: 2 })
+  const deadlineRaw = req.body.deadline
+  const deadline = normalizeDateTime(deadlineRaw)
+  const comment = normalizeText(req.body.comment, 500)
+
+  if (!personalHours.ok) return res.status(400).json({ success: false, message: 'personal_estimated_hours 不能小于 0' })
+  if (!actualHours.ok) return res.status(400).json({ success: false, message: 'actual_hours 不能小于 0' })
+  if (deadlineRaw !== undefined && deadlineRaw !== null && String(deadlineRaw).trim() !== '' && !deadline) {
+    return res.status(400).json({ success: false, message: 'deadline 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm[:ss]' })
+  }
+
+  const hasAnyField =
+    req.body.personal_estimated_hours !== undefined ||
+    req.body.actual_hours !== undefined ||
+    req.body.deadline !== undefined
+  if (!hasAnyField) {
+    return res.status(400).json({ success: false, message: '至少提供一个要更新的字段' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.updateTaskHours({
+      demandId,
+      taskId,
+      personalEstimatedHours: personalHours.value,
+      actualHours: actualHours.value,
+      deadline,
+      operatorUserId: req.user.id,
+      comment,
+    })
+
+    return res.json({
+      success: true,
+      message: '任务工时更新成功',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_TASK_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程任务不存在' })
+    }
+    if (err?.code === 'WORKFLOW_TASK_HOURS_INVALID_INPUT') {
+      return res.status(400).json({ success: false, message: '任务工时参数不合法' })
+    }
+    if (err?.code === 'WORKFLOW_TASK_HOURS_NO_FIELDS') {
+      return res.status(400).json({ success: false, message: '至少提供一个要更新的字段' })
+    }
+    console.error('更新流程任务工时失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listDemandWorkflowTaskCollaborators = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const taskId = toPositiveInt(req.params.taskId)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!taskId) {
+    return res.status(400).json({ success: false, message: 'taskId 无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const rows = await Workflow.listTaskCollaborators({
+      demandId,
+      taskId,
+    })
+    return res.json({ success: true, data: rows })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_TASK_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程任务不存在' })
+    }
+    console.error('获取任务协作人失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const addDemandWorkflowTaskCollaborator = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const taskId = toPositiveInt(req.params.taskId)
+  const collaboratorUserId = toPositiveInt(req.body.user_id)
+  const expectedStartDateRaw = req.body.expected_start_date
+  const expectedStartDate = normalizeDate(expectedStartDateRaw)
+  const comment = normalizeText(req.body.comment, 500)
+
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!taskId) {
+    return res.status(400).json({ success: false, message: 'taskId 无效' })
+  }
+  if (!collaboratorUserId) {
+    return res.status(400).json({ success: false, message: 'user_id 无效' })
+  }
+  if (
+    expectedStartDateRaw !== undefined &&
+    expectedStartDateRaw !== null &&
+    String(expectedStartDateRaw).trim() !== '' &&
+    !expectedStartDate
+  ) {
+    return res.status(400).json({ success: false, message: 'expected_start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const targetUser = await User.findById(collaboratorUserId)
+    if (!targetUser) {
+      return res.status(400).json({ success: false, message: '协作人用户不存在' })
+    }
+
+    const workflow = await Workflow.addTaskCollaborator({
+      demandId,
+      taskId,
+      collaboratorUserId,
+      operatorUserId: req.user.id,
+      expectedStartDate,
+      comment,
+    })
+
+    return res.json({
+      success: true,
+      message: '任务协作人已添加',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_TASK_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程任务不存在' })
+    }
+    if (err?.code === 'WORKFLOW_TASK_COLLABORATOR_IS_ASSIGNEE') {
+      return res.status(400).json({ success: false, message: '任务负责人无需重复添加为协作人' })
+    }
+    if (err?.code === 'COLLABORATOR_USER_ID_INVALID') {
+      return res.status(400).json({ success: false, message: '协作人 user_id 无效' })
+    }
+    console.error('添加任务协作人失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const removeDemandWorkflowTaskCollaborator = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const taskId = toPositiveInt(req.params.taskId)
+  const collaboratorUserId = toPositiveInt(req.params.userId)
+  const comment = normalizeText(req.body.comment, 500)
+
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!taskId) {
+    return res.status(400).json({ success: false, message: 'taskId 无效' })
+  }
+  if (!collaboratorUserId) {
+    return res.status(400).json({ success: false, message: 'userId 无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.removeTaskCollaborator({
+      demandId,
+      taskId,
+      collaboratorUserId,
+      operatorUserId: req.user.id,
+      comment,
+    })
+
+    return res.json({
+      success: true,
+      message: '任务协作人已移除',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_TASK_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程任务不存在' })
+    }
+    if (err?.code === 'WORKFLOW_TASK_COLLABORATOR_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '任务协作人不存在' })
+    }
+    console.error('移除任务协作人失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const replaceDemandWorkflowLatestTemplate = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
   if (!demandId) {
@@ -2250,12 +3195,22 @@ module.exports = {
   listDemandPhaseTypes,
   listWorkflowAssignees,
   createWorkItemType,
+  listProjectTemplates,
+  getProjectTemplateById,
+  createProjectTemplate,
+  updateProjectTemplate,
+  listNotificationConfigs,
+  updateNotificationConfig,
   listDemands,
   getDemandById,
+  listDemandMembers,
+  addDemandMember,
+  removeDemandMember,
   createDemand,
   updateDemand,
   deleteDemand,
   listArchivedDemands,
+  restoreArchivedDemand,
   purgeArchivedDemand,
   listLogs,
   createLog,
@@ -2275,6 +3230,13 @@ module.exports = {
   assignDemandWorkflowCurrentNode,
   assignDemandWorkflowNode,
   submitDemandWorkflowCurrentNode,
+  rejectDemandWorkflowCurrentNode,
+  forceCompleteDemandWorkflowCurrentNode,
+  updateDemandWorkflowNodeHours,
+  updateDemandWorkflowTaskHours,
+  listDemandWorkflowTaskCollaborators,
+  addDemandWorkflowTaskCollaborator,
+  removeDemandWorkflowTaskCollaborator,
   replaceDemandWorkflowLatestTemplate,
   getMyWorkbench,
   getMyWeeklyReport,

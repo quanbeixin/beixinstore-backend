@@ -2,12 +2,22 @@
 
 const DEMAND_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED']
 const DEMAND_PRIORITIES = ['P0', 'P1', 'P2', 'P3']
+const DEMAND_MANAGEMENT_MODES = ['simple', 'advanced']
+const DEMAND_HEALTH_STATUSES = ['green', 'yellow', 'red']
 const WORK_LOG_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE']
 const WORK_LOG_TASK_SOURCES = ['SELF', 'OWNER_ASSIGN', 'WORKFLOW_AUTO']
 const DEMAND_PHASE_DICT_KEY = 'demand_phase_type'
 const ISSUE_TYPE_DICT_KEY = 'issue_type'
 const BUSINESS_GROUP_DICT_KEY = 'business_group'
 const OWNER_ESTIMATE_RULES = ['NONE', 'OPTIONAL', 'REQUIRED']
+const DEFAULT_NOTIFICATION_SCENES = [
+  'node_assign',
+  'node_reject',
+  'task_assign',
+  'task_deadline',
+  'task_complete',
+  'node_complete',
+]
 const TRUE_LIKE_VALUES = new Set(['1', 'true', 'yes', 'y', 'on'])
 const WORK_UNIFIED_STATUS = {
   RISK: 'RISK',
@@ -90,6 +100,30 @@ function normalizePriority(value) {
   return DEMAND_PRIORITIES.includes(priority) ? priority : 'P2'
 }
 
+function normalizeText(value, maxLen = 255) {
+  return String(value || '').trim().slice(0, maxLen)
+}
+
+function normalizeManagementMode(value, fallback = 'simple') {
+  const mode = String(value || fallback).trim().toLowerCase()
+  return DEMAND_MANAGEMENT_MODES.includes(mode) ? mode : fallback
+}
+
+function normalizeHealthStatus(value, fallback = 'green') {
+  const status = String(value || fallback).trim().toLowerCase()
+  return DEMAND_HEALTH_STATUSES.includes(status) ? status : fallback
+}
+
+function normalizeDateTime(value, fallback = null) {
+  if (value === undefined) return fallback
+  if (value === null || value === '') return null
+  const text = String(value).trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return `${text} 00:00:00`
+  if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$/.test(text)) return `${text}:00`
+  if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}$/.test(text)) return text
+  return fallback
+}
+
 function toPositiveInt(value) {
   const num = Number(value)
   return Number.isInteger(num) && num > 0 ? num : null
@@ -124,6 +158,34 @@ function parseExtraJson(raw) {
     return JSON.parse(raw)
   } catch (err) {
     return null
+  }
+}
+
+function parseProjectTemplateNodeConfig(raw) {
+  if (!raw) return []
+  if (Array.isArray(raw)) return raw
+  if (typeof raw === 'object') return raw
+  if (typeof raw !== 'string') return []
+
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : []
+  } catch (err) {
+    return []
+  }
+}
+
+function parseJsonArray(raw, fallback = []) {
+  if (Array.isArray(raw)) return raw
+  if (!raw) return fallback
+  if (typeof raw === 'object') return fallback
+  if (typeof raw !== 'string') return fallback
+
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : fallback
+  } catch (err) {
+    return fallback
   }
 }
 
@@ -805,6 +867,8 @@ function buildMemberInsightWhere({
 const Work = {
   DEMAND_STATUSES,
   DEMAND_PRIORITIES,
+  DEMAND_MANAGEMENT_MODES,
+  DEMAND_HEALTH_STATUSES,
   WORK_LOG_STATUSES,
   WORK_UNIFIED_STATUSES: WORK_UNIFIED_STATUS_VALUES,
   WORK_LOG_TASK_SOURCES,
@@ -994,6 +1058,251 @@ const Work = {
     return result.insertId
   },
 
+  async listProjectTemplates({
+    page = 1,
+    pageSize = 20,
+    keyword = '',
+    status = null,
+  } = {}) {
+    const normalizedPage = Math.max(1, Number(page) || 1)
+    const normalizedPageSize = Math.min(200, Math.max(1, Number(pageSize) || 20))
+    const offset = (normalizedPage - 1) * normalizedPageSize
+    const conditions = ['1 = 1']
+    const params = []
+
+    if (keyword) {
+      conditions.push('(name LIKE ? OR description LIKE ?)')
+      params.push(`%${keyword}%`, `%${keyword}%`)
+    }
+    if (status === 0 || status === 1) {
+      conditions.push('status = ?')
+      params.push(status)
+    }
+
+    const whereSql = conditions.join(' AND ')
+    const [rows] = await pool.query(
+      `SELECT
+         id,
+         name,
+         description,
+         node_config,
+         status,
+         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM project_templates
+       WHERE ${whereSql}
+       ORDER BY updated_at DESC, id DESC
+       LIMIT ? OFFSET ?`,
+      [...params, normalizedPageSize, offset],
+    )
+
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM project_templates
+       WHERE ${whereSql}`,
+      params,
+    )
+
+    const list = (rows || []).map((row) => ({
+      id: Number(row.id),
+      name: row.name,
+      description: row.description || '',
+      node_config: parseProjectTemplateNodeConfig(row.node_config),
+      status: Number(row.status) === 1 ? 1 : 0,
+      created_at: row.created_at || null,
+      updated_at: row.updated_at || null,
+    }))
+
+    return {
+      rows: list,
+      total: Number(total || 0),
+      page: normalizedPage,
+      pageSize: normalizedPageSize,
+    }
+  },
+
+  async findProjectTemplateById(templateId, { enabledOnly = false } = {}) {
+    const id = toPositiveInt(templateId)
+    if (!id) return null
+
+    const conditions = ['id = ?']
+    const params = [id]
+    if (enabledOnly) {
+      conditions.push('status = 1')
+    }
+
+    const [rows] = await pool.query(
+      `SELECT
+         id,
+         name,
+         description,
+         node_config,
+         status,
+         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM project_templates
+       WHERE ${conditions.join(' AND ')}
+       LIMIT 1`,
+      params,
+    )
+    const row = rows[0]
+    if (!row) return null
+    return {
+      id: Number(row.id),
+      name: row.name,
+      description: row.description || '',
+      node_config: parseProjectTemplateNodeConfig(row.node_config),
+      status: Number(row.status) === 1 ? 1 : 0,
+      created_at: row.created_at || null,
+      updated_at: row.updated_at || null,
+    }
+  },
+
+  async createProjectTemplate({ name, description = '', nodeConfig = [], status = 1 }) {
+    const [result] = await pool.query(
+      `INSERT INTO project_templates (name, description, node_config, status)
+       VALUES (?, ?, CAST(? AS JSON), ?)`,
+      [name, description || null, JSON.stringify(nodeConfig || []), status === 1 ? 1 : 0],
+    )
+    return Number(result.insertId)
+  },
+
+  async updateProjectTemplate(templateId, { name, description = '', nodeConfig = [], status = 1 }) {
+    const [result] = await pool.query(
+      `UPDATE project_templates
+       SET
+         name = ?,
+         description = ?,
+         node_config = CAST(? AS JSON),
+         status = ?
+       WHERE id = ?`,
+      [
+        name,
+        description || null,
+        JSON.stringify(nodeConfig || []),
+        status === 1 ? 1 : 0,
+        templateId,
+      ],
+    )
+    return Number(result.affectedRows || 0)
+  },
+
+  async listNotificationConfigs() {
+    let rows = []
+    try {
+      const [queryRows] = await pool.query(
+        `SELECT
+           id,
+           scene,
+           enabled,
+           receiver_roles,
+           advance_days,
+           DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+           DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+         FROM notification_config
+         ORDER BY scene ASC`,
+      )
+      rows = queryRows
+    } catch (err) {
+      if (!isMissingTableError(err)) throw err
+      return []
+    }
+
+    const sceneMap = new Map()
+    ;(rows || []).forEach((row) => {
+      const scene = String(row.scene || '').trim()
+      if (!scene) return
+      sceneMap.set(scene, {
+        id: Number(row.id),
+        scene,
+        enabled: Number(row.enabled) === 1 ? 1 : 0,
+        receiver_roles: parseJsonArray(row.receiver_roles, []),
+        advance_days: Number(row.advance_days || 0),
+        created_at: row.created_at || null,
+        updated_at: row.updated_at || null,
+      })
+    })
+
+    DEFAULT_NOTIFICATION_SCENES.forEach((scene) => {
+      if (sceneMap.has(scene)) return
+      sceneMap.set(scene, {
+        id: null,
+        scene,
+        enabled: 1,
+        receiver_roles: [],
+        advance_days: 0,
+        created_at: null,
+        updated_at: null,
+      })
+    })
+
+    return Array.from(sceneMap.values()).sort((a, b) => String(a.scene).localeCompare(String(b.scene)))
+  },
+
+  async findNotificationConfigByScene(scene) {
+    const normalizedScene = normalizeText(scene, 50).toLowerCase()
+    if (!normalizedScene) return null
+
+    try {
+      const [rows] = await pool.query(
+        `SELECT
+           id,
+           scene,
+           enabled,
+           receiver_roles,
+           advance_days,
+           DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+           DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+         FROM notification_config
+         WHERE scene = ?
+         LIMIT 1`,
+        [normalizedScene],
+      )
+      const row = rows[0] || null
+      if (!row) return null
+      return {
+        id: Number(row.id),
+        scene: row.scene,
+        enabled: Number(row.enabled) === 1 ? 1 : 0,
+        receiver_roles: parseJsonArray(row.receiver_roles, []),
+        advance_days: Number(row.advance_days || 0),
+        created_at: row.created_at || null,
+        updated_at: row.updated_at || null,
+      }
+    } catch (err) {
+      if (isMissingTableError(err)) return null
+      throw err
+    }
+  },
+
+  async upsertNotificationConfig(scene, { enabled = 1, receiverRoles = [], advanceDays = 0 } = {}) {
+    const normalizedScene = normalizeText(scene, 50).toLowerCase()
+    if (!normalizedScene) return 0
+
+    const normalizedRoles = Array.isArray(receiverRoles)
+      ? receiverRoles
+          .map((item) => normalizeText(item, 64))
+          .filter(Boolean)
+      : []
+
+    const [result] = await pool.query(
+      `INSERT INTO notification_config (scene, enabled, receiver_roles, advance_days)
+       VALUES (?, ?, CAST(? AS JSON), ?)
+       ON DUPLICATE KEY UPDATE
+         enabled = VALUES(enabled),
+         receiver_roles = VALUES(receiver_roles),
+         advance_days = VALUES(advance_days),
+         updated_at = CURRENT_TIMESTAMP`,
+      [
+        normalizedScene,
+        Number(enabled) === 1 ? 1 : 0,
+        JSON.stringify(normalizedRoles),
+        Math.max(0, Number(advanceDays) || 0),
+      ],
+    )
+    return Number(result?.affectedRows || 0)
+  },
+
   async listDemands({
     page = 1,
     pageSize = 10,
@@ -1063,6 +1372,15 @@ const Work = {
         d.name,
         d.owner_user_id,
         COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
+        d.management_mode,
+        d.template_id,
+        pt.name AS template_name,
+        d.project_manager,
+        COALESCE(NULLIF(pm.real_name, ''), pm.username) AS project_manager_name,
+        d.health_status,
+        DATE_FORMAT(d.actual_start_time, '%Y-%m-%d %H:%i:%s') AS actual_start_time,
+        DATE_FORMAT(d.actual_end_time, '%Y-%m-%d %H:%i:%s') AS actual_end_time,
+        d.doc_link,
         d.business_group_code,
         bg.item_name AS business_group_name,
         DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
@@ -1073,14 +1391,22 @@ const Work = {
         DATE_FORMAT(d.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
         DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
         DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,
+        COALESCE(pm2.member_count, 0) AS member_count,
         COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,
         COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,
         COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours
       FROM work_demands d
       LEFT JOIN users u ON u.id = d.owner_user_id
+      LEFT JOIN users pm ON pm.id = d.project_manager
+      LEFT JOIN project_templates pt ON pt.id = d.template_id
       LEFT JOIN config_dict_items bg
         ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
        AND bg.item_code = d.business_group_code
+      LEFT JOIN (
+        SELECT demand_id, COUNT(*) AS member_count
+        FROM project_members
+        GROUP BY demand_id
+      ) pm2 ON pm2.demand_id = d.id
       LEFT JOIN (
         SELECT
           demand_id,
@@ -1133,6 +1459,15 @@ const Work = {
          d.name,
          d.owner_user_id,
          COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
+         d.management_mode,
+         d.template_id,
+         pt.name AS template_name,
+         d.project_manager,
+         COALESCE(NULLIF(pm.real_name, ''), pm.username) AS project_manager_name,
+         d.health_status,
+         DATE_FORMAT(d.actual_start_time, '%Y-%m-%d %H:%i:%s') AS actual_start_time,
+         DATE_FORMAT(d.actual_end_time, '%Y-%m-%d %H:%i:%s') AS actual_end_time,
+         d.doc_link,
          d.business_group_code,
          bg.item_name AS business_group_name,
          DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
@@ -1142,12 +1477,20 @@ const Work = {
          d.created_by,
          DATE_FORMAT(d.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
-         DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at
+         DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,
+         COALESCE(pm2.member_count, 0) AS member_count
        FROM work_demands d
        LEFT JOIN users u ON u.id = d.owner_user_id
+       LEFT JOIN users pm ON pm.id = d.project_manager
+       LEFT JOIN project_templates pt ON pt.id = d.template_id
        LEFT JOIN config_dict_items bg
          ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
         AND bg.item_code = d.business_group_code
+       LEFT JOIN (
+         SELECT demand_id, COUNT(*) AS member_count
+         FROM project_members
+         GROUP BY demand_id
+       ) pm2 ON pm2.demand_id = d.id
        WHERE d.id = ?`,
       [id],
     )
@@ -1159,6 +1502,13 @@ const Work = {
     demandId = '',
     name,
     ownerUserId,
+    managementMode = 'simple',
+    templateId = null,
+    projectManager = null,
+    healthStatus = 'green',
+    actualStartTime = null,
+    actualEndTime = null,
+    docLink = null,
     businessGroupCode = null,
     expectedReleaseDate = null,
     status = 'TODO',
@@ -1173,12 +1523,21 @@ const Work = {
       const finalDemandId = demandId || (await generateDemandId(conn))
       await conn.query(
         `INSERT INTO work_demands (
-          id, name, owner_user_id, business_group_code, expected_release_date, status, priority, description, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, name, owner_user_id, management_mode, template_id, project_manager, health_status,
+          actual_start_time, actual_end_time, doc_link, business_group_code,
+          expected_release_date, status, priority, description, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           finalDemandId,
           name,
           ownerUserId,
+          normalizeManagementMode(managementMode),
+          toPositiveInt(templateId),
+          toPositiveInt(projectManager),
+          normalizeHealthStatus(healthStatus),
+          normalizeDateTime(actualStartTime, null),
+          normalizeDateTime(actualEndTime, null),
+          normalizeText(docLink, 500) || null,
           businessGroupCode || null,
           expectedReleaseDate || null,
           normalizeStatus(status),
@@ -1203,6 +1562,13 @@ const Work = {
     {
       name,
       ownerUserId,
+      managementMode = 'simple',
+      templateId = null,
+      projectManager = null,
+      healthStatus = 'green',
+      actualStartTime = null,
+      actualEndTime = null,
+      docLink = null,
       businessGroupCode = null,
       expectedReleaseDate = null,
       status,
@@ -1216,6 +1582,13 @@ const Work = {
        SET
          name = ?,
          owner_user_id = ?,
+         management_mode = ?,
+         template_id = ?,
+         project_manager = ?,
+         health_status = ?,
+         actual_start_time = ?,
+         actual_end_time = ?,
+         doc_link = ?,
          business_group_code = ?,
          expected_release_date = ?,
          status = ?,
@@ -1226,6 +1599,13 @@ const Work = {
       [
         name,
         ownerUserId,
+        normalizeManagementMode(managementMode),
+        toPositiveInt(templateId),
+        toPositiveInt(projectManager),
+        normalizeHealthStatus(healthStatus),
+        normalizeDateTime(actualStartTime, null),
+        normalizeDateTime(actualEndTime, null),
+        normalizeText(docLink, 500) || null,
         businessGroupCode || null,
         expectedReleaseDate || null,
         normalizeStatus(status),
@@ -1275,6 +1655,88 @@ const Work = {
     }
   },
 
+  async listDemandMembers(demandId) {
+    const normalizedDemandId = String(demandId || '').trim().toUpperCase()
+    if (!normalizedDemandId) return []
+
+    const [rows] = await pool.query(
+      `SELECT
+         pm.id,
+         pm.demand_id,
+         pm.user_id,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS user_name,
+         u.username,
+         DATE_FORMAT(pm.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM project_members pm
+       LEFT JOIN users u ON u.id = pm.user_id
+       WHERE pm.demand_id = ?
+       ORDER BY pm.id ASC`,
+      [normalizedDemandId],
+    )
+
+    return (rows || []).map((row) => ({
+      id: Number(row.id),
+      demand_id: row.demand_id,
+      user_id: Number(row.user_id),
+      user_name: row.user_name || '',
+      username: row.username || '',
+      created_at: row.created_at || null,
+    }))
+  },
+
+  async addDemandMember(demandId, userId) {
+    const normalizedDemandId = String(demandId || '').trim().toUpperCase()
+    const normalizedUserId = toPositiveInt(userId)
+    if (!normalizedDemandId || !normalizedUserId) return null
+
+    await pool.query(
+      `INSERT INTO project_members (demand_id, user_id)
+       VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE user_id = VALUES(user_id)`,
+      [normalizedDemandId, normalizedUserId],
+    )
+
+    const [rows] = await pool.query(
+      `SELECT
+         pm.id,
+         pm.demand_id,
+         pm.user_id,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS user_name,
+         u.username,
+         DATE_FORMAT(pm.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM project_members pm
+       LEFT JOIN users u ON u.id = pm.user_id
+       WHERE pm.demand_id = ?
+         AND pm.user_id = ?
+       LIMIT 1`,
+      [normalizedDemandId, normalizedUserId],
+    )
+    const row = rows[0] || null
+    if (!row) return null
+    return {
+      id: Number(row.id),
+      demand_id: row.demand_id,
+      user_id: Number(row.user_id),
+      user_name: row.user_name || '',
+      username: row.username || '',
+      created_at: row.created_at || null,
+    }
+  },
+
+  async removeDemandMember(demandId, userId) {
+    const normalizedDemandId = String(demandId || '').trim().toUpperCase()
+    const normalizedUserId = toPositiveInt(userId)
+    if (!normalizedDemandId || !normalizedUserId) return 0
+
+    const [result] = await pool.query(
+      `DELETE FROM project_members
+       WHERE demand_id = ?
+         AND user_id = ?`,
+      [normalizedDemandId, normalizedUserId],
+    )
+    return Number(result?.affectedRows || 0)
+  },
+
   async listArchivedDemands({
     page = 1,
     pageSize = 10,
@@ -1314,18 +1776,35 @@ const Work = {
         d.name,
         d.owner_user_id,
         COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
+        d.management_mode,
+        d.template_id,
+        pt.name AS template_name,
+        d.project_manager,
+        COALESCE(NULLIF(pm.real_name, ''), pm.username) AS project_manager_name,
+        d.health_status,
+        DATE_FORMAT(d.actual_start_time, '%Y-%m-%d %H:%i:%s') AS actual_start_time,
+        DATE_FORMAT(d.actual_end_time, '%Y-%m-%d %H:%i:%s') AS actual_end_time,
+        d.doc_link,
         d.business_group_code,
         bg.item_name AS business_group_name,
         d.status,
         DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS archived_at,
         DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
-        COALESCE(lc.related_log_count, 0) AS related_log_count`
+        COALESCE(lc.related_log_count, 0) AS related_log_count,
+        COALESCE(pm2.member_count, 0) AS member_count`
     const fromSql = `
       FROM work_demands d
       LEFT JOIN users u ON u.id = d.owner_user_id
+      LEFT JOIN users pm ON pm.id = d.project_manager
+      LEFT JOIN project_templates pt ON pt.id = d.template_id
       LEFT JOIN config_dict_items bg
         ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
        AND bg.item_code = d.business_group_code
+      LEFT JOIN (
+        SELECT demand_id, COUNT(*) AS member_count
+        FROM project_members
+        GROUP BY demand_id
+      ) pm2 ON pm2.demand_id = d.id
       LEFT JOIN (
         SELECT demand_id, COUNT(*) AS related_log_count
         FROM work_logs
@@ -1357,10 +1836,12 @@ const Work = {
 
     let rows = []
     try {
-      ;[rows] = await pool.query(listSqlWithWorkflow, [...params, pageSize, offset])
+      const [queryRows] = await pool.query(listSqlWithWorkflow, [...params, pageSize, offset])
+      rows = queryRows
     } catch (err) {
       if (!isMissingTableError(err)) throw err
-      ;[rows] = await pool.query(listSqlWithoutWorkflow, [...params, pageSize, offset])
+      const [queryRows] = await pool.query(listSqlWithoutWorkflow, [...params, pageSize, offset])
+      rows = queryRows
     }
 
     const [[{ total }]] = await pool.query(
@@ -1371,6 +1852,89 @@ const Work = {
     )
 
     return { rows, total }
+  },
+
+  async restoreArchivedDemand(demandId) {
+    const normalizedDemandId = String(demandId || '').trim().toUpperCase()
+    if (!normalizedDemandId) {
+      const err = new Error('demand_id_invalid')
+      err.code = 'DEMAND_ID_INVALID'
+      throw err
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const [demandRows] = await conn.query(
+        `SELECT id, status
+         FROM work_demands
+         WHERE id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [normalizedDemandId],
+      )
+      const demand = demandRows[0] || null
+
+      if (!demand) {
+        const err = new Error('demand_not_found')
+        err.code = 'DEMAND_NOT_FOUND'
+        throw err
+      }
+
+      if (String(demand.status || '').toUpperCase() !== 'CANCELLED') {
+        const err = new Error('demand_not_archived')
+        err.code = 'DEMAND_NOT_ARCHIVED'
+        throw err
+      }
+
+      let activeWorkflow = null
+      try {
+        const [workflowRows] = await conn.query(
+          `SELECT id, status
+           FROM wf_process_instances
+           WHERE biz_type = 'DEMAND'
+             AND biz_id = ?
+           ORDER BY
+             CASE status
+               WHEN 'IN_PROGRESS' THEN 0
+               WHEN 'NOT_STARTED' THEN 1
+               ELSE 2
+             END ASC,
+             id DESC
+           LIMIT 1`,
+          [normalizedDemandId],
+        )
+        activeWorkflow = workflowRows[0] || null
+      } catch (err) {
+        if (!isMissingTableError(err)) throw err
+      }
+
+      const workflowStatus = String(activeWorkflow?.status || '').toUpperCase()
+      const restoredStatus =
+        workflowStatus === 'IN_PROGRESS' || workflowStatus === 'NOT_STARTED' ? 'IN_PROGRESS' : 'TODO'
+
+      const [updateResult] = await conn.query(
+        `UPDATE work_demands
+         SET status = ?, completed_at = NULL, updated_at = NOW()
+         WHERE id = ?`,
+        [restoredStatus, normalizedDemandId],
+      )
+
+      await conn.commit()
+      return {
+        demand_id: normalizedDemandId,
+        restored_status: restoredStatus,
+        affected_rows: Number(updateResult?.affectedRows || 0),
+        workflow_instance_id: activeWorkflow?.id ? Number(activeWorkflow.id) : null,
+        workflow_status: workflowStatus || null,
+      }
+    } catch (err) {
+      await conn.rollback()
+      throw err
+    } finally {
+      conn.release()
+    }
   },
 
   async purgeArchivedDemand(demandId) {
@@ -3689,10 +4253,12 @@ const Work = {
      LIMIT 400`
 
     try {
-      ;[ownerEstimateItems] = await pool.query(ownerEstimateSql, ownerEstimateQueryParams)
+      const [queryRows] = await pool.query(ownerEstimateSql, ownerEstimateQueryParams)
+      ownerEstimateItems = queryRows
     } catch (err) {
       if (!isMissingColumnError(err)) throw err
-      ;[ownerEstimateItems] = await pool.query(ownerEstimateFallbackSql, ownerEstimateQueryParams)
+      const [queryRows] = await pool.query(ownerEstimateFallbackSql, ownerEstimateQueryParams)
+      ownerEstimateItems = queryRows
     }
 
     const todayDate = getBeijingTodayDateString()

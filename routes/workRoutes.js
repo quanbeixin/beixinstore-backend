@@ -7,12 +7,22 @@ const {
   listDemandPhaseTypes,
   listWorkflowAssignees,
   createWorkItemType,
+  listProjectTemplates,
+  getProjectTemplateById,
+  createProjectTemplate,
+  updateProjectTemplate,
+  listNotificationConfigs,
+  updateNotificationConfig,
   listDemands,
   getDemandById,
+  listDemandMembers,
+  addDemandMember,
+  removeDemandMember,
   createDemand,
   updateDemand,
   deleteDemand,
   listArchivedDemands,
+  restoreArchivedDemand,
   purgeArchivedDemand,
   listLogs,
   createLog,
@@ -32,6 +42,13 @@ const {
   assignDemandWorkflowCurrentNode,
   assignDemandWorkflowNode,
   submitDemandWorkflowCurrentNode,
+  rejectDemandWorkflowCurrentNode,
+  forceCompleteDemandWorkflowCurrentNode,
+  updateDemandWorkflowNodeHours,
+  updateDemandWorkflowTaskHours,
+  listDemandWorkflowTaskCollaborators,
+  addDemandWorkflowTaskCollaborator,
+  removeDemandWorkflowTaskCollaborator,
   replaceDemandWorkflowLatestTemplate,
   getMyWorkbench,
   getMyWeeklyReport,
@@ -58,13 +75,31 @@ router.get(
   listWorkflowAssignees,
 )
 router.post('/item-types', authMiddleware.requirePermission('demand.manage'), createWorkItemType)
+router.get('/project-templates', authMiddleware.requirePermission('project.template.view'), listProjectTemplates)
+router.get('/project-templates/:id', authMiddleware.requirePermission('project.template.view'), getProjectTemplateById)
+router.post('/project-templates', authMiddleware.requirePermission('project.template.manage'), createProjectTemplate)
+router.put('/project-templates/:id', authMiddleware.requirePermission('project.template.manage'), updateProjectTemplate)
+router.get('/notification-configs', authMiddleware.requirePermission('notification.config.view'), listNotificationConfigs)
+router.put(
+  '/notification-configs/:scene',
+  authMiddleware.requirePermission('notification.config.manage'),
+  updateNotificationConfig,
+)
 
 router.get('/demands', authMiddleware.requirePermission('demand.view'), listDemands)
 router.get('/demands/:id', authMiddleware.requirePermission('demand.view'), getDemandById)
+router.get('/demands/:id/members', authMiddleware.requirePermission('demand.view'), listDemandMembers)
+router.post('/demands/:id/members', authMiddleware.requirePermission('demand.manage'), addDemandMember)
+router.delete(
+  '/demands/:id/members/:userId',
+  authMiddleware.requirePermission('demand.manage'),
+  removeDemandMember,
+)
 router.post('/demands', authMiddleware.requirePermission('demand.manage'), createDemand)
 router.put('/demands/:id', authMiddleware.requirePermission('demand.view'), updateDemand)
 router.delete('/demands/:id', authMiddleware.requirePermission('demand.view'), deleteDemand)
 router.get('/archive/demands', authMiddleware.requirePermission('archive.view'), listArchivedDemands)
+router.post('/archive/demands/:id/restore', authMiddleware.requirePermission('archive.manage'), restoreArchivedDemand)
 router.delete('/archive/demands/:id/purge', authMiddleware.requirePermission('archive.manage'), purgeArchivedDemand)
 router.post('/demands/:id/workflow/init', authMiddleware.requirePermission('demand.manage'), initDemandWorkflowInstance)
 router.get('/demands/:id/workflow', authMiddleware.requirePermission('demand.view'), getDemandWorkflow)
@@ -82,6 +117,41 @@ router.post(
   '/demands/:id/workflow/current/submit',
   authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
   submitDemandWorkflowCurrentNode,
+)
+router.post(
+  '/demands/:id/workflow/current/reject',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  rejectDemandWorkflowCurrentNode,
+)
+router.post(
+  '/demands/:id/workflow/current/force-complete',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  forceCompleteDemandWorkflowCurrentNode,
+)
+router.put(
+  '/demands/:id/workflow/nodes/:nodeKey/hours',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  updateDemandWorkflowNodeHours,
+)
+router.put(
+  '/demands/:id/workflow/tasks/:taskId/hours',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  updateDemandWorkflowTaskHours,
+)
+router.get(
+  '/demands/:id/workflow/tasks/:taskId/collaborators',
+  authMiddleware.requirePermission('demand.view'),
+  listDemandWorkflowTaskCollaborators,
+)
+router.post(
+  '/demands/:id/workflow/tasks/:taskId/collaborators',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  addDemandWorkflowTaskCollaborator,
+)
+router.delete(
+  '/demands/:id/workflow/tasks/:taskId/collaborators/:userId',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  removeDemandWorkflowTaskCollaborator,
 )
 router.post(
   '/demands/:id/workflow/replace-latest',
