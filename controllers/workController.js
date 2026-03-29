@@ -9,6 +9,10 @@ const NOTIFICATION_SCENES = new Set([
   'task_deadline',
   'task_complete',
   'node_complete',
+  'bug_assign',
+  'bug_status_change',
+  'bug_fixed',
+  'bug_reopen',
 ])
 
 function toPositiveInt(value) {

@@ -18,6 +18,10 @@ const DEFAULT_NOTIFICATION_SCENES = [
   'task_deadline',
   'task_complete',
   'node_complete',
+  'bug_assign',
+  'bug_status_change',
+  'bug_fixed',
+  'bug_reopen',
 ]
 const TRUE_LIKE_VALUES = new Set(['1', 'true', 'yes', 'y', 'on'])
 const WORK_UNIFIED_STATUS = {

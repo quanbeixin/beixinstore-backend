@@ -3,6 +3,24 @@ const router = express.Router()
 
 const authMiddleware = require('../middleware/auth')
 const {
+  listBugs,
+  getBugDetail,
+  createBug,
+  updateBug,
+  deleteBug,
+  startBug,
+  fixBug,
+  verifyBug,
+  reopenBug,
+  rejectBug,
+  listBugAssignees,
+  getDemandBugStats,
+  listDemandBugs,
+  getBugAttachmentPolicy,
+  createBugAttachment,
+  deleteBugAttachment,
+} = require('../controllers/bugController')
+const {
   listWorkItemTypes,
   listDemandPhaseTypes,
   listProjectTemplatePhaseTypes,
@@ -63,6 +81,25 @@ const {
 
 router.use(authMiddleware)
 
+router.get('/bugs/assignees', authMiddleware.requirePermission('bug.view'), listBugAssignees)
+router.get('/bugs', authMiddleware.requirePermission('bug.view'), listBugs)
+router.get('/bugs/:id', authMiddleware.requirePermission('bug.view'), getBugDetail)
+router.post('/bugs', authMiddleware.requirePermission('bug.create'), createBug)
+router.put('/bugs/:id', authMiddleware.requirePermission('bug.update'), updateBug)
+router.delete('/bugs/:id', authMiddleware.requirePermission('bug.delete'), deleteBug)
+router.post('/bugs/:id/start', authMiddleware.requirePermission('bug.transition'), startBug)
+router.post('/bugs/:id/fix', authMiddleware.requirePermission('bug.transition'), fixBug)
+router.post('/bugs/:id/verify', authMiddleware.requirePermission('bug.transition'), verifyBug)
+router.post('/bugs/:id/reopen', authMiddleware.requirePermission('bug.transition'), reopenBug)
+router.post('/bugs/:id/reject', authMiddleware.requirePermission('bug.transition'), rejectBug)
+router.post('/bugs/:id/attachments/policy', authMiddleware.requirePermission('bug.update'), getBugAttachmentPolicy)
+router.post('/bugs/:id/attachments', authMiddleware.requirePermission('bug.update'), createBugAttachment)
+router.delete(
+  '/bugs/:id/attachments/:attachmentId',
+  authMiddleware.requirePermission('bug.update'),
+  deleteBugAttachment,
+)
+
 router.get(
   '/item-types',
   authMiddleware.requireAnyPermission(['worklog.view.self', 'demand.view']),
@@ -97,6 +134,8 @@ router.put(
 
 router.get('/demands', authMiddleware.requirePermission('demand.view'), listDemands)
 router.get('/demands/:id', authMiddleware.requirePermission('demand.view'), getDemandById)
+router.get('/demands/:id/bug-stats', authMiddleware.requireAnyPermission(['demand.view', 'bug.view']), getDemandBugStats)
+router.get('/demands/:id/bugs', authMiddleware.requireAnyPermission(['demand.view', 'bug.view']), listDemandBugs)
 router.get('/demands/:id/members', authMiddleware.requirePermission('demand.view'), listDemandMembers)
 router.post('/demands/:id/members', authMiddleware.requirePermission('demand.manage'), addDemandMember)
 router.delete(
