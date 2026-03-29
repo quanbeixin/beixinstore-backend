@@ -322,6 +322,17 @@ const listDemandPhaseTypes = async (req, res) => {
   }
 }
 
+const listProjectTemplatePhaseTypes = async (req, res) => {
+  try {
+    const enabledOnly = toBool(req.query.enabled_only, true)
+    const rows = await Work.listProjectTemplatePhaseTypes({ enabledOnly })
+    return res.json({ success: true, data: rows })
+  } catch (err) {
+    console.error('获取模板需求阶段字典失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const listWorkflowAssignees = async (req, res) => {
   const keyword = normalizeText(req.query.keyword, 100)
   const PAGE_SIZE = 1000
@@ -2611,6 +2622,58 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
   }
 }
 
+const submitDemandWorkflowNode = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const nodeKey = normalizePhaseKey(req.params.nodeKey)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!nodeKey) {
+    return res.status(400).json({ success: false, message: '节点标识无效' })
+  }
+
+  const comment = normalizeText(req.body.comment, 500)
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.submitNode({
+      demandId,
+      nodeKey,
+      operatorUserId: req.user.id,
+      comment,
+      sourceType: 'MANUAL',
+    })
+
+    return res.json({
+      success: true,
+      message: '节点已提交',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_NODE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程节点不存在' })
+    }
+    if (err?.code === 'WORKFLOW_NODE_CLOSED') {
+      return res.status(400).json({ success: false, message: '节点已关闭，无法提交' })
+    }
+    if (err?.code === 'WORKFLOW_NOT_ASSIGNEE') {
+      return res.status(403).json({ success: false, message: '当前节点仅负责人可提交' })
+    }
+    console.error('按节点提交流程失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const rejectDemandWorkflowCurrentNode = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
   if (!demandId) {
@@ -2659,6 +2722,62 @@ const rejectDemandWorkflowCurrentNode = async (req, res) => {
   }
 }
 
+const rejectDemandWorkflowNode = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const nodeKey = normalizePhaseKey(req.params.nodeKey)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!nodeKey) {
+    return res.status(400).json({ success: false, message: '节点标识无效' })
+  }
+
+  const rejectReason = normalizeText(req.body.reject_reason, 2000)
+  const comment = normalizeText(req.body.comment, 500)
+  if (!rejectReason) {
+    return res.status(400).json({ success: false, message: '驳回原因不能为空' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.rejectNode({
+      demandId,
+      nodeKey,
+      operatorUserId: req.user.id,
+      rejectReason,
+      comment,
+    })
+
+    return res.json({
+      success: true,
+      message: '节点已驳回到上一可执行节点',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_NODE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程节点不存在' })
+    }
+    if (err?.code === 'WORKFLOW_PREVIOUS_NODE_NOT_FOUND') {
+      return res.status(400).json({ success: false, message: '当前节点无可驳回的上一节点' })
+    }
+    if (err?.code === 'REJECT_REASON_REQUIRED') {
+      return res.status(400).json({ success: false, message: '驳回原因不能为空' })
+    }
+    console.error('按节点驳回流程失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const forceCompleteDemandWorkflowCurrentNode = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
   if (!demandId) {
@@ -2694,6 +2813,53 @@ const forceCompleteDemandWorkflowCurrentNode = async (req, res) => {
       return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
     }
     console.error('强制完成流程节点失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const forceCompleteDemandWorkflowNode = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const nodeKey = normalizePhaseKey(req.params.nodeKey)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!nodeKey) {
+    return res.status(400).json({ success: false, message: '节点标识无效' })
+  }
+
+  const comment = normalizeText(req.body.comment, 500)
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.submitNode({
+      demandId,
+      nodeKey,
+      operatorUserId: req.user.id,
+      comment: comment || '管理员强制完成指定节点',
+      sourceType: 'FORCE',
+      skipAssigneeCheck: true,
+    })
+
+    return res.json({
+      success: true,
+      message: '节点已强制完成',
+      data: workflow,
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+    if (err?.code === 'WORKFLOW_NODE_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '流程节点不存在' })
+    }
+    console.error('按节点强制完成流程失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -3193,6 +3359,7 @@ const sendNoFillReminders = async (req, res) => {
 module.exports = {
   listWorkItemTypes,
   listDemandPhaseTypes,
+  listProjectTemplatePhaseTypes,
   listWorkflowAssignees,
   createWorkItemType,
   listProjectTemplates,
@@ -3230,8 +3397,11 @@ module.exports = {
   assignDemandWorkflowCurrentNode,
   assignDemandWorkflowNode,
   submitDemandWorkflowCurrentNode,
+  submitDemandWorkflowNode,
   rejectDemandWorkflowCurrentNode,
+  rejectDemandWorkflowNode,
   forceCompleteDemandWorkflowCurrentNode,
+  forceCompleteDemandWorkflowNode,
   updateDemandWorkflowNodeHours,
   updateDemandWorkflowTaskHours,
   listDemandWorkflowTaskCollaborators,

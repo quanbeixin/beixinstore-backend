@@ -7,6 +7,7 @@ const DEMAND_HEALTH_STATUSES = ['green', 'yellow', 'red']
 const WORK_LOG_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE']
 const WORK_LOG_TASK_SOURCES = ['SELF', 'OWNER_ASSIGN', 'WORKFLOW_AUTO']
 const DEMAND_PHASE_DICT_KEY = 'demand_phase_type'
+const PROJECT_TEMPLATE_PHASE_DICT_KEY = 'project_template_phase_type'
 const ISSUE_TYPE_DICT_KEY = 'issue_type'
 const BUSINESS_GROUP_DICT_KEY = 'business_group'
 const OWNER_ESTIMATE_RULES = ['NONE', 'OPTIONAL', 'REQUIRED']
@@ -1020,6 +1021,28 @@ const Work = {
        WHERE i.type_key = ? AND t.enabled = 1 ${whereEnabled}
        ORDER BY i.sort_order ASC, i.id ASC`,
       [DEMAND_PHASE_DICT_KEY],
+    )
+    return (rows || []).map((row) => ({
+      phase_key: row.phase_key,
+      phase_name: row.phase_name,
+      sort_order: Number(row.sort_order) || 0,
+      enabled: Number(row.enabled) === 1 ? 1 : 0,
+    }))
+  },
+
+  async listProjectTemplatePhaseTypes({ enabledOnly = true } = {}) {
+    const whereEnabled = enabledOnly ? 'AND i.enabled = 1' : ''
+    const [rows] = await pool.query(
+      `SELECT
+         i.item_code AS phase_key,
+         i.item_name AS phase_name,
+         i.sort_order,
+         i.enabled
+       FROM config_dict_items i
+       INNER JOIN config_dict_types t ON t.type_key = i.type_key
+       WHERE i.type_key = ? AND t.enabled = 1 ${whereEnabled}
+       ORDER BY i.sort_order ASC, i.id ASC`,
+      [PROJECT_TEMPLATE_PHASE_DICT_KEY],
     )
     return (rows || []).map((row) => ({
       phase_key: row.phase_key,

@@ -1,4 +1,10 @@
 ﻿const pool = require('../utils/db')
+const {
+  normalizeTemplateGraph,
+  buildGraphMaps,
+  isSystemNodeType,
+  normalizeNodeKey: normalizeTemplateNodeKey,
+} = require('../utils/projectTemplateWorkflowGraph')
 
 const DEMAND_BIZ_TYPE = 'DEMAND'
 const DEFAULT_TEMPLATE_KEY = 'DEMAND_STD_FLOW'
@@ -247,6 +253,642 @@ async function ensureDefaultTemplate(conn, { createdBy = null, forceRebuild = fa
 
   const nodes = await loadTemplateNodes(conn, template.id)
   return { template, nodes }
+}
+
+function parseWorkflowGraphMeta(rawRemark) {
+  if (!rawRemark || typeof rawRemark !== 'string') return null
+  try {
+    const parsed = JSON.parse(rawRemark)
+    if (!parsed || typeof parsed !== 'object') return null
+    if (!Array.isArray(parsed.outgoing_keys) && !Array.isArray(parsed.incoming_keys)) return null
+    return parsed
+  } catch (err) {
+    return null
+  }
+}
+
+function buildWorkflowGraphFromInstanceRows(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const withMeta = list.map((row) => {
+    const meta = parseWorkflowGraphMeta(row?.remark)
+    return {
+      node_key: normalizeTemplateNodeKey(row?.node_key),
+      node_name: normalizeText(row?.node_name_snapshot, 128) || normalizeTemplateNodeKey(row?.node_key),
+      node_type: normalizeText(meta?.node_type || row?.node_type, 64).toUpperCase() || 'TASK',
+      phase_key: normalizeText(meta?.phase_key || row?.phase_key, 64) || null,
+      sort_order: Number.isFinite(Number(row?.sort_order)) ? Number(row.sort_order) : 0,
+      branch_key: normalizeText(meta?.branch_key, 64) || null,
+      parallel_group_key: normalizeText(meta?.parallel_group_key, 64) || null,
+      join_rule: normalizeText(meta?.join_rule, 32).toUpperCase() || 'ALL',
+      description: normalizeText(meta?.description, 1000) || '',
+      outgoing_keys: Array.isArray(meta?.outgoing_keys)
+        ? meta.outgoing_keys.map((item) => normalizeTemplateNodeKey(item)).filter(Boolean)
+        : [],
+      incoming_keys: Array.isArray(meta?.incoming_keys)
+        ? meta.incoming_keys.map((item) => normalizeTemplateNodeKey(item)).filter(Boolean)
+        : [],
+    }
+  })
+
+  const hasGraphMeta = withMeta.some(
+    (item) =>
+      item.outgoing_keys.length > 0 ||
+      item.incoming_keys.length > 0 ||
+      item.parallel_group_key ||
+      isSystemNodeType(item.node_type),
+  )
+
+  const normalizedGraph = hasGraphMeta
+    ? {
+        schema_version: 2,
+        entry_node_key:
+          withMeta.find((item) => (item.incoming_keys || []).length === 0)?.node_key ||
+          withMeta[0]?.node_key ||
+          null,
+        nodes: withMeta,
+        edges: withMeta.flatMap((item) =>
+          (item.outgoing_keys || []).map((targetNodeKey) => ({
+            from: item.node_key,
+            to: targetNodeKey,
+          })),
+        ),
+      }
+    : normalizeTemplateGraph(
+        list.map((row) => ({
+          node_key: row?.node_key,
+          node_name: row?.node_name_snapshot,
+          node_type: row?.node_type,
+          phase_key: row?.phase_key,
+          sort_order: row?.sort_order,
+        })),
+      )
+
+  const graphMaps = buildGraphMaps(normalizedGraph)
+  const nodes = (normalizedGraph.nodes || []).map((node) => ({
+    ...node,
+    outgoing_keys: graphMaps.outgoingMap.get(node.node_key) || [],
+    incoming_keys: graphMaps.incomingMap.get(node.node_key) || [],
+  }))
+
+  return {
+    ...normalizedGraph,
+    nodes,
+    nodeMap: new Map(nodes.map((item) => [item.node_key, item])),
+    outgoingMap: graphMaps.outgoingMap,
+    incomingMap: graphMaps.incomingMap,
+  }
+}
+
+async function loadDemandProjectTemplateGraph(conn, demandId) {
+  const [rows] = await conn.query(
+    `SELECT
+       d.template_id,
+       pt.id AS project_template_id,
+       pt.name AS project_template_name,
+       pt.node_config
+     FROM work_demands d
+     LEFT JOIN project_templates pt ON pt.id = d.template_id
+     WHERE d.id = ?
+     LIMIT 1`,
+    [demandId],
+  )
+  const row = rows[0] || null
+  const templateId = toPositiveInt(row?.project_template_id)
+  if (!templateId || !row?.node_config) return null
+
+  const normalizedGraph = normalizeTemplateGraph(row.node_config)
+  if (!Array.isArray(normalizedGraph.nodes) || normalizedGraph.nodes.length === 0) return null
+
+  const graphMaps = buildGraphMaps(normalizedGraph)
+  const nodes = (normalizedGraph.nodes || []).map((node) => ({
+    ...node,
+    outgoing_keys: graphMaps.outgoingMap.get(node.node_key) || [],
+    incoming_keys: graphMaps.incomingMap.get(node.node_key) || [],
+  }))
+
+  return {
+    source: 'PROJECT_TEMPLATE',
+    template_id: templateId,
+    template_name: normalizeText(row.project_template_name, 128) || `项目模板#${templateId}`,
+    schema_version: Number(normalizedGraph.schema_version || 2) || 2,
+    entry_node_key: normalizedGraph.entry_node_key || nodes[0]?.node_key || null,
+    nodes,
+    edges: normalizedGraph.edges || [],
+    nodeMap: new Map(nodes.map((item) => [item.node_key, item])),
+    outgoingMap: graphMaps.outgoingMap,
+    incomingMap: graphMaps.incomingMap,
+  }
+}
+
+async function resolveDemandWorkflowTemplate(conn, demandId, { createdBy = null, forceRebuild = false } = {}) {
+  const projectTemplateGraph = await loadDemandProjectTemplateGraph(conn, demandId)
+  if (projectTemplateGraph) {
+    return projectTemplateGraph
+  }
+
+  const { template, nodes } = await ensureDefaultTemplate(conn, {
+    createdBy,
+    forceRebuild,
+  })
+  const normalizedGraph = normalizeTemplateGraph(
+    (nodes || []).map((item) => ({
+      node_key: item?.node_key,
+      node_name: item?.node_name,
+      node_type: item?.node_type || 'TASK',
+      phase_key: item?.phase_key,
+      sort_order: item?.sort_order,
+    })),
+  )
+  const graphMaps = buildGraphMaps(normalizedGraph)
+  const graphNodes = (normalizedGraph.nodes || []).map((node) => ({
+    ...node,
+    outgoing_keys: graphMaps.outgoingMap.get(node.node_key) || [],
+    incoming_keys: graphMaps.incomingMap.get(node.node_key) || [],
+  }))
+
+  return {
+    source: 'WF_TEMPLATE',
+    template_id: Number(template.id),
+    template_name: normalizeText(template.template_name, 128) || DEFAULT_TEMPLATE_NAME,
+    schema_version: 1,
+    entry_node_key: normalizedGraph.entry_node_key || graphNodes[0]?.node_key || null,
+    nodes: graphNodes,
+    edges: normalizedGraph.edges || [],
+    nodeMap: new Map(graphNodes.map((item) => [item.node_key, item])),
+    outgoingMap: graphMaps.outgoingMap,
+    incomingMap: graphMaps.incomingMap,
+  }
+}
+
+function buildInstanceNodeRemark(graphNode) {
+  return JSON.stringify({
+    schema_version: 2,
+    node_type: normalizeText(graphNode?.node_type, 64).toUpperCase() || 'TASK',
+    phase_key: normalizeText(graphNode?.phase_key, 64) || null,
+    branch_key: normalizeText(graphNode?.branch_key, 64) || null,
+    parallel_group_key: normalizeText(graphNode?.parallel_group_key, 64) || null,
+    join_rule: normalizeText(graphNode?.join_rule, 32).toUpperCase() || 'ALL',
+    description: normalizeText(graphNode?.description, 1000) || '',
+    outgoing_keys: Array.isArray(graphNode?.outgoing_keys) ? graphNode.outgoing_keys : [],
+    incoming_keys: Array.isArray(graphNode?.incoming_keys) ? graphNode.incoming_keys : [],
+  })
+}
+
+async function listInstanceNodesForUpdate(conn, instanceId) {
+  const [rows] = await conn.query(
+    `SELECT
+       id,
+       instance_id,
+       node_key,
+       node_name_snapshot,
+       node_type,
+       phase_key,
+       sort_order,
+       status,
+       assignee_user_id,
+       DATE_FORMAT(due_at, '%Y-%m-%d') AS due_at,
+       remark
+     FROM wf_process_instance_nodes
+     WHERE instance_id = ?
+     ORDER BY sort_order ASC, id ASC
+     FOR UPDATE`,
+    [instanceId],
+  )
+  return rows || []
+}
+
+function getPrimaryActiveNodeRow(rows) {
+  return [...(rows || [])]
+    .filter((item) => item.status === NODE_STATUS.IN_PROGRESS)
+    .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))[0] || null
+}
+
+async function refreshInstanceProgressState(conn, instance, demandId, instanceRows) {
+  const rows = Array.isArray(instanceRows) ? instanceRows : []
+  const activeRows = rows
+    .filter((item) => item.status === NODE_STATUS.IN_PROGRESS)
+    .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
+
+  if (activeRows.length > 0) {
+    await conn.query(
+      `UPDATE wf_process_instances
+       SET current_node_key = ?, status = ?, ended_at = NULL, updated_at = NOW()
+       WHERE id = ?`,
+      [activeRows[0].node_key, INSTANCE_STATUS.IN_PROGRESS, instance.id],
+    )
+    return {
+      status: INSTANCE_STATUS.IN_PROGRESS,
+      currentNodeKey: activeRows[0].node_key,
+      activeCount: activeRows.length,
+    }
+  }
+
+  const unfinishedRows = rows.filter(
+    (item) => item.status !== NODE_STATUS.DONE && item.status !== NODE_STATUS.CANCELLED,
+  )
+
+  if (unfinishedRows.length > 0) {
+    await conn.query(
+      `UPDATE wf_process_instances
+       SET current_node_key = NULL, status = ?, updated_at = NOW()
+       WHERE id = ?`,
+      [INSTANCE_STATUS.IN_PROGRESS, instance.id],
+    )
+    return {
+      status: INSTANCE_STATUS.IN_PROGRESS,
+      currentNodeKey: null,
+      activeCount: 0,
+    }
+  }
+
+  await conn.query(
+    `UPDATE wf_process_instances
+     SET current_node_key = NULL, status = ?, ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
+     WHERE id = ?`,
+    [INSTANCE_STATUS.DONE, instance.id],
+  )
+
+  await conn.query(
+    `UPDATE work_demands
+     SET status = CASE WHEN status = 'CANCELLED' THEN status ELSE 'DONE' END,
+         completed_at = CASE WHEN status = 'CANCELLED' THEN completed_at ELSE COALESCE(completed_at, NOW()) END
+     WHERE id = ?`,
+    [demandId],
+  )
+
+  return {
+    status: INSTANCE_STATUS.DONE,
+    currentNodeKey: null,
+    activeCount: 0,
+  }
+}
+
+async function activateGraphNode(conn, {
+  instance,
+  instanceRows,
+  graph,
+  nodeKey,
+  demandId,
+  operatorUserId = null,
+  taskSource = 'AUTO_NEXT',
+  visited = new Set(),
+}) {
+  const normalizedNodeKey = normalizeTemplateNodeKey(nodeKey)
+  if (!normalizedNodeKey || visited.has(normalizedNodeKey)) return []
+  visited.add(normalizedNodeKey)
+
+  const graphNode = graph.nodeMap.get(normalizedNodeKey)
+  const instanceNode = (instanceRows || []).find((item) => item.node_key === normalizedNodeKey)
+  if (!graphNode || !instanceNode) return []
+
+  const incomingKeys = graph.incomingMap.get(normalizedNodeKey) || []
+  const ready = incomingKeys.every((incomingKey) => {
+    const incomingNode = (instanceRows || []).find((item) => item.node_key === incomingKey)
+    return incomingNode && incomingNode.status === NODE_STATUS.DONE
+  })
+
+  if (!ready) return []
+
+  if (isSystemNodeType(graphNode.node_type)) {
+    if (instanceNode.status !== NODE_STATUS.DONE) {
+      await conn.query(
+        `UPDATE wf_process_instance_nodes
+         SET status = ?, started_at = COALESCE(started_at, NOW()), completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+         WHERE id = ?`,
+        [NODE_STATUS.DONE, instanceNode.id],
+      )
+      instanceNode.status = NODE_STATUS.DONE
+    }
+
+    const activated = []
+    for (const nextNodeKey of graph.outgoingMap.get(normalizedNodeKey) || []) {
+      activated.push(
+        ...(await activateGraphNode(conn, {
+          instance,
+          instanceRows,
+          graph,
+          nodeKey: nextNodeKey,
+          demandId,
+          operatorUserId,
+          taskSource,
+          visited,
+        })),
+      )
+    }
+    return activated
+  }
+
+  if (instanceNode.status === NODE_STATUS.DONE || instanceNode.status === NODE_STATUS.CANCELLED) {
+    return []
+  }
+
+  if (instanceNode.status !== NODE_STATUS.IN_PROGRESS) {
+    await conn.query(
+      `UPDATE wf_process_instance_nodes
+       SET status = ?, started_at = COALESCE(started_at, NOW()), completed_at = NULL, updated_at = NOW()
+       WHERE id = ?`,
+      [NODE_STATUS.IN_PROGRESS, instanceNode.id],
+    )
+    instanceNode.status = NODE_STATUS.IN_PROGRESS
+  }
+
+  await ensureNextNodeTask(conn, instanceNode, demandId, operatorUserId, taskSource)
+  return [normalizedNodeKey]
+}
+
+async function advanceWorkflowFromNode(conn, {
+  instance,
+  instanceRows,
+  graph,
+  sourceNodeKey,
+  demandId,
+  operatorUserId = null,
+  taskSource = 'AUTO_NEXT',
+}) {
+  const activated = []
+  for (const nextNodeKey of graph.outgoingMap.get(sourceNodeKey) || []) {
+    activated.push(
+      ...(await activateGraphNode(conn, {
+        instance,
+        instanceRows,
+        graph,
+        nodeKey: nextNodeKey,
+        demandId,
+        operatorUserId,
+        taskSource,
+      })),
+    )
+  }
+  return activated
+}
+
+function findPreviousExecutableNodeKey(graph, nodeKey) {
+  const normalizedNodeKey = normalizeTemplateNodeKey(nodeKey)
+  if (!normalizedNodeKey || !graph?.incomingMap) return null
+
+  const queue = [...(graph.incomingMap.get(normalizedNodeKey) || [])]
+  const visited = new Set()
+  while (queue.length > 0) {
+    const currentKey = queue.shift()
+    if (!currentKey || visited.has(currentKey)) continue
+    visited.add(currentKey)
+    const currentNode = graph.nodeMap.get(currentKey)
+    if (!currentNode) continue
+    if (!isSystemNodeType(currentNode.node_type)) return currentKey
+    queue.push(...(graph.incomingMap.get(currentKey) || []))
+  }
+  return null
+}
+
+async function submitNodeByGraph(conn, {
+  instance,
+  demandId,
+  nodeKey,
+  operatorUserId,
+  comment = '',
+  sourceType = 'MANUAL',
+  sourceId = null,
+  skipAssigneeCheck = false,
+}) {
+  const instanceRows = await listInstanceNodesForUpdate(conn, instance.id)
+  const graph = buildWorkflowGraphFromInstanceRows(instanceRows)
+  const normalizedNodeKey =
+    normalizeTemplateNodeKey(nodeKey) ||
+    normalizeTemplateNodeKey(instance.current_node_key) ||
+    getPrimaryActiveNodeRow(instanceRows)?.node_key ||
+    null
+
+  if (!normalizedNodeKey) {
+    const err = new Error('workflow_current_node_not_found')
+    err.code = 'WORKFLOW_CURRENT_NODE_NOT_FOUND'
+    throw err
+  }
+
+  const currentNode = instanceRows.find((item) => item.node_key === normalizedNodeKey)
+  if (!currentNode) {
+    const err = new Error('workflow_node_not_found')
+    err.code = 'WORKFLOW_NODE_NOT_FOUND'
+    throw err
+  }
+  if (currentNode.status !== NODE_STATUS.IN_PROGRESS && currentNode.status !== NODE_STATUS.TODO) {
+    const err = new Error('workflow_node_closed')
+    err.code = 'WORKFLOW_NODE_CLOSED'
+    throw err
+  }
+
+  if (!skipAssigneeCheck && toPositiveInt(currentNode.assignee_user_id)) {
+    if (Number(currentNode.assignee_user_id) !== Number(operatorUserId)) {
+      const err = new Error('workflow_not_assignee')
+      err.code = 'WORKFLOW_NOT_ASSIGNEE'
+      throw err
+    }
+  }
+
+  await conn.query(
+    `UPDATE wf_process_tasks
+     SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+     WHERE instance_node_id = ?
+       AND status IN (?, ?)`,
+    [TASK_STATUS.DONE, currentNode.id, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+  )
+
+  await conn.query(
+    `UPDATE wf_process_instance_nodes
+     SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+     WHERE id = ?`,
+    [NODE_STATUS.DONE, currentNode.id],
+  )
+  currentNode.status = NODE_STATUS.DONE
+
+  await closeAutoWorkLogsForNodeAssignee(conn, {
+    demandId,
+    phaseKey: currentNode.phase_key,
+    assigneeUserId: currentNode.assignee_user_id,
+  })
+
+  const activatedNodeKeys = await advanceWorkflowFromNode(conn, {
+    instance,
+    instanceRows,
+    graph,
+    sourceNodeKey: currentNode.node_key,
+    demandId,
+    operatorUserId,
+    taskSource:
+      String(sourceType || '').toUpperCase() === 'WORK_LOG'
+        ? 'AUTO_WORKLOG'
+        : String(sourceType || '').toUpperCase() === 'FORCE'
+          ? 'FORCE'
+          : 'AUTO_NEXT',
+  })
+
+  const progressState = await refreshInstanceProgressState(conn, instance, demandId, instanceRows)
+  const normalizedSourceType = String(sourceType || 'MANUAL').toUpperCase()
+
+  await insertAction(conn, {
+    instanceId: instance.id,
+    instanceNodeId: currentNode.id,
+    actionType:
+      progressState.status === INSTANCE_STATUS.DONE
+        ? normalizedSourceType === 'WORK_LOG'
+          ? 'AUTO_COMPLETE_BY_WORKLOG'
+          : normalizedSourceType === 'FORCE'
+            ? 'FORCE_COMPLETE'
+            : 'COMPLETE'
+        : normalizedSourceType === 'WORK_LOG'
+          ? 'AUTO_SUBMIT_BY_WORKLOG'
+          : normalizedSourceType === 'FORCE'
+            ? 'FORCE_SUBMIT'
+            : 'SUBMIT',
+    fromNodeKey: currentNode.node_key,
+    toNodeKey: progressState.currentNodeKey || activatedNodeKeys[0] || null,
+    operatorUserId,
+    comment:
+      normalizeText(comment, 500) ||
+      (progressState.status === INSTANCE_STATUS.DONE ? '流程已完成' : '当前节点已提交'),
+    sourceType: sourceType || null,
+    sourceId: sourceId || null,
+  })
+}
+
+async function rejectNodeByGraph(conn, {
+  instance,
+  demandId,
+  nodeKey,
+  operatorUserId,
+  rejectReason,
+  comment = '',
+}) {
+  const instanceRows = await listInstanceNodesForUpdate(conn, instance.id)
+  const graph = buildWorkflowGraphFromInstanceRows(instanceRows)
+  const normalizedNodeKey =
+    normalizeTemplateNodeKey(nodeKey) ||
+    normalizeTemplateNodeKey(instance.current_node_key) ||
+    getPrimaryActiveNodeRow(instanceRows)?.node_key ||
+    null
+
+  if (!normalizedNodeKey) {
+    const err = new Error('workflow_current_node_not_found')
+    err.code = 'WORKFLOW_CURRENT_NODE_NOT_FOUND'
+    throw err
+  }
+
+  const currentNode = instanceRows.find((item) => item.node_key === normalizedNodeKey)
+  if (!currentNode) {
+    const err = new Error('workflow_node_not_found')
+    err.code = 'WORKFLOW_NODE_NOT_FOUND'
+    throw err
+  }
+
+  const previousNodeKey = findPreviousExecutableNodeKey(graph, currentNode.node_key)
+  if (!previousNodeKey) {
+    const err = new Error('workflow_previous_node_not_found')
+    err.code = 'WORKFLOW_PREVIOUS_NODE_NOT_FOUND'
+    throw err
+  }
+
+  const previousNode = instanceRows.find((item) => item.node_key === previousNodeKey)
+  if (!previousNode) {
+    const err = new Error('workflow_previous_node_not_found')
+    err.code = 'WORKFLOW_PREVIOUS_NODE_NOT_FOUND'
+    throw err
+  }
+
+  const currentGraphNode = graph.nodeMap.get(currentNode.node_key)
+  const previousGraphNode = graph.nodeMap.get(previousNode.node_key)
+  const shouldResetParallelGroup =
+    currentGraphNode?.parallel_group_key &&
+    currentGraphNode.parallel_group_key !== previousGraphNode?.parallel_group_key
+
+  await conn.query(
+    `UPDATE wf_process_tasks
+     SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+     WHERE instance_node_id = ?
+       AND status IN (?, ?)`,
+    [TASK_STATUS.CANCELLED, currentNode.id, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+  )
+
+  await closeAutoWorkLogsForNodeAssignee(conn, {
+    demandId,
+    phaseKey: currentNode.phase_key,
+    assigneeUserId: currentNode.assignee_user_id,
+  })
+
+  if (shouldResetParallelGroup) {
+    const sameGroupRows = instanceRows.filter(
+      (item) => graph.nodeMap.get(item.node_key)?.parallel_group_key === currentGraphNode.parallel_group_key,
+    )
+
+    for (const row of sameGroupRows) {
+      await conn.query(
+        `UPDATE wf_process_tasks
+         SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+         WHERE instance_node_id = ?
+           AND status IN (?, ?)`,
+        [TASK_STATUS.CANCELLED, row.id, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+      )
+
+      await closeAutoWorkLogsForNodeAssignee(conn, {
+        demandId,
+        phaseKey: row.phase_key,
+        assigneeUserId: row.assignee_user_id,
+      })
+
+      await conn.query(
+        `UPDATE wf_process_instance_nodes
+         SET status = ?, completed_at = NULL, started_at = NULL, reject_reason = NULL, updated_at = NOW()
+         WHERE id = ?`,
+        [row.id === currentNode.id ? NODE_STATUS.RETURNED : NODE_STATUS.TODO, row.id],
+      )
+
+      row.status = row.id === currentNode.id ? NODE_STATUS.RETURNED : NODE_STATUS.TODO
+    }
+  } else {
+    await conn.query(
+      `UPDATE wf_process_instance_nodes
+       SET status = ?, reject_reason = ?, updated_at = NOW()
+       WHERE id = ?`,
+      [NODE_STATUS.RETURNED, rejectReason, currentNode.id],
+    )
+    currentNode.status = NODE_STATUS.RETURNED
+  }
+
+  await conn.query(
+    `UPDATE wf_process_instance_nodes
+     SET status = ?, completed_at = NULL, started_at = COALESCE(started_at, NOW()), updated_at = NOW()
+     WHERE id = ?`,
+    [NODE_STATUS.IN_PROGRESS, previousNode.id],
+  )
+  previousNode.status = NODE_STATUS.IN_PROGRESS
+
+  await ensureNextNodeTask(conn, previousNode, demandId, operatorUserId, 'REJECT_RETURN')
+
+  await conn.query(
+    `INSERT INTO node_status_logs (
+       node_id, from_status, to_status, operator_id, operation_type, remark
+     ) VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      currentNode.id,
+      currentNode.status || null,
+      NODE_STATUS.RETURNED,
+      operatorUserId,
+      'NODE_REJECT',
+      rejectReason,
+    ],
+  )
+
+  await refreshInstanceProgressState(conn, instance, demandId, instanceRows)
+
+  await insertAction(conn, {
+    instanceId: instance.id,
+    instanceNodeId: currentNode.id,
+    actionType: 'REJECT',
+    fromNodeKey: currentNode.node_key,
+    toNodeKey: previousNode.node_key,
+    operatorUserId,
+    targetUserId: toPositiveInt(previousNode.assignee_user_id),
+    comment: normalizeText(comment, 500) || rejectReason,
+    sourceType: 'MANUAL',
+  })
 }
 
 async function createTaskForNode(
@@ -828,18 +1470,18 @@ const Workflow = {
       const normalizedOwnerUserId = toPositiveInt(ownerUserId)
       const normalizedOperatorUserId = toPositiveInt(operatorUserId)
       const shouldAutoAssignCurrentNode = Boolean(autoAssignCurrentNode) && Boolean(normalizedOwnerUserId)
-      const { template, nodes } = await ensureDefaultTemplate(conn, {
+      const runtimeTemplate = await resolveDemandWorkflowTemplate(conn, normalizedDemandId, {
         createdBy: normalizedOperatorUserId,
         forceRebuild: Boolean(forceRebuildTemplateFromDict),
       })
 
-      if (!Array.isArray(nodes) || nodes.length === 0) {
+      if (!Array.isArray(runtimeTemplate?.nodes) || runtimeTemplate.nodes.length === 0) {
         const err = new Error('workflow_template_has_no_nodes')
         err.code = 'WORKFLOW_TEMPLATE_HAS_NO_NODES'
         throw err
       }
 
-      const firstNode = nodes[0]
+      const entryNode = runtimeTemplate.nodeMap.get(runtimeTemplate.entry_node_key) || runtimeTemplate.nodes[0]
       const [instanceResult] = await conn.query(
         `INSERT INTO wf_process_instances (
            biz_type,
@@ -854,21 +1496,19 @@ const Workflow = {
         [
           DEMAND_BIZ_TYPE,
           normalizedDemandId,
-          template.id,
-          template.version,
+          runtimeTemplate.template_id,
+          runtimeTemplate.source === 'PROJECT_TEMPLATE' ? 0 : Number(runtimeTemplate.schema_version || 1),
           INSTANCE_STATUS.IN_PROGRESS,
-          firstNode.node_key,
+          entryNode?.node_key || null,
           normalizedOperatorUserId,
         ],
       )
       const instanceId = Number(instanceResult.insertId)
 
       let firstInstanceNodeId = null
-      for (let i = 0; i < nodes.length; i += 1) {
-        const node = nodes[i]
-        const isCurrent = i === 0
-        const status = isCurrent ? NODE_STATUS.IN_PROGRESS : NODE_STATUS.TODO
-        const assigneeUserId = isCurrent && shouldAutoAssignCurrentNode ? normalizedOwnerUserId : null
+      const instanceRows = []
+      for (let i = 0; i < runtimeTemplate.nodes.length; i += 1) {
+        const node = runtimeTemplate.nodes[i]
 
         const [result] = await conn.query(
           `INSERT INTO wf_process_instance_nodes (
@@ -880,11 +1520,11 @@ const Workflow = {
              sort_order,
              status,
              assignee_user_id,
-             started_at,
-             completed_at,
-             due_at,
-             remark
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+           started_at,
+           completed_at,
+           due_at,
+           remark
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
           [
             instanceId,
             node.node_key,
@@ -892,51 +1532,92 @@ const Workflow = {
             node.node_type || 'TASK',
             node.phase_key || null,
             Number(node.sort_order || (i + 1) * 10),
-            status,
-            assigneeUserId,
-            isCurrent ? new Date() : null,
+            NODE_STATUS.TODO,
+            null,
+            null,
+            buildInstanceNodeRemark(node),
           ],
         )
 
-        if (isCurrent) {
-          firstInstanceNodeId = Number(result.insertId)
+        const insertedNodeId = Number(result.insertId)
+        if (i === 0) firstInstanceNodeId = insertedNodeId
+        instanceRows.push({
+          id: insertedNodeId,
+          instance_id: instanceId,
+          node_key: node.node_key,
+          node_name_snapshot: node.node_name,
+          node_type: node.node_type || 'TASK',
+          phase_key: node.phase_key || null,
+          sort_order: Number(node.sort_order || (i + 1) * 10),
+          status: NODE_STATUS.TODO,
+          assignee_user_id: null,
+          due_at: null,
+          remark: buildInstanceNodeRemark(node),
+        })
+      }
+
+      await activateGraphNode(conn, {
+        instance: { id: instanceId },
+        instanceRows,
+        graph: runtimeTemplate,
+        nodeKey: entryNode?.node_key,
+        demandId: normalizedDemandId,
+        operatorUserId: normalizedOperatorUserId,
+        taskSource: 'SYSTEM_INIT',
+      })
+
+      const currentActiveRows = instanceRows.filter((item) => item.status === NODE_STATUS.IN_PROGRESS)
+      if (shouldAutoAssignCurrentNode && currentActiveRows.length > 0) {
+        for (const activeRow of currentActiveRows) {
+          await conn.query(
+            `UPDATE wf_process_instance_nodes
+             SET assignee_user_id = ?, updated_at = NOW()
+             WHERE id = ?`,
+            [normalizedOwnerUserId, activeRow.id],
+          )
+          activeRow.assignee_user_id = normalizedOwnerUserId
+
+          await createTaskForNode(conn, {
+            instanceId,
+            instanceNodeId: activeRow.id,
+            demandId: normalizedDemandId,
+            phaseKey: activeRow.phase_key,
+            nodeName: activeRow.node_name_snapshot,
+            assigneeUserId: normalizedOwnerUserId,
+            createdBy: normalizedOperatorUserId,
+            sourceType: 'SYSTEM_INIT',
+            sourceId: activeRow.id,
+          })
+
+          await insertAction(conn, {
+            instanceId,
+            instanceNodeId: activeRow.id,
+            actionType: 'ASSIGN',
+            fromNodeKey: activeRow.node_key,
+            toNodeKey: activeRow.node_key,
+            operatorUserId: normalizedOperatorUserId,
+            targetUserId: normalizedOwnerUserId,
+            comment: '初始化自动指派给需求负责人',
+          })
         }
       }
+
+      const progressState = await refreshInstanceProgressState(
+        conn,
+        { id: instanceId },
+        normalizedDemandId,
+        instanceRows,
+      )
 
       await insertAction(conn, {
         instanceId,
         instanceNodeId: firstInstanceNodeId,
         actionType: 'PROCESS_INIT',
         fromNodeKey: null,
-        toNodeKey: firstNode.node_key,
+        toNodeKey: progressState.currentNodeKey || entryNode?.node_key || null,
         operatorUserId: normalizedOperatorUserId,
-        comment: '闇€姹傛祦绋嬪疄渚嬪凡鍒涘缓',
+        comment: '需求流程实例已创建',
       })
-
-      if (firstInstanceNodeId && shouldAutoAssignCurrentNode) {
-        await createTaskForNode(conn, {
-          instanceId,
-          instanceNodeId: firstInstanceNodeId,
-          demandId: normalizedDemandId,
-          phaseKey: firstNode.phase_key,
-          nodeName: firstNode.node_name,
-          assigneeUserId: normalizedOwnerUserId,
-          createdBy: normalizedOperatorUserId,
-          sourceType: 'SYSTEM_INIT',
-          sourceId: firstInstanceNodeId,
-        })
-
-        await insertAction(conn, {
-          instanceId,
-          instanceNodeId: firstInstanceNodeId,
-          actionType: 'ASSIGN',
-          fromNodeKey: firstNode.node_key,
-          toNodeKey: firstNode.node_key,
-          operatorUserId: normalizedOperatorUserId,
-          targetUserId: normalizedOwnerUserId,
-          comment: '鍒濆鍖栬嚜鍔ㄦ寚娲剧粰闇€姹傝礋璐ｄ汉',
-        })
-      }
 
       await conn.commit()
       return this.getDemandWorkflowByInstanceId(instanceId)
@@ -1104,6 +1785,28 @@ const Workflow = {
       const instance = instanceRows[0]
       if (!instance) return null
 
+      if (Number(instance.template_version || 0) === 0 && instance.biz_id) {
+        try {
+          const [projectTemplateRows] = await pool.query(
+            `SELECT
+               pt.id,
+               pt.name
+             FROM work_demands d
+             LEFT JOIN project_templates pt ON pt.id = d.template_id
+             WHERE d.id = ?
+             LIMIT 1`,
+            [instance.biz_id],
+          )
+          const projectTemplate = projectTemplateRows[0] || null
+          if (projectTemplate?.id) {
+            instance.template_key = `PROJECT_TEMPLATE_${projectTemplate.id}`
+            instance.template_name = projectTemplate.name || `项目模板#${projectTemplate.id}`
+          }
+        } catch (err) {
+          // ignore template label override failure
+        }
+      }
+
       const [nodeRows, taskRows, actionRows] = await Promise.all([
         pool.query(
           `SELECT
@@ -1201,6 +1904,8 @@ const Workflow = {
       const nodes = nodeRows[0] || []
       const tasks = taskRows[0] || []
       const actions = actionRows[0] || []
+      const graph = buildWorkflowGraphFromInstanceRows(nodes)
+      const graphNodeMap = graph.nodeMap || new Map()
 
       const collaboratorsByTaskId = new Map()
       try {
@@ -1251,12 +1956,27 @@ const Workflow = {
         }
       })
 
-      const doneCount = nodes.filter((node) => node.status === NODE_STATUS.DONE).length
-      const totalCount = nodes.length
+      const enrichedNodes = (nodes || []).map((node) => {
+        const graphNode = graphNodeMap.get(normalizeTemplateNodeKey(node?.node_key))
+        return {
+          ...node,
+          branch_key: graphNode?.branch_key || null,
+          parallel_group_key: graphNode?.parallel_group_key || null,
+          join_rule: graphNode?.join_rule || null,
+          outgoing_keys: graphNode?.outgoing_keys || [],
+          incoming_keys: graphNode?.incoming_keys || [],
+        }
+      })
+
+      const doneCount = enrichedNodes.filter((node) => node.status === NODE_STATUS.DONE).length
+      const totalCount = enrichedNodes.length
       const progressPercent = totalCount > 0 ? Number(((doneCount / totalCount) * 100).toFixed(1)) : 0
+      const currentNodes = enrichedNodes
+        .filter((node) => node.status === NODE_STATUS.IN_PROGRESS)
+        .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
       const currentNode =
-        nodes.find((node) => node.node_key === instance.current_node_key) ||
-        nodes.find((node) => node.status === NODE_STATUS.IN_PROGRESS) ||
+        currentNodes.find((node) => node.node_key === instance.current_node_key) ||
+        currentNodes[0] ||
         null
 
       return {
@@ -1265,9 +1985,11 @@ const Workflow = {
           total_nodes: totalCount,
           done_nodes: doneCount,
           progress_percent: progressPercent,
+          active_nodes: currentNodes.length,
         },
         current_node: currentNode,
-        nodes,
+        current_nodes: currentNodes,
+        nodes: enrichedNodes,
         tasks: hydratedTasks,
         actions,
       }
@@ -1794,13 +2516,6 @@ const Workflow = {
         throw err
       }
 
-      const currentNode = await findCurrentNodeForUpdate(conn, instance.id, instance.current_node_key)
-      if (!currentNode) {
-        const err = new Error('workflow_current_node_not_found')
-        err.code = 'WORKFLOW_CURRENT_NODE_NOT_FOUND'
-        throw err
-      }
-
       const targetNode = await findNodeByKeyForUpdate(conn, instance.id, normalizedNodeKey)
       if (!targetNode) {
         const err = new Error('workflow_node_not_found')
@@ -1813,7 +2528,6 @@ const Workflow = {
         throw err
       }
 
-      const isCurrentNode = targetNode.node_key === currentNode.node_key
       const previousAssigneeUserId = toPositiveInt(targetNode.assignee_user_id)
       if (previousAssigneeUserId && previousAssigneeUserId !== normalizedAssigneeUserId) {
         await closeAutoWorkLogsForNodeAssignee(conn, {
@@ -1823,13 +2537,14 @@ const Workflow = {
         })
       }
 
-      if (isCurrentNode && targetNode.status === NODE_STATUS.TODO) {
+      if (targetNode.status === NODE_STATUS.TODO) {
         await conn.query(
           `UPDATE wf_process_instance_nodes
            SET status = ?, started_at = COALESCE(started_at, NOW())
            WHERE id = ?`,
           [NODE_STATUS.IN_PROGRESS, targetNode.id],
         )
+        targetNode.status = NODE_STATUS.IN_PROGRESS
       }
 
       await conn.query(
@@ -1838,8 +2553,11 @@ const Workflow = {
          WHERE id = ?`,
         [normalizedAssigneeUserId, normalizedDueAt, targetNode.id],
       )
+      targetNode.assignee_user_id = normalizedAssigneeUserId
 
-      if (isCurrentNode) {
+      const isActiveNode = targetNode.status === NODE_STATUS.IN_PROGRESS
+
+      if (isActiveNode) {
         await conn.query(
           `UPDATE wf_process_tasks
            SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
@@ -1876,15 +2594,15 @@ const Workflow = {
         })
       }
 
-      await insertAction(conn, {
+        await insertAction(conn, {
         instanceId: instance.id,
         instanceNodeId: targetNode.id,
-        actionType: isCurrentNode ? 'ASSIGN' : 'PREASSIGN',
+        actionType: isActiveNode ? 'ASSIGN' : 'PREASSIGN',
         fromNodeKey: targetNode.node_key,
         toNodeKey: targetNode.node_key,
         operatorUserId: normalizedOperatorUserId,
         targetUserId: normalizedAssigneeUserId,
-        comment: comment || (isCurrentNode ? '当前节点任务已指派' : '节点已预指派'),
+        comment: comment || (isActiveNode ? '当前激活节点任务已指派' : '节点已预指派'),
       })
 
       await conn.commit()
@@ -1925,111 +2643,71 @@ const Workflow = {
         throw err
       }
 
-      const currentNode = await findCurrentNodeForUpdate(conn, instance.id, instance.current_node_key)
-      if (!currentNode) {
-        const err = new Error('workflow_current_node_not_found')
-        err.code = 'WORKFLOW_CURRENT_NODE_NOT_FOUND'
+      await submitNodeByGraph(conn, {
+        instance,
+        demandId: normalizedDemandId,
+        operatorUserId: normalizedOperatorUserId,
+        comment,
+        sourceType,
+        sourceId,
+        skipAssigneeCheck,
+      })
+
+      await conn.commit()
+      return this.getDemandWorkflowByInstanceId(instance.id)
+    } catch (err) {
+      await conn.rollback()
+      throw wrapWorkflowError(err)
+    } finally {
+      conn.release()
+    }
+  },
+
+  async submitNode({
+    demandId,
+    nodeKey,
+    operatorUserId,
+    comment = '',
+    sourceType = 'MANUAL',
+    sourceId = null,
+    skipAssigneeCheck = false,
+  } = {}) {
+    const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
+    const normalizedNodeKey = normalizeText(nodeKey, 64).toUpperCase()
+    const normalizedOperatorUserId = toPositiveInt(operatorUserId)
+
+    if (!normalizedDemandId) {
+      const err = new Error('demand_id_required')
+      err.code = 'DEMAND_ID_REQUIRED'
+      throw err
+    }
+    if (!normalizedNodeKey) {
+      const err = new Error('node_key_required')
+      err.code = 'NODE_KEY_REQUIRED'
+      throw err
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const instance = await findActiveDemandInstance(conn, normalizedDemandId, { forUpdate: true })
+      if (!instance) {
+        const err = new Error('workflow_instance_not_found')
+        err.code = 'WORKFLOW_INSTANCE_NOT_FOUND'
         throw err
       }
 
-      if (!skipAssigneeCheck && toPositiveInt(currentNode.assignee_user_id)) {
-        if (Number(currentNode.assignee_user_id) !== Number(normalizedOperatorUserId)) {
-          const err = new Error('workflow_not_assignee')
-          err.code = 'WORKFLOW_NOT_ASSIGNEE'
-          throw err
-        }
-      }
-
-      await conn.query(
-        `UPDATE wf_process_tasks
-         SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-         WHERE instance_node_id = ?
-           AND status IN (?, ?)`,
-        [TASK_STATUS.DONE, currentNode.id, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
-      )
-
-      await conn.query(
-        `UPDATE wf_process_instance_nodes
-         SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-         WHERE id = ?`,
-        [NODE_STATUS.DONE, currentNode.id],
-      )
-
-      await closeAutoWorkLogsForNodeAssignee(conn, {
+      await submitNodeByGraph(conn, {
+        instance,
         demandId: normalizedDemandId,
-        phaseKey: currentNode.phase_key,
-        assigneeUserId: currentNode.assignee_user_id,
+        nodeKey: normalizedNodeKey,
+        operatorUserId: normalizedOperatorUserId,
+        comment,
+        sourceType,
+        sourceId,
+        skipAssigneeCheck,
       })
-
-      const nextNode = await findNextNodeForUpdate(conn, instance.id, currentNode.sort_order)
-
-      const normalizedSourceType = String(sourceType || 'MANUAL').toUpperCase()
-      if (nextNode) {
-        await conn.query(
-          `UPDATE wf_process_instances
-           SET current_node_key = ?, status = ?, updated_at = NOW()
-           WHERE id = ?`,
-          [nextNode.node_key, INSTANCE_STATUS.IN_PROGRESS, instance.id],
-        )
-
-        await conn.query(
-          `UPDATE wf_process_instance_nodes
-           SET status = ?, started_at = COALESCE(started_at, NOW()), updated_at = NOW()
-           WHERE id = ?`,
-          [NODE_STATUS.IN_PROGRESS, nextNode.id],
-        )
-
-        await ensureNextNodeTask(conn, nextNode, normalizedDemandId, normalizedOperatorUserId, 'AUTO_NEXT')
-
-        await insertAction(conn, {
-          instanceId: instance.id,
-          instanceNodeId: currentNode.id,
-          actionType:
-            normalizedSourceType === 'WORK_LOG'
-              ? 'AUTO_SUBMIT_BY_WORKLOG'
-              : normalizedSourceType === 'FORCE'
-                ? 'FORCE_SUBMIT'
-                : 'SUBMIT',
-          fromNodeKey: currentNode.node_key,
-          toNodeKey: nextNode.node_key,
-          operatorUserId: normalizedOperatorUserId,
-          comment: comment || '鑺傜偣宸叉彁浜わ紝杩涘叆涓嬩竴闃舵',
-          sourceType: sourceType || null,
-          sourceId: sourceId || null,
-        })
-      } else {
-        await conn.query(
-          `UPDATE wf_process_instances
-           SET status = ?, ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
-           WHERE id = ?`,
-          [INSTANCE_STATUS.DONE, instance.id],
-        )
-
-        await conn.query(
-          `UPDATE work_demands
-           SET status = CASE WHEN status = 'CANCELLED' THEN status ELSE 'DONE' END,
-               completed_at = CASE WHEN status = 'CANCELLED' THEN completed_at ELSE COALESCE(completed_at, NOW()) END
-           WHERE id = ?`,
-          [normalizedDemandId],
-        )
-
-        await insertAction(conn, {
-          instanceId: instance.id,
-          instanceNodeId: currentNode.id,
-          actionType:
-            normalizedSourceType === 'WORK_LOG'
-              ? 'AUTO_COMPLETE_BY_WORKLOG'
-              : normalizedSourceType === 'FORCE'
-                ? 'FORCE_COMPLETE'
-                : 'COMPLETE',
-          fromNodeKey: currentNode.node_key,
-          toNodeKey: null,
-          operatorUserId: normalizedOperatorUserId,
-          comment: comment || '流程已完成',
-          sourceType: sourceType || null,
-          sourceId: sourceId || null,
-        })
-      }
 
       await conn.commit()
       return this.getDemandWorkflowByInstanceId(instance.id)
@@ -2079,92 +2757,76 @@ const Workflow = {
         throw err
       }
 
-      const currentNode = await findCurrentNodeForUpdate(conn, instance.id, instance.current_node_key)
-      if (!currentNode) {
-        const err = new Error('workflow_current_node_not_found')
-        err.code = 'WORKFLOW_CURRENT_NODE_NOT_FOUND'
-        throw err
-      }
-
-      const previousNode = await findPreviousNodeForUpdate(conn, instance.id, currentNode.sort_order)
-      if (!previousNode) {
-        const err = new Error('workflow_previous_node_not_found')
-        err.code = 'WORKFLOW_PREVIOUS_NODE_NOT_FOUND'
-        throw err
-      }
-
-      await conn.query(
-        `UPDATE wf_process_tasks
-         SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-         WHERE instance_node_id = ?
-           AND status IN (?, ?)`,
-        [TASK_STATUS.CANCELLED, currentNode.id, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
-      )
-
-      await conn.query(
-        `UPDATE wf_process_instance_nodes
-         SET status = ?, reject_reason = ?, updated_at = NOW()
-         WHERE id = ?`,
-        [NODE_STATUS.RETURNED, normalizedRejectReason, currentNode.id],
-      )
-
-      await closeAutoWorkLogsForNodeAssignee(conn, {
+      await rejectNodeByGraph(conn, {
+        instance,
         demandId: normalizedDemandId,
-        phaseKey: currentNode.phase_key,
-        assigneeUserId: currentNode.assignee_user_id,
+        operatorUserId: normalizedOperatorUserId,
+        rejectReason: normalizedRejectReason,
+        comment: normalizedComment,
       })
 
-      await conn.query(
-        `UPDATE wf_process_instance_nodes
-         SET status = ?,
-             completed_at = NULL,
-             started_at = COALESCE(started_at, NOW()),
-             updated_at = NOW()
-         WHERE id = ?`,
-        [NODE_STATUS.IN_PROGRESS, previousNode.id],
-      )
+      await conn.commit()
+      return this.getDemandWorkflowByInstanceId(instance.id)
+    } catch (err) {
+      await conn.rollback()
+      throw wrapWorkflowError(err)
+    } finally {
+      conn.release()
+    }
+  },
 
-      await conn.query(
-        `UPDATE wf_process_tasks
-         SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-         WHERE instance_node_id = ?
-           AND status IN (?, ?)`,
-        [TASK_STATUS.CANCELLED, previousNode.id, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
-      )
+  async rejectNode({
+    demandId,
+    nodeKey,
+    operatorUserId,
+    rejectReason = '',
+    comment = '',
+  } = {}) {
+    const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
+    const normalizedNodeKey = normalizeText(nodeKey, 64).toUpperCase()
+    const normalizedOperatorUserId = toPositiveInt(operatorUserId)
+    const normalizedRejectReason = normalizeText(rejectReason, 2000)
+    const normalizedComment = normalizeText(comment, 500)
 
-      await conn.query(
-        `UPDATE wf_process_instances
-         SET current_node_key = ?, status = ?, updated_at = NOW()
-         WHERE id = ?`,
-        [previousNode.node_key, INSTANCE_STATUS.IN_PROGRESS, instance.id],
-      )
+    if (!normalizedDemandId) {
+      const err = new Error('demand_id_required')
+      err.code = 'DEMAND_ID_REQUIRED'
+      throw err
+    }
+    if (!normalizedNodeKey) {
+      const err = new Error('node_key_required')
+      err.code = 'NODE_KEY_REQUIRED'
+      throw err
+    }
+    if (!normalizedOperatorUserId) {
+      const err = new Error('operator_user_id_invalid')
+      err.code = 'OPERATOR_USER_ID_INVALID'
+      throw err
+    }
+    if (!normalizedRejectReason) {
+      const err = new Error('reject_reason_required')
+      err.code = 'REJECT_REASON_REQUIRED'
+      throw err
+    }
 
-      await ensureNextNodeTask(conn, previousNode, normalizedDemandId, normalizedOperatorUserId, 'REJECT_RETURN')
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
 
-      await conn.query(
-        `INSERT INTO node_status_logs (
-           node_id, from_status, to_status, operator_id, operation_type, remark
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          currentNode.id,
-          currentNode.status || null,
-          NODE_STATUS.RETURNED,
-          normalizedOperatorUserId,
-          'NODE_REJECT',
-          normalizedRejectReason,
-        ],
-      )
+      const instance = await findActiveDemandInstance(conn, normalizedDemandId, { forUpdate: true })
+      if (!instance) {
+        const err = new Error('workflow_instance_not_found')
+        err.code = 'WORKFLOW_INSTANCE_NOT_FOUND'
+        throw err
+      }
 
-      await insertAction(conn, {
-        instanceId: instance.id,
-        instanceNodeId: currentNode.id,
-        actionType: 'REJECT',
-        fromNodeKey: currentNode.node_key,
-        toNodeKey: previousNode.node_key,
+      await rejectNodeByGraph(conn, {
+        instance,
+        demandId: normalizedDemandId,
+        nodeKey: normalizedNodeKey,
         operatorUserId: normalizedOperatorUserId,
-        targetUserId: toPositiveInt(previousNode.assignee_user_id),
-        comment: normalizedComment || normalizedRejectReason,
-        sourceType: 'MANUAL',
+        rejectReason: normalizedRejectReason,
+        comment: normalizedComment,
       })
 
       await conn.commit()
@@ -2508,46 +3170,51 @@ const Workflow = {
         return { triggered: false, reason: 'INSTANCE_NOT_FOUND' }
       }
 
-      const currentNode = await findCurrentNodeForUpdate(conn, instance.id, instance.current_node_key)
-      if (!currentNode) {
+      const instanceRows = await listInstanceNodesForUpdate(conn, instance.id)
+      const activeCandidates = instanceRows.filter((row) => {
+        if (row.status !== NODE_STATUS.IN_PROGRESS) return false
+        if (normalizeText(row.phase_key, 64).toUpperCase() !== normalizedPhaseKey) return false
+        if (!toPositiveInt(row.assignee_user_id)) return false
+        return Number(row.assignee_user_id) === Number(normalizedOperatorUserId)
+      })
+
+      if (activeCandidates.length === 0) {
         await conn.commit()
-        return { triggered: false, reason: 'CURRENT_NODE_NOT_FOUND' }
+        return { triggered: false, reason: 'PHASE_NOT_ACTIVE_OR_ASSIGNEE_MISMATCH' }
       }
 
-      if (normalizeText(currentNode.phase_key, 64).toUpperCase() !== normalizedPhaseKey) {
-        await conn.commit()
-        return { triggered: false, reason: 'PHASE_NOT_CURRENT_NODE' }
+      const openTaskMap = new Map()
+      for (const candidate of activeCandidates) {
+        const [taskRows] = await conn.query(
+          `SELECT
+             t.id
+           FROM wf_process_tasks t
+           WHERE t.instance_node_id = ?
+             AND t.assignee_user_id = ?
+             AND t.status IN (?, ?)
+           ORDER BY t.id DESC
+           LIMIT 2
+           FOR UPDATE`,
+          [candidate.id, normalizedOperatorUserId, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+        )
+        openTaskMap.set(candidate.id, taskRows || [])
       }
 
-      if (!toPositiveInt(currentNode.assignee_user_id)) {
-        await conn.commit()
-        return { triggered: false, reason: 'CURRENT_NODE_UNASSIGNED' }
-      }
-
-      if (Number(currentNode.assignee_user_id) !== Number(normalizedOperatorUserId)) {
-        await conn.commit()
-        return { triggered: false, reason: 'OPERATOR_NOT_ASSIGNEE' }
-      }
-
-      const [taskRows] = await conn.query(
-        `SELECT
-           t.id
-         FROM wf_process_tasks t
-         WHERE t.instance_node_id = ?
-           AND t.assignee_user_id = ?
-           AND t.status IN (?, ?)
-         ORDER BY t.id DESC
-         LIMIT 2
-         FOR UPDATE`,
-        [currentNode.id, normalizedOperatorUserId, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+      const uniqueCandidates = activeCandidates.filter(
+        (candidate) => (openTaskMap.get(candidate.id) || []).length === 1,
       )
 
-      if ((taskRows || []).length !== 1) {
+      if (uniqueCandidates.length !== 1) {
         await conn.commit()
-        return { triggered: false, reason: 'TASK_NOT_UNIQUE' }
+        return {
+          triggered: false,
+          reason: uniqueCandidates.length === 0 ? 'TASK_NOT_UNIQUE' : 'MULTIPLE_ACTIVE_NODES_MATCHED',
+        }
       }
 
-      const targetTaskId = Number(taskRows[0].id)
+      const currentNode = uniqueCandidates[0]
+      const targetTaskId = Number((openTaskMap.get(currentNode.id) || [])[0].id)
+
       await conn.query(
         `UPDATE wf_process_tasks
          SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
@@ -2581,88 +3248,28 @@ const Workflow = {
           triggered: true,
           node_completed: false,
           instance_id: instance.id,
+          node_key: currentNode.node_key,
           reason: 'NODE_HAS_REMAINING_OPEN_TASKS',
         }
       }
 
-      await conn.query(
-        `UPDATE wf_process_instance_nodes
-         SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-         WHERE id = ?`,
-        [NODE_STATUS.DONE, currentNode.id],
-      )
-
-      await closeAutoWorkLogsForNodeAssignee(conn, {
+      await submitNodeByGraph(conn, {
+        instance,
         demandId: normalizedDemandId,
-        phaseKey: currentNode.phase_key,
-        assigneeUserId: currentNode.assignee_user_id,
+        nodeKey: currentNode.node_key,
+        operatorUserId: normalizedOperatorUserId,
+        comment: '工作台事项完成，自动推进流程节点',
+        sourceType: 'WORK_LOG',
+        sourceId: normalizedLogId || null,
+        skipAssigneeCheck: false,
       })
-
-      const nextNode = await findNextNodeForUpdate(conn, instance.id, currentNode.sort_order)
-      if (nextNode) {
-        await conn.query(
-          `UPDATE wf_process_instances
-           SET current_node_key = ?, status = ?, updated_at = NOW()
-           WHERE id = ?`,
-          [nextNode.node_key, INSTANCE_STATUS.IN_PROGRESS, instance.id],
-        )
-
-        await conn.query(
-          `UPDATE wf_process_instance_nodes
-           SET status = ?, started_at = COALESCE(started_at, NOW()), updated_at = NOW()
-           WHERE id = ?`,
-          [NODE_STATUS.IN_PROGRESS, nextNode.id],
-        )
-
-        await ensureNextNodeTask(conn, nextNode, normalizedDemandId, normalizedOperatorUserId, 'AUTO_WORKLOG')
-
-        await insertAction(conn, {
-          instanceId: instance.id,
-          instanceNodeId: currentNode.id,
-          actionType: 'AUTO_SUBMIT_BY_WORKLOG',
-          fromNodeKey: currentNode.node_key,
-          toNodeKey: nextNode.node_key,
-          operatorUserId: normalizedOperatorUserId,
-          comment: '褰撳墠鑺傜偣宸茶嚜鍔ㄥ畬鎴愬苟鎺ㄨ繘鍒颁笅涓€鑺傜偣',
-          sourceType: 'WORK_LOG',
-          sourceId: normalizedLogId || null,
-        })
-      } else {
-        await conn.query(
-          `UPDATE wf_process_instances
-           SET status = ?, ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
-           WHERE id = ?`,
-          [INSTANCE_STATUS.DONE, instance.id],
-        )
-
-        await conn.query(
-          `UPDATE work_demands
-           SET status = CASE WHEN status = 'CANCELLED' THEN status ELSE 'DONE' END,
-               completed_at = CASE WHEN status = 'CANCELLED' THEN completed_at ELSE COALESCE(completed_at, NOW()) END
-           WHERE id = ?`,
-          [normalizedDemandId],
-        )
-
-        await insertAction(conn, {
-          instanceId: instance.id,
-          instanceNodeId: currentNode.id,
-          actionType: 'AUTO_COMPLETE_BY_WORKLOG',
-          fromNodeKey: currentNode.node_key,
-          toNodeKey: null,
-          operatorUserId: normalizedOperatorUserId,
-          comment: '鏈€鍚庤妭鐐硅嚜鍔ㄥ畬鎴愶紝娴佺▼缁撴潫',
-          sourceType: 'WORK_LOG',
-          sourceId: normalizedLogId || null,
-        })
-      }
 
       await conn.commit()
       return {
         triggered: true,
         node_completed: true,
         instance_id: instance.id,
-        advanced: Boolean(nextNode),
-        next_node_key: nextNode?.node_key || null,
+        node_key: currentNode.node_key,
       }
     } catch (err) {
       await conn.rollback()

@@ -5,6 +5,7 @@ const authMiddleware = require('../middleware/auth')
 const {
   listWorkItemTypes,
   listDemandPhaseTypes,
+  listProjectTemplatePhaseTypes,
   listWorkflowAssignees,
   createWorkItemType,
   listProjectTemplates,
@@ -42,8 +43,11 @@ const {
   assignDemandWorkflowCurrentNode,
   assignDemandWorkflowNode,
   submitDemandWorkflowCurrentNode,
+  submitDemandWorkflowNode,
   rejectDemandWorkflowCurrentNode,
+  rejectDemandWorkflowNode,
   forceCompleteDemandWorkflowCurrentNode,
+  forceCompleteDemandWorkflowNode,
   updateDemandWorkflowNodeHours,
   updateDemandWorkflowTaskHours,
   listDemandWorkflowTaskCollaborators,
@@ -66,8 +70,13 @@ router.get(
 )
 router.get(
   '/phase-types',
-  authMiddleware.requireAnyPermission(['worklog.view.self', 'demand.view']),
+  authMiddleware.requireAnyPermission(['worklog.view.self', 'demand.view', 'project.template.view']),
   listDemandPhaseTypes,
+)
+router.get(
+  '/project-template-phase-types',
+  authMiddleware.requirePermission('project.template.view'),
+  listProjectTemplatePhaseTypes,
 )
 router.get(
   '/workflow/assignees',
@@ -119,14 +128,29 @@ router.post(
   submitDemandWorkflowCurrentNode,
 )
 router.post(
+  '/demands/:id/workflow/nodes/:nodeKey/submit',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  submitDemandWorkflowNode,
+)
+router.post(
   '/demands/:id/workflow/current/reject',
   authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
   rejectDemandWorkflowCurrentNode,
 )
 router.post(
+  '/demands/:id/workflow/nodes/:nodeKey/reject',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  rejectDemandWorkflowNode,
+)
+router.post(
   '/demands/:id/workflow/current/force-complete',
   authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
   forceCompleteDemandWorkflowCurrentNode,
+)
+router.post(
+  '/demands/:id/workflow/nodes/:nodeKey/force-complete',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  forceCompleteDemandWorkflowNode,
 )
 router.put(
   '/demands/:id/workflow/nodes/:nodeKey/hours',
