@@ -1,6 +1,11 @@
 ﻿const Work = require('../models/Work')
 const User = require('../models/User')
 const Workflow = require('../models/Workflow')
+const {
+  normalizeTemplateGraph,
+  filterTemplateGraphByParticipantRoles,
+  normalizeParticipantRoles,
+} = require('../utils/projectTemplateWorkflowGraph')
 
 const NOTIFICATION_SCENES = new Set([
   'node_assign',
@@ -249,6 +254,38 @@ function normalizeTemplateNodeConfig(value) {
   } catch (err) {
     return { ok: false, value: null }
   }
+}
+
+function normalizeParticipantRolesFromBody(value) {
+  if (value === undefined) return { ok: true, value: undefined }
+  if (value === null || value === '') return { ok: true, value: [] }
+
+  let list = value
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (!text) return { ok: true, value: [] }
+    try {
+      list = JSON.parse(text)
+    } catch (err) {
+      list = text.split(',')
+    }
+  }
+
+  if (!Array.isArray(list)) return { ok: false, value: null }
+  return { ok: true, value: normalizeParticipantRoles(list) }
+}
+
+function validateTemplateParticipantRoles(template, participantRoles = []) {
+  const normalizedGraph = filterTemplateGraphByParticipantRoles(
+    normalizeTemplateGraph(template?.node_config || []),
+    participantRoles,
+  )
+  return Array.isArray(normalizedGraph?.nodes) && normalizedGraph.nodes.length > 0
+}
+
+function areStringArraysEqual(left = [], right = []) {
+  if (left.length !== right.length) return false
+  return left.every((item, index) => String(item || '') === String(right[index] || ''))
 }
 
 function normalizeNotificationReceiverRoles(value) {
@@ -868,12 +905,13 @@ const createDemand = async (req, res) => {
       ? toPositiveInt(req.user?.id)
       : parsedOwnerUserId
   const businessGroupCode = normalizeBusinessGroupCode(req.body.business_group_code)
-  const managementMode = normalizeDemandManagementMode(req.body.management_mode)
+  const managementMode = 'advanced'
   const templateIdRaw = req.body.template_id
   const templateId =
     templateIdRaw === undefined || templateIdRaw === null || templateIdRaw === ''
       ? null
       : toPositiveInt(templateIdRaw)
+  const participantRolesResult = normalizeParticipantRolesFromBody(req.body.participant_roles)
   const projectManagerRaw = req.body.project_manager
   const projectManager =
     projectManagerRaw === undefined || projectManagerRaw === null || projectManagerRaw === ''
@@ -914,6 +952,15 @@ const createDemand = async (req, res) => {
   }
   if (templateIdRaw !== undefined && templateId === null) {
     return res.status(400).json({ success: false, message: 'template_id 无效' })
+  }
+  if (!templateId) {
+    return res.status(400).json({ success: false, message: '请先选择需求模板' })
+  }
+  if (!participantRolesResult.ok) {
+    return res.status(400).json({ success: false, message: 'participant_roles 必须是数组或 JSON 数组字符串' })
+  }
+  if ((participantRolesResult.value || []).length === 0) {
+    return res.status(400).json({ success: false, message: '请至少选择一个需求涉及角色' })
   }
   if (projectManagerRaw !== undefined && projectManager === null) {
     return res.status(400).json({ success: false, message: 'project_manager 无效' })
@@ -972,6 +1019,9 @@ const createDemand = async (req, res) => {
       if (!template) {
         return res.status(400).json({ success: false, message: 'template_id 对应模板不存在或未启用' })
       }
+      if (!validateTemplateParticipantRoles(template, participantRolesResult.value || [])) {
+        return res.status(400).json({ success: false, message: '当前参与角色未命中模板节点，请调整参与角色或模板配置' })
+      }
     }
 
     if (projectManager) {
@@ -987,6 +1037,7 @@ const createDemand = async (req, res) => {
       ownerUserId,
       managementMode,
       templateId,
+      participantRoles: participantRolesResult.value || [],
       projectManager,
       healthStatus,
       actualStartTime: actualStartTime || null,
@@ -1077,10 +1128,7 @@ const updateDemand = async (req, res) => {
     const ownerUserId = parsedOwnerUserId === undefined ? existing.owner_user_id : parsedOwnerUserId
     const status = req.body.status ? normalizeStatus(req.body.status) : existing.status
     const priority = req.body.priority ? normalizePriority(req.body.priority) : existing.priority
-    const managementMode =
-      req.body.management_mode === undefined
-        ? normalizeDemandManagementMode(existing.management_mode)
-        : normalizeDemandManagementMode(req.body.management_mode)
+    const managementMode = 'advanced'
     const healthStatus =
       req.body.health_status === undefined
         ? normalizeDemandHealthStatus(existing.health_status)
@@ -1091,10 +1139,22 @@ const updateDemand = async (req, res) => {
         : req.body.template_id === null || String(req.body.template_id).trim() === ''
           ? null
           : toPositiveInt(req.body.template_id)
+    const participantRolesResult = normalizeParticipantRolesFromBody(req.body.participant_roles)
     if (req.body.template_id !== undefined && req.body.template_id !== null && req.body.template_id !== '' && !parsedTemplateId) {
       return res.status(400).json({ success: false, message: 'template_id 无效' })
     }
+    if (!participantRolesResult.ok) {
+      return res.status(400).json({ success: false, message: 'participant_roles 必须是数组或 JSON 数组字符串' })
+    }
     const templateId = parsedTemplateId === undefined ? toPositiveInt(existing.template_id) : parsedTemplateId
+    const participantRoles =
+      participantRolesResult.value === undefined ? existing.participant_roles || [] : participantRolesResult.value
+    if (!templateId) {
+      return res.status(400).json({ success: false, message: '请先选择需求模板' })
+    }
+    if ((participantRoles || []).length === 0) {
+      return res.status(400).json({ success: false, message: '请至少选择一个需求涉及角色' })
+    }
     const parsedProjectManager =
       req.body.project_manager === undefined
         ? undefined
@@ -1200,6 +1260,9 @@ const updateDemand = async (req, res) => {
       if (!template) {
         return res.status(400).json({ success: false, message: 'template_id 对应模板不存在或未启用' })
       }
+      if (!validateTemplateParticipantRoles(template, participantRoles || [])) {
+        return res.status(400).json({ success: false, message: '当前参与角色未命中模板节点，请调整参与角色或模板配置' })
+      }
     }
 
     if (projectManager) {
@@ -1212,12 +1275,20 @@ const updateDemand = async (req, res) => {
     const completedAt = isDemandOpen(status)
       ? null
       : req.body.completed_at || existing.completed_at || new Date()
+    const normalizedExistingParticipantRoles = normalizeParticipantRoles(existing.participant_roles || [])
+    const normalizedNextParticipantRoles = normalizeParticipantRoles(participantRoles || [])
+    const templateChanged = Number(existing.template_id || 0) !== Number(templateId || 0)
+    const participantRolesChanged = !areStringArraysEqual(
+      normalizedExistingParticipantRoles,
+      normalizedNextParticipantRoles,
+    )
 
     await Work.updateDemand(demandId, {
       name,
       ownerUserId,
       managementMode,
       templateId: templateId || null,
+      participantRoles: participantRoles || [],
       projectManager: projectManager || null,
       healthStatus,
       actualStartTime,
@@ -1234,7 +1305,59 @@ const updateDemand = async (req, res) => {
     })
 
     const updated = await Work.findDemandById(demandId)
-    return res.json({ success: true, message: '需求更新成功', data: updated })
+    let workflowSyncNotice = ''
+    let workflowAutoReplaced = false
+
+    if (templateChanged || participantRolesChanged) {
+      try {
+        await Workflow.replaceDemandWorkflowWithLatestTemplate({
+          demandId,
+          operatorUserId: req.user.id,
+          autoAssignCurrentNode: false,
+        })
+        workflowAutoReplaced = true
+      } catch (workflowErr) {
+        if (isWorkflowTablesMissing(workflowErr)) {
+          workflowSyncNotice = '涉及角色已保存，但流程表尚未初始化，本次未自动同步流程'
+        } else if (workflowErr?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
+          try {
+            await Workflow.initDemandWorkflow({
+              demandId,
+              ownerUserId,
+              operatorUserId: req.user.id,
+              autoAssignCurrentNode: false,
+            })
+            workflowAutoReplaced = true
+          } catch (initErr) {
+            if (isWorkflowTablesMissing(initErr)) {
+              workflowSyncNotice = '涉及角色已保存，但流程表尚未初始化，本次未自动同步流程'
+            } else {
+              workflowSyncNotice = '涉及角色已保存，但流程自动同步失败，请稍后重试'
+              console.error('需求更新后自动初始化流程失败:', initErr)
+            }
+          }
+        } else if (workflowErr?.code === 'WORKFLOW_REPLACE_UNSAFE') {
+          workflowSyncNotice = '涉及角色已保存，但当前流程已有已完成节点，请手动点击“强制替换为最新流程”'
+        } else {
+          workflowSyncNotice = '涉及角色已保存，但流程自动同步失败，请稍后重试'
+          console.error('需求更新后自动替换流程失败:', workflowErr)
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: workflowAutoReplaced
+        ? '需求更新成功，流程已自动同步'
+        : workflowSyncNotice
+          ? `需求更新成功（${workflowSyncNotice}）`
+          : '需求更新成功',
+      data: {
+        ...updated,
+        workflow_auto_replaced: workflowAutoReplaced ? 1 : 0,
+        workflow_sync_notice: workflowSyncNotice || null,
+      },
+    })
   } catch (err) {
     console.error('更新需求失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })

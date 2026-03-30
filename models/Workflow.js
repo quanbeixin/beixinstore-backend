@@ -1,9 +1,11 @@
 ﻿const pool = require('../utils/db')
 const {
   normalizeTemplateGraph,
+  filterTemplateGraphByParticipantRoles,
   buildGraphMaps,
   isSystemNodeType,
   normalizeNodeKey: normalizeTemplateNodeKey,
+  normalizeParticipantRoles,
 } = require('../utils/projectTemplateWorkflowGraph')
 
 const DEMAND_BIZ_TYPE = 'DEMAND'
@@ -84,6 +86,20 @@ function normalizeHours(value) {
 function normalizeStatus(status, fallback = '') {
   const value = String(status || '').trim().toUpperCase()
   return value || fallback
+}
+
+function parseJsonArray(raw, fallback = []) {
+  if (Array.isArray(raw)) return raw
+  if (!raw) return fallback
+  if (typeof raw === 'object') return fallback
+  if (typeof raw !== 'string') return fallback
+
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : fallback
+  } catch (err) {
+    return fallback
+  }
 }
 
 function isWorkflowTableMissingError(err) {
@@ -348,6 +364,7 @@ async function loadDemandProjectTemplateGraph(conn, demandId) {
   const [rows] = await conn.query(
     `SELECT
        d.template_id,
+       d.participant_roles_json,
        pt.id AS project_template_id,
        pt.name AS project_template_name,
        pt.node_config
@@ -361,8 +378,16 @@ async function loadDemandProjectTemplateGraph(conn, demandId) {
   const templateId = toPositiveInt(row?.project_template_id)
   if (!templateId || !row?.node_config) return null
 
-  const normalizedGraph = normalizeTemplateGraph(row.node_config)
-  if (!Array.isArray(normalizedGraph.nodes) || normalizedGraph.nodes.length === 0) return null
+  const hasConfiguredParticipantRoles =
+    row?.participant_roles_json !== null &&
+    row?.participant_roles_json !== undefined &&
+    String(row.participant_roles_json).trim() !== ''
+  const normalizedParticipantRoles = hasConfiguredParticipantRoles
+    ? normalizeParticipantRoles(parseJsonArray(row?.participant_roles_json))
+    : null
+  const normalizedGraph = hasConfiguredParticipantRoles
+    ? filterTemplateGraphByParticipantRoles(row.node_config, normalizedParticipantRoles)
+    : normalizeTemplateGraph(row.node_config)
 
   const graphMaps = buildGraphMaps(normalizedGraph)
   const nodes = (normalizedGraph.nodes || []).map((node) => ({
@@ -450,6 +475,7 @@ function buildInstanceNodeRemark(graphNode) {
     parallel_group_key: normalizeText(graphNode?.parallel_group_key, 64) || null,
     join_rule: normalizeText(graphNode?.join_rule, 32).toUpperCase() || 'ALL',
     description: normalizeText(graphNode?.description, 1000) || '',
+    participant_roles: normalizeParticipantRoles(graphNode?.participant_roles),
     outgoing_keys: Array.isArray(graphNode?.outgoing_keys) ? graphNode.outgoing_keys : [],
     incoming_keys: Array.isArray(graphNode?.incoming_keys) ? graphNode.incoming_keys : [],
   })

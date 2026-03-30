@@ -20,6 +20,30 @@ function normalizeNodeType(value, fallback = 'TASK') {
   return type || 'TASK'
 }
 
+function normalizeParticipantRoles(values) {
+  const list = Array.isArray(values)
+    ? values
+    : values && typeof values === 'object'
+      ? []
+      : typeof values === 'string'
+        ? values.split(',')
+        : []
+
+  return Array.from(
+    new Set(
+      list
+        .map((item) =>
+          String(item || '')
+            .trim()
+            .replace(/\s+/g, '_')
+            .toUpperCase()
+            .slice(0, 64),
+        )
+        .filter(Boolean),
+    ),
+  )
+}
+
 function normalizeSortOrder(value, fallback = 0) {
   const num = Number(value)
   return Number.isFinite(num) ? num : fallback
@@ -60,6 +84,9 @@ function normalizeLegacyNodes(rows) {
           ) || null,
         join_rule: normalizeText(row?.join_rule || row?.joinRule || '', 32).toUpperCase() || null,
         description: normalizeText(row?.description || row?.meta?.description || '', 1000) || '',
+        participant_roles: normalizeParticipantRoles(
+          row?.participant_roles || row?.participantRoles || row?.meta?.participant_roles || row?.meta?.participantRoles,
+        ),
       }
     })
     .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
@@ -99,6 +126,9 @@ function normalizeV2Nodes(rows) {
           ) || null,
         join_rule: normalizeText(row?.join_rule || row?.joinRule || 'ALL', 32).toUpperCase() || null,
         description: normalizeText(row?.description || row?.meta?.description || '', 1000) || '',
+        participant_roles: normalizeParticipantRoles(
+          row?.participant_roles || row?.participantRoles || row?.meta?.participant_roles || row?.meta?.participantRoles,
+        ),
       }
     })
     .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
@@ -154,6 +184,83 @@ function normalizeTemplateGraph(rawConfig) {
   }
 }
 
+function filterTemplateGraphByParticipantRoles(templateGraph, participantRoles = []) {
+  const normalizedGraph = normalizeTemplateGraph(templateGraph)
+  const normalizedDemandRoles = normalizeParticipantRoles(participantRoles)
+  const demandRoleSet = new Set(normalizedDemandRoles)
+  const allNodes = Array.isArray(normalizedGraph.nodes) ? normalizedGraph.nodes : []
+  const allEdges = Array.isArray(normalizedGraph.edges) ? normalizedGraph.edges : []
+  const keptNodes = allNodes.filter((node) => {
+    const nodeRoles = normalizeParticipantRoles(node?.participant_roles)
+    if (nodeRoles.length === 0) return true
+    return nodeRoles.some((role) => demandRoleSet.has(role))
+  })
+
+  if (keptNodes.length === allNodes.length) {
+    return normalizedGraph
+  }
+
+  const keptKeySet = new Set(keptNodes.map((node) => node.node_key))
+  const outgoingMap = new Map()
+  const incomingMap = new Map()
+  allEdges.forEach((edge) => {
+    if (!outgoingMap.has(edge.from)) outgoingMap.set(edge.from, [])
+    if (!incomingMap.has(edge.to)) incomingMap.set(edge.to, [])
+    outgoingMap.get(edge.from).push(edge.to)
+    incomingMap.get(edge.to).push(edge.from)
+  })
+
+  const nextEdgeKeySet = new Set()
+  const nextEdges = []
+  const addEdge = (from, to) => {
+    if (!from || !to || from === to) return
+    const edgeKey = `${from}__${to}`
+    if (nextEdgeKeySet.has(edgeKey)) return
+    nextEdgeKeySet.add(edgeKey)
+    nextEdges.push({ from, to })
+  }
+
+  keptNodes.forEach((node) => {
+    const queue = [...(outgoingMap.get(node.node_key) || [])]
+    const visited = new Set()
+
+    while (queue.length > 0) {
+      const currentKey = queue.shift()
+      if (!currentKey || visited.has(currentKey)) continue
+      visited.add(currentKey)
+
+      if (keptKeySet.has(currentKey)) {
+        addEdge(node.node_key, currentKey)
+        continue
+      }
+
+      queue.push(...(outgoingMap.get(currentKey) || []))
+    }
+  })
+
+  const entryNodeKey =
+    keptNodes.find((node) => {
+      const queue = [...(incomingMap.get(node.node_key) || [])]
+      const visited = new Set()
+
+      while (queue.length > 0) {
+        const currentKey = queue.shift()
+        if (!currentKey || visited.has(currentKey)) continue
+        visited.add(currentKey)
+        if (keptKeySet.has(currentKey)) return false
+        queue.push(...(incomingMap.get(currentKey) || []))
+      }
+      return true
+    })?.node_key || keptNodes[0]?.node_key || null
+
+  return normalizeTemplateGraph({
+    schema_version: normalizedGraph.schema_version || 2,
+    entry_node_key: entryNodeKey,
+    nodes: keptNodes,
+    edges: nextEdges,
+  })
+}
+
 function buildGraphMaps(templateGraph) {
   const nodes = Array.isArray(templateGraph?.nodes) ? templateGraph.nodes : []
   const edges = Array.isArray(templateGraph?.edges) ? templateGraph.edges : []
@@ -184,8 +291,10 @@ function isSystemNodeType(nodeType) {
 module.exports = {
   SYSTEM_NODE_TYPES,
   normalizeTemplateGraph,
+  filterTemplateGraphByParticipantRoles,
   buildGraphMaps,
   isSystemNodeType,
   normalizeNodeKey,
   normalizeNodeType,
+  normalizeParticipantRoles,
 }

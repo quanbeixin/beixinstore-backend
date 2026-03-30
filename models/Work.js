@@ -210,6 +210,22 @@ function parseJsonArray(raw, fallback = []) {
   }
 }
 
+function normalizeParticipantRoles(values) {
+  return Array.from(
+    new Set(
+      parseJsonArray(values, Array.isArray(values) ? values : [])
+        .map((item) =>
+          String(item || '')
+            .trim()
+            .replace(/\s+/g, '_')
+            .toUpperCase()
+            .slice(0, 64),
+        )
+        .filter(Boolean),
+    ),
+  )
+}
+
 function parseRequireDemand(extraJson, fallback = 0) {
   if (!extraJson || typeof extraJson !== 'object') return fallback
 
@@ -1417,6 +1433,7 @@ const Work = {
         COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
         d.management_mode,
         d.template_id,
+        d.participant_roles_json,
         pt.name AS template_name,
         d.project_manager,
         COALESCE(NULLIF(pm.real_name, ''), pm.username) AS project_manager_name,
@@ -1491,9 +1508,16 @@ const Work = {
     )
 
     const todayDate = getBeijingTodayDateString()
-    const normalizedRows = (rows || []).map((row) =>
-      withUnifiedWorkStatus(row, { todayDate }),
-    )
+    const normalizedRows = (rows || []).map((row) => {
+      const { participant_roles_json: _participantRolesJson, ...rest } = row || {}
+      return withUnifiedWorkStatus(
+        {
+          ...rest,
+          participant_roles: normalizeParticipantRoles(row?.participant_roles_json),
+        },
+        { todayDate },
+      )
+    })
     return { rows: normalizedRows, total }
   },
 
@@ -1506,6 +1530,7 @@ const Work = {
          COALESCE(NULLIF(u.real_name, ''), u.username) AS owner_name,
          d.management_mode,
          d.template_id,
+         d.participant_roles_json,
          pt.name AS template_name,
          d.project_manager,
          COALESCE(NULLIF(pm.real_name, ''), pm.username) AS project_manager_name,
@@ -1542,7 +1567,20 @@ const Work = {
       [id],
     )
     const todayDate = getBeijingTodayDateString()
-    return withUnifiedWorkStatus(rows[0] || null, { todayDate })
+    const row = rows[0] || null
+    const normalizedRow = row
+      ? (() => {
+          const { participant_roles_json: _participantRolesJson, ...rest } = row
+          return {
+            ...rest,
+            participant_roles: normalizeParticipantRoles(row?.participant_roles_json),
+          }
+        })()
+      : null
+    return withUnifiedWorkStatus(
+      normalizedRow,
+      { todayDate },
+    )
   },
 
   async createDemand({
@@ -1551,6 +1589,7 @@ const Work = {
     ownerUserId,
     managementMode = 'simple',
     templateId = null,
+    participantRoles = [],
     projectManager = null,
     healthStatus = 'green',
     actualStartTime = null,
@@ -1572,16 +1611,17 @@ const Work = {
       const finalDemandId = demandId || (await generateDemandId(conn))
       await conn.query(
         `INSERT INTO work_demands (
-          id, name, owner_user_id, management_mode, template_id, project_manager, health_status,
+          id, name, owner_user_id, management_mode, template_id, participant_roles_json, project_manager, health_status,
           actual_start_time, actual_end_time, doc_link, ui_design_link, test_case_link, business_group_code,
           expected_release_date, status, priority, description, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           finalDemandId,
           name,
           ownerUserId,
           normalizeManagementMode(managementMode),
           toPositiveInt(templateId),
+          JSON.stringify(normalizeParticipantRoles(participantRoles)),
           toPositiveInt(projectManager),
           normalizeHealthStatus(healthStatus),
           normalizeDateTime(actualStartTime, null),
@@ -1615,6 +1655,7 @@ const Work = {
       ownerUserId,
       managementMode = 'simple',
       templateId = null,
+      participantRoles = [],
       projectManager = null,
       healthStatus = 'green',
       actualStartTime = null,
@@ -1637,6 +1678,7 @@ const Work = {
          owner_user_id = ?,
          management_mode = ?,
          template_id = ?,
+         participant_roles_json = CAST(? AS JSON),
          project_manager = ?,
          health_status = ?,
          actual_start_time = ?,
@@ -1656,6 +1698,7 @@ const Work = {
         ownerUserId,
         normalizeManagementMode(managementMode),
         toPositiveInt(templateId),
+        JSON.stringify(normalizeParticipantRoles(participantRoles)),
         toPositiveInt(projectManager),
         normalizeHealthStatus(healthStatus),
         normalizeDateTime(actualStartTime, null),
@@ -2147,12 +2190,12 @@ const Work = {
     }
 
     if (startDate) {
-      conditions.push('l.log_date >= ?')
+      conditions.push('COALESCE(l.expected_start_date, l.log_date) >= ?')
       params.push(startDate)
     }
 
     if (endDate) {
-      conditions.push('l.log_date <= ?')
+      conditions.push('COALESCE(l.expected_start_date, l.log_date) <= ?')
       params.push(endDate)
     }
 
