@@ -5,6 +5,7 @@ const BUG_SEVERITY_DICT_KEY = 'bug_severity'
 const BUG_PRIORITY_DICT_KEY = 'bug_priority'
 const BUG_TYPE_DICT_KEY = 'bug_type'
 const BUG_PRODUCT_DICT_KEY = 'bug_product'
+const BUG_STAGE_DICT_KEY = 'bug_stage'
 
 const ALLOWED_TRANSITIONS = Object.freeze({
   NEW: ['PROCESSING'],
@@ -52,6 +53,7 @@ function buildBugListWhere({
   priorityCode = '',
   bugTypeCode = '',
   productCode = '',
+  issueStage = '',
   demandId = '',
   assigneeId = null,
   reporterId = null,
@@ -89,6 +91,11 @@ function buildBugListWhere({
   if (productCode) {
     conditions.push('b.product_code = ?')
     params.push(productCode)
+  }
+
+  if (issueStage) {
+    conditions.push('b.issue_stage = ?')
+    params.push(issueStage)
   }
 
   if (demandId) {
@@ -143,6 +150,9 @@ const DETAIL_SELECT_SQL = `
     b.product_code,
     product.item_name AS product_name,
     product.color AS product_color,
+    b.issue_stage,
+    stageDict.item_name AS issue_stage_name,
+    stageDict.color AS issue_stage_color,
     b.reproduce_steps,
     b.expected_result,
     b.actual_result,
@@ -178,6 +188,9 @@ const DETAIL_SELECT_SQL = `
   LEFT JOIN config_dict_items product
     ON product.type_key = '${BUG_PRODUCT_DICT_KEY}'
    AND product.item_code = b.product_code
+  LEFT JOIN config_dict_items stageDict
+    ON stageDict.type_key = '${BUG_STAGE_DICT_KEY}'
+   AND stageDict.item_code = b.issue_stage
   LEFT JOIN work_demands d ON d.id = b.demand_id
   LEFT JOIN users owner ON owner.id = d.owner_user_id
   LEFT JOIN users pm ON pm.id = d.project_manager
@@ -286,6 +299,7 @@ const Bug = {
     priorityCode = '',
     bugTypeCode = '',
     productCode = '',
+    issueStage = '',
     demandId = '',
     assigneeId = null,
     reporterId = null,
@@ -302,6 +316,7 @@ const Bug = {
       priorityCode: normalizeCode(priorityCode),
       bugTypeCode: normalizeCode(bugTypeCode),
       productCode: normalizeCode(productCode),
+      issueStage: normalizeCode(issueStage),
       demandId: normalizeDemandId(demandId),
       assigneeId: toPositiveInt(assigneeId),
       reporterId: toPositiveInt(reporterId),
@@ -433,6 +448,7 @@ const Bug = {
     priorityCode,
     bugTypeCode = null,
     productCode = null,
+    issueStage = null,
     reproduceSteps,
     expectedResult,
     actualResult,
@@ -454,6 +470,7 @@ const Bug = {
            bug_type_code,
            status_code,
            product_code,
+           issue_stage,
            reproduce_steps,
            expected_result,
            actual_result,
@@ -461,7 +478,7 @@ const Bug = {
            demand_id,
            reporter_id,
            assignee_id
-         ) VALUES (?, ?, ?, ?, ?, 'NEW', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, 'NEW', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           normalizeText(title, 200),
           normalizeText(description, 20000),
@@ -469,6 +486,7 @@ const Bug = {
           normalizeCode(priorityCode),
           normalizeCode(bugTypeCode),
           normalizeCode(productCode),
+          normalizeCode(issueStage),
           normalizeText(reproduceSteps, 20000),
           normalizeText(expectedResult, 20000),
           normalizeText(actualResult, 20000),
@@ -513,6 +531,7 @@ const Bug = {
       priorityCode,
       bugTypeCode = null,
       productCode = null,
+      issueStage = null,
       reproduceSteps,
       expectedResult,
       actualResult,
@@ -534,6 +553,7 @@ const Bug = {
          priority_code = ?,
          bug_type_code = ?,
          product_code = ?,
+         issue_stage = ?,
          reproduce_steps = ?,
          expected_result = ?,
          actual_result = ?,
@@ -552,6 +572,7 @@ const Bug = {
         normalizeCode(priorityCode),
         normalizeCode(bugTypeCode),
         normalizeCode(productCode),
+        normalizeCode(issueStage),
         normalizeText(reproduceSteps, 20000),
         normalizeText(expectedResult, 20000),
         normalizeText(actualResult, 20000),

@@ -46,6 +46,11 @@ function toPositiveInt(value) {
   return Number.isInteger(num) && num > 0 ? num : null
 }
 
+function normalizePositiveIntList(values) {
+  if (!Array.isArray(values)) return []
+  return Array.from(new Set(values.map((item) => toPositiveInt(item)).filter(Boolean)))
+}
+
 function normalizeText(value, maxLen = 255) {
   return String(value || '').trim().slice(0, maxLen)
 }
@@ -377,6 +382,22 @@ async function loadDemandProjectTemplateGraph(conn, demandId) {
     nodeMap: new Map(nodes.map((item) => [item.node_key, item])),
     outgoingMap: graphMaps.outgoingMap,
     incomingMap: graphMaps.incomingMap,
+  }
+}
+
+function normalizeSelectableNode(row, fallbackOrder = 0) {
+  const nodeKey = normalizeTemplateNodeKey(row?.node_key || row?.phase_key || '')
+  if (!nodeKey) return null
+  const nodeType = normalizeStatus(row?.node_type, 'TASK')
+  if (isSystemNodeType(nodeType)) return null
+  return {
+    node_key: nodeKey,
+    node_name:
+      normalizeText(row?.node_name_snapshot || row?.node_name || row?.phase_name || row?.phase_key, 128) || nodeKey,
+    node_type: nodeType,
+    phase_key: normalizeText(row?.phase_key, 64).toUpperCase() || null,
+    sort_order: Number.isFinite(Number(row?.sort_order)) ? Number(row.sort_order) : fallbackOrder,
+    status: normalizeStatus(row?.status, ''),
   }
 }
 
@@ -956,6 +977,123 @@ async function createTaskForNode(
   return taskId
 }
 
+async function syncActiveNodeTasksForAssignees(
+  conn,
+  {
+    instanceId,
+    instanceNodeId,
+    demandId,
+    phaseKey = null,
+    nodeName,
+    assigneeUserIds = [],
+    dueAt = null,
+    expectedStartDate = null,
+    assignedByUserId = null,
+    createdBy = null,
+    sourceType = 'ASSIGN',
+    sourceId = null,
+  } = {},
+) {
+  const normalizedNodeId = toPositiveInt(instanceNodeId)
+  const normalizedAssigneeUserIds = normalizePositiveIntList(assigneeUserIds)
+  if (!normalizedNodeId || normalizedAssigneeUserIds.length === 0) return
+
+  const [openTaskRows] = await conn.query(
+    `SELECT id, assignee_user_id
+     FROM wf_process_tasks
+     WHERE instance_node_id = ?
+       AND status IN (?, ?)
+     ORDER BY id DESC
+     FOR UPDATE`,
+    [normalizedNodeId, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+  )
+
+  const keepTaskIdByAssignee = new Map()
+  const duplicateTaskIds = []
+
+  ;(openTaskRows || []).forEach((row) => {
+    const assigneeUserId = toPositiveInt(row?.assignee_user_id)
+    const taskId = toPositiveInt(row?.id)
+    if (!assigneeUserId || !taskId) return
+    if (!keepTaskIdByAssignee.has(assigneeUserId)) {
+      keepTaskIdByAssignee.set(assigneeUserId, taskId)
+      return
+    }
+    duplicateTaskIds.push(taskId)
+  })
+
+  if (duplicateTaskIds.length > 0) {
+    await conn.query(
+      `UPDATE wf_process_tasks
+       SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+       WHERE id IN (${duplicateTaskIds.map(() => '?').join(', ')})
+         AND status IN (?, ?)`,
+      [TASK_STATUS.CANCELLED, ...duplicateTaskIds, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+    )
+  }
+
+  const desiredSet = new Set(normalizedAssigneeUserIds)
+  const existingAssignees = Array.from(keepTaskIdByAssignee.keys())
+
+  for (const existingUserId of existingAssignees) {
+    if (desiredSet.has(existingUserId)) continue
+
+    await conn.query(
+      `UPDATE wf_process_tasks
+       SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+       WHERE instance_node_id = ?
+         AND assignee_user_id = ?
+         AND status IN (?, ?)`,
+      [TASK_STATUS.CANCELLED, normalizedNodeId, existingUserId, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+    )
+
+    await closeAutoWorkLogsForNodeAssignee(conn, {
+      demandId,
+      phaseKey,
+      assigneeUserId: existingUserId,
+    })
+  }
+
+  for (const assigneeUserId of normalizedAssigneeUserIds) {
+    const existingTaskId = keepTaskIdByAssignee.get(assigneeUserId) || null
+    if (existingTaskId) {
+      await conn.query(
+        `UPDATE wf_process_tasks
+         SET due_at = ?, updated_at = NOW()
+         WHERE id = ?`,
+        [normalizeDate(dueAt), existingTaskId],
+      )
+
+      await ensureAutoWorkLogForTask(conn, {
+        taskId: existingTaskId,
+        demandId,
+        phaseKey,
+        nodeName,
+        assigneeUserId,
+        dueAt,
+        expectedStartDate,
+        assignedByUserId,
+      })
+      continue
+    }
+
+    await createTaskForNode(conn, {
+      instanceId,
+      instanceNodeId: normalizedNodeId,
+      demandId,
+      phaseKey,
+      nodeName,
+      assigneeUserId,
+      dueAt,
+      expectedStartDate,
+      assignedByUserId,
+      createdBy,
+      sourceType,
+      sourceId,
+    })
+  }
+}
+
 async function resolveTrackItemType(conn) {
   const keys = Array.from(TRACK_ITEM_TYPE_KEYS)
   if (keys.length === 0) return null
@@ -1005,6 +1143,20 @@ async function resolveTrackItemType(conn) {
 function buildAutoWorkLogDescription({ taskId, demandId, nodeName }) {
   const suffix = taskId ? ` #${taskId}` : ''
   return `${AUTO_WORKLOG_PREFIX} 需求 ${demandId} · ${nodeName || '流程节点'}${suffix}`.slice(0, 2000)
+}
+
+function parseTaskIdFromAutoWorkLogDescription(description) {
+  const text = normalizeText(description, 2000)
+  if (!text) return null
+  const matched = text.match(/#(\d+)\s*$/)
+  if (!matched || !matched[1]) return null
+  return toPositiveInt(matched[1])
+}
+
+function resolveAutoWorkLogTaskId(log = {}) {
+  const directTaskId = toPositiveInt(log?.relate_task_id)
+  if (directTaskId) return directTaskId
+  return parseTaskIdFromAutoWorkLogDescription(log?.description)
 }
 
 async function ensureAutoWorkLogForTask(
@@ -1655,6 +1807,47 @@ const Workflow = {
     }
   },
 
+  async listDemandSelectableNodes(demandId) {
+    const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
+    if (!normalizedDemandId) return []
+
+    try {
+      const workflow = await this.getDemandWorkflowByDemandId(normalizedDemandId, { includeActionsLimit: 0 })
+      const workflowNodes = (Array.isArray(workflow?.nodes) ? workflow.nodes : [])
+        .map((row, index) => normalizeSelectableNode(row, index + 1))
+        .filter(Boolean)
+        .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
+
+      if (workflowNodes.length > 0) {
+        return workflowNodes
+      }
+    } catch (err) {
+      if (!isWorkflowTableMissingError(err)) throw err
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      const templateGraph = await loadDemandProjectTemplateGraph(conn, normalizedDemandId)
+      const templateNodes = (Array.isArray(templateGraph?.nodes) ? templateGraph.nodes : [])
+        .map((row, index) => normalizeSelectableNode(row, index + 1))
+        .filter(Boolean)
+        .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
+      return templateNodes
+    } finally {
+      conn.release()
+    }
+  },
+
+  async findDemandSelectableNodeByKey(demandId, nodeKey) {
+    const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
+    const normalizedNodeKey = normalizeTemplateNodeKey(nodeKey)
+    if (!normalizedDemandId || !normalizedNodeKey) return null
+    const nodes = await this.listDemandSelectableNodes(normalizedDemandId)
+    return (
+      nodes.find((item) => normalizeTemplateNodeKey(item?.node_key) === normalizedNodeKey) || null
+    )
+  },
+
   async replaceDemandWorkflowWithLatestTemplate({
     demandId,
     operatorUserId = null,
@@ -1827,6 +2020,7 @@ const Workflow = {
              COALESCE(NULLIF(u.real_name, ''), u.username) AS assignee_name,
              DATE_FORMAT(n.started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
              DATE_FORMAT(n.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,
+             DATE_FORMAT(ns.expected_start_date, '%Y-%m-%d') AS expected_start_date,
              DATE_FORMAT(n.due_at, '%Y-%m-%d') AS due_at,
              n.remark,
              n.owner_estimated_hours,
@@ -1838,16 +2032,32 @@ const Workflow = {
              DATE_FORMAT(n.actual_end_time, '%Y-%m-%d %H:%i:%s') AS actual_end_time,
              n.reject_reason
            FROM wf_process_instance_nodes n
+           LEFT JOIN (
+             SELECT
+               t.instance_node_id,
+               MIN(wl.expected_start_date) AS expected_start_date
+             FROM wf_process_tasks t
+             LEFT JOIN (
+               SELECT wl1.relate_task_id, MAX(wl1.id) AS latest_log_id
+               FROM work_logs wl1
+               WHERE wl1.task_source = 'WORKFLOW_AUTO'
+                 AND wl1.relate_task_id IS NOT NULL
+               GROUP BY wl1.relate_task_id
+             ) wl_idx ON wl_idx.relate_task_id = t.id
+             LEFT JOIN work_logs wl ON wl.id = wl_idx.latest_log_id
+             WHERE t.instance_id = ?
+             GROUP BY t.instance_node_id
+           ) ns ON ns.instance_node_id = n.id
            LEFT JOIN users u ON u.id = n.assignee_user_id
            LEFT JOIN config_dict_items pdi_phase
              ON pdi_phase.type_key = '${DEMAND_PHASE_DICT_KEY}'
             AND pdi_phase.item_code = n.phase_key
            LEFT JOIN config_dict_items pdi_node
-             ON pdi_node.type_key = '${DEMAND_PHASE_DICT_KEY}'
+            ON pdi_node.type_key = '${DEMAND_PHASE_DICT_KEY}'
             AND pdi_node.item_code = n.node_key
            WHERE n.instance_id = ?
            ORDER BY n.sort_order ASC, n.id ASC`,
-          [normalizedInstanceId],
+          [normalizedInstanceId, normalizedInstanceId],
         ),
         pool.query(
           `SELECT
@@ -1863,6 +2073,8 @@ const Workflow = {
              t.personal_estimated_hours,
              t.actual_hours,
              DATE_FORMAT(t.deadline, '%Y-%m-%d %H:%i:%s') AS deadline,
+             DATE_FORMAT(wl.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+             DATE_FORMAT(wl.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
              t.source_type,
              t.source_id,
              DATE_FORMAT(t.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
@@ -1870,6 +2082,14 @@ const Workflow = {
              DATE_FORMAT(t.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at
            FROM wf_process_tasks t
            LEFT JOIN users u ON u.id = t.assignee_user_id
+           LEFT JOIN (
+             SELECT wl1.relate_task_id, MAX(wl1.id) AS latest_log_id
+             FROM work_logs wl1
+             WHERE wl1.task_source = 'WORKFLOW_AUTO'
+               AND wl1.relate_task_id IS NOT NULL
+             GROUP BY wl1.relate_task_id
+           ) wl_idx ON wl_idx.relate_task_id = t.id
+           LEFT JOIN work_logs wl ON wl.id = wl_idx.latest_log_id
            WHERE t.instance_id = ?
            ORDER BY t.id DESC
            LIMIT 200`,
@@ -2360,13 +2580,19 @@ const Workflow = {
   async assignCurrentNode({
     demandId,
     assigneeUserId,
+    assigneeUserIds = [],
     operatorUserId,
     dueAt = null,
     expectedStartDate = null,
     comment = '',
   } = {}) {
     const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
-    const normalizedAssigneeUserId = toPositiveInt(assigneeUserId)
+    const normalizedAssigneeUserIds = normalizePositiveIntList(assigneeUserIds)
+    const normalizedSingleAssigneeUserId = toPositiveInt(assigneeUserId)
+    const finalAssigneeUserIds =
+      normalizedAssigneeUserIds.length > 0
+        ? normalizedAssigneeUserIds
+        : (normalizedSingleAssigneeUserId ? [normalizedSingleAssigneeUserId] : [])
     const normalizedOperatorUserId = toPositiveInt(operatorUserId)
     const normalizedDueAt = normalizeDate(dueAt)
     const normalizedExpectedStartDate = normalizeDate(expectedStartDate)
@@ -2377,7 +2603,7 @@ const Workflow = {
       throw err
     }
 
-    if (!normalizedAssigneeUserId) {
+    if (finalAssigneeUserIds.length === 0) {
       const err = new Error('assignee_user_id_invalid')
       err.code = 'ASSIGNEE_USER_ID_INVALID'
       throw err
@@ -2401,18 +2627,6 @@ const Workflow = {
         throw err
       }
 
-      const previousAssigneeUserId = toPositiveInt(currentNode.assignee_user_id)
-      if (
-        previousAssigneeUserId &&
-        previousAssigneeUserId !== normalizedAssigneeUserId
-      ) {
-        await closeAutoWorkLogsForNodeAssignee(conn, {
-          demandId: normalizedDemandId,
-          phaseKey: currentNode.phase_key,
-          assigneeUserId: previousAssigneeUserId,
-        })
-      }
-
       if (currentNode.status === NODE_STATUS.TODO) {
         await conn.query(
           `UPDATE wf_process_instance_nodes
@@ -2426,24 +2640,16 @@ const Workflow = {
         `UPDATE wf_process_instance_nodes
          SET assignee_user_id = ?, due_at = ?, updated_at = NOW()
          WHERE id = ?`,
-        [normalizedAssigneeUserId, normalizedDueAt, currentNode.id],
+        [finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null, normalizedDueAt, currentNode.id],
       )
 
-      await conn.query(
-        `UPDATE wf_process_tasks
-         SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-         WHERE instance_node_id = ?
-           AND status IN (?, ?)`,
-        [TASK_STATUS.CANCELLED, currentNode.id, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
-      )
-
-      await createTaskForNode(conn, {
+      await syncActiveNodeTasksForAssignees(conn, {
         instanceId: instance.id,
         instanceNodeId: currentNode.id,
         demandId: normalizedDemandId,
         phaseKey: currentNode.phase_key,
         nodeName: currentNode.node_name_snapshot,
-        assigneeUserId: normalizedAssigneeUserId,
+        assigneeUserIds: finalAssigneeUserIds,
         dueAt: normalizedDueAt,
         expectedStartDate: normalizedExpectedStartDate,
         assignedByUserId: normalizedOperatorUserId,
@@ -2459,7 +2665,7 @@ const Workflow = {
         fromNodeKey: currentNode.node_key,
         toNodeKey: currentNode.node_key,
         operatorUserId: normalizedOperatorUserId,
-        targetUserId: normalizedAssigneeUserId,
+        targetUserId: finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null,
         comment: comment || '节点任务已指派',
       })
 
@@ -2477,6 +2683,7 @@ const Workflow = {
     demandId,
     nodeKey,
     assigneeUserId,
+    assigneeUserIds = [],
     operatorUserId,
     dueAt = null,
     expectedStartDate = null,
@@ -2484,7 +2691,12 @@ const Workflow = {
   } = {}) {
     const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
     const normalizedNodeKey = normalizeText(nodeKey, 64).toUpperCase()
-    const normalizedAssigneeUserId = toPositiveInt(assigneeUserId)
+    const normalizedAssigneeUserIds = normalizePositiveIntList(assigneeUserIds)
+    const normalizedSingleAssigneeUserId = toPositiveInt(assigneeUserId)
+    const finalAssigneeUserIds =
+      normalizedAssigneeUserIds.length > 0
+        ? normalizedAssigneeUserIds
+        : (normalizedSingleAssigneeUserId ? [normalizedSingleAssigneeUserId] : [])
     const normalizedOperatorUserId = toPositiveInt(operatorUserId)
     const normalizedDueAt = normalizeDate(dueAt)
     const normalizedExpectedStartDate = normalizeDate(expectedStartDate)
@@ -2499,7 +2711,7 @@ const Workflow = {
       err.code = 'NODE_KEY_REQUIRED'
       throw err
     }
-    if (!normalizedAssigneeUserId) {
+    if (finalAssigneeUserIds.length === 0) {
       const err = new Error('assignee_user_id_invalid')
       err.code = 'ASSIGNEE_USER_ID_INVALID'
       throw err
@@ -2528,15 +2740,6 @@ const Workflow = {
         throw err
       }
 
-      const previousAssigneeUserId = toPositiveInt(targetNode.assignee_user_id)
-      if (previousAssigneeUserId && previousAssigneeUserId !== normalizedAssigneeUserId) {
-        await closeAutoWorkLogsForNodeAssignee(conn, {
-          demandId: normalizedDemandId,
-          phaseKey: targetNode.phase_key,
-          assigneeUserId: previousAssigneeUserId,
-        })
-      }
-
       if (targetNode.status === NODE_STATUS.TODO) {
         await conn.query(
           `UPDATE wf_process_instance_nodes
@@ -2551,28 +2754,20 @@ const Workflow = {
         `UPDATE wf_process_instance_nodes
          SET assignee_user_id = ?, due_at = ?, updated_at = NOW()
          WHERE id = ?`,
-        [normalizedAssigneeUserId, normalizedDueAt, targetNode.id],
+        [finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null, normalizedDueAt, targetNode.id],
       )
-      targetNode.assignee_user_id = normalizedAssigneeUserId
+      targetNode.assignee_user_id = finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null
 
       const isActiveNode = targetNode.status === NODE_STATUS.IN_PROGRESS
 
       if (isActiveNode) {
-        await conn.query(
-          `UPDATE wf_process_tasks
-           SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-           WHERE instance_node_id = ?
-             AND status IN (?, ?)`,
-          [TASK_STATUS.CANCELLED, targetNode.id, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
-        )
-
-        await createTaskForNode(conn, {
+        await syncActiveNodeTasksForAssignees(conn, {
           instanceId: instance.id,
           instanceNodeId: targetNode.id,
           demandId: normalizedDemandId,
           phaseKey: targetNode.phase_key,
           nodeName: targetNode.node_name_snapshot,
-          assigneeUserId: normalizedAssigneeUserId,
+          assigneeUserIds: finalAssigneeUserIds,
           dueAt: normalizedDueAt,
           expectedStartDate: normalizedExpectedStartDate,
           assignedByUserId: normalizedOperatorUserId,
@@ -2582,26 +2777,28 @@ const Workflow = {
         })
       } else {
         // For pre-assigned future nodes, also expose a TODO item in personal workbench.
-        await ensureAutoWorkLogForTask(conn, {
-          taskId: null,
-          demandId: normalizedDemandId,
-          phaseKey: targetNode.phase_key,
-          nodeName: targetNode.node_name_snapshot,
-          assigneeUserId: normalizedAssigneeUserId,
-          dueAt: normalizedDueAt,
-          expectedStartDate: normalizedExpectedStartDate,
-          assignedByUserId: normalizedOperatorUserId,
-        })
+        for (const assigneeUserIdItem of finalAssigneeUserIds) {
+          await ensureAutoWorkLogForTask(conn, {
+            taskId: null,
+            demandId: normalizedDemandId,
+            phaseKey: targetNode.phase_key,
+            nodeName: targetNode.node_name_snapshot,
+            assigneeUserId: assigneeUserIdItem,
+            dueAt: normalizedDueAt,
+            expectedStartDate: normalizedExpectedStartDate,
+            assignedByUserId: normalizedOperatorUserId,
+          })
+        }
       }
 
-        await insertAction(conn, {
+      await insertAction(conn, {
         instanceId: instance.id,
         instanceNodeId: targetNode.id,
         actionType: isActiveNode ? 'ASSIGN' : 'PREASSIGN',
         fromNodeKey: targetNode.node_key,
         toNodeKey: targetNode.node_key,
         operatorUserId: normalizedOperatorUserId,
-        targetUserId: normalizedAssigneeUserId,
+        targetUserId: finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null,
         comment: comment || (isActiveNode ? '当前激活节点任务已指派' : '节点已预指派'),
       })
 
@@ -3005,6 +3202,8 @@ const Workflow = {
     personalEstimatedHours,
     actualHours,
     deadline,
+    expectedStartDate,
+    expectedCompletionDate,
     operatorUserId,
     comment = '',
   } = {}) {
@@ -3031,11 +3230,18 @@ const Workflow = {
     const normalizedPersonalHours = normalizeHours(personalEstimatedHours)
     const normalizedActualHours = normalizeHours(actualHours)
     const normalizedDeadline = normalizeDateTime(deadline)
+    const normalizedExpectedStartDate = normalizeDate(expectedStartDate)
+    const normalizedExpectedCompletionDate = normalizeDate(expectedCompletionDate)
 
     const hasInvalidInput =
       (personalEstimatedHours !== undefined && normalizedPersonalHours === undefined) ||
       (actualHours !== undefined && normalizedActualHours === undefined) ||
-      (deadline !== undefined && normalizedDeadline === undefined)
+      (deadline !== undefined && normalizedDeadline === undefined) ||
+      (expectedStartDate !== undefined && normalizedExpectedStartDate === null) ||
+      (expectedCompletionDate !== undefined && normalizedExpectedCompletionDate === null) ||
+      (normalizedExpectedStartDate &&
+        normalizedExpectedCompletionDate &&
+        normalizedExpectedStartDate > normalizedExpectedCompletionDate)
     if (hasInvalidInput) {
       const err = new Error('workflow_task_hours_invalid_input')
       err.code = 'WORKFLOW_TASK_HOURS_INVALID_INPUT'
@@ -3058,6 +3264,9 @@ const Workflow = {
       updateParams.push(normalizedDeadline)
       updateFields.push('due_at = ?')
       updateParams.push(normalizedDeadline ? String(normalizedDeadline).slice(0, 10) : null)
+    } else if (expectedCompletionDate !== undefined) {
+      updateFields.push('due_at = ?')
+      updateParams.push(normalizedExpectedCompletionDate || null)
     }
     if (updateFields.length === 0) {
       const err = new Error('workflow_task_hours_no_fields')
@@ -3080,8 +3289,11 @@ const Workflow = {
         `SELECT
            t.id,
            t.instance_id,
-           t.instance_node_id
+           t.instance_node_id,
+           t.assignee_user_id,
+           n.phase_key
          FROM wf_process_tasks t
+         LEFT JOIN wf_process_instance_nodes n ON n.id = t.instance_node_id
          WHERE t.id = ?
            AND t.instance_id = ?
          LIMIT 1
@@ -3102,6 +3314,68 @@ const Workflow = {
         [...updateParams, task.id],
       )
 
+      const logUpdateFields = []
+      const logUpdateParams = []
+      if (personalEstimatedHours !== undefined) {
+        logUpdateFields.push('personal_estimate_hours = ?')
+        logUpdateParams.push(normalizedPersonalHours)
+      }
+      if (expectedStartDate !== undefined) {
+        logUpdateFields.push('expected_start_date = ?')
+        logUpdateParams.push(normalizedExpectedStartDate)
+      }
+      if (expectedCompletionDate !== undefined) {
+        logUpdateFields.push('expected_completion_date = ?')
+        logUpdateParams.push(normalizedExpectedCompletionDate)
+      } else if (deadline !== undefined) {
+        logUpdateFields.push('expected_completion_date = ?')
+        logUpdateParams.push(normalizedDeadline ? String(normalizedDeadline).slice(0, 10) : null)
+      }
+
+      if (logUpdateFields.length > 0) {
+        try {
+          const [logUpdateResult] = await conn.query(
+            `UPDATE work_logs
+             SET ${logUpdateFields.join(', ')}, updated_at = NOW()
+             WHERE task_source = 'WORKFLOW_AUTO'
+               AND relate_task_id = ?
+               AND user_id = ?
+               AND demand_id = ?
+               AND phase_key = ?
+               AND COALESCE(log_status, 'IN_PROGRESS') <> 'DONE'`,
+            [
+              ...logUpdateParams,
+              task.id,
+              toPositiveInt(task.assignee_user_id) || 0,
+              normalizedDemandId,
+              normalizeText(task.phase_key, 64).toUpperCase(),
+            ],
+          )
+
+          if (Number(logUpdateResult?.affectedRows || 0) === 0) {
+            await conn.query(
+              `UPDATE work_logs
+               SET ${logUpdateFields.join(', ')}, updated_at = NOW()
+               WHERE task_source = 'WORKFLOW_AUTO'
+                 AND user_id = ?
+                 AND demand_id = ?
+                 AND phase_key = ?
+                 AND description LIKE ?
+                 AND COALESCE(log_status, 'IN_PROGRESS') <> 'DONE'`,
+              [
+                ...logUpdateParams,
+                toPositiveInt(task.assignee_user_id) || 0,
+                normalizedDemandId,
+                normalizeText(task.phase_key, 64).toUpperCase(),
+                `%#${task.id}`,
+              ],
+            )
+          }
+        } catch (err) {
+          if (err?.code !== 'ER_BAD_FIELD_ERROR') throw err
+        }
+      }
+
       await insertAction(conn, {
         instanceId: instance.id,
         instanceNodeId: task.instance_node_id || null,
@@ -3114,6 +3388,249 @@ const Workflow = {
 
       await conn.commit()
       return this.getDemandWorkflowByInstanceId(instance.id)
+    } catch (err) {
+      await conn.rollback()
+      throw wrapWorkflowError(err)
+    } finally {
+      conn.release()
+    }
+  },
+
+  async cancelTaskByWorkLog({
+    demandId,
+    log = {},
+    operatorUserId,
+    comment = '',
+  } = {}) {
+    const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
+    const normalizedOperatorUserId = toPositiveInt(operatorUserId)
+    const normalizedTaskSource = normalizeText(log?.task_source, 32).toUpperCase()
+    const normalizedTaskId = resolveAutoWorkLogTaskId(log)
+    const normalizedUserId = toPositiveInt(log?.user_id)
+
+    if (!normalizedDemandId || !normalizedOperatorUserId) {
+      return { triggered: false, reason: 'INVALID_INPUT' }
+    }
+    if (normalizedTaskSource !== 'WORKFLOW_AUTO') {
+      return { triggered: false, reason: 'TASK_SOURCE_NOT_WORKFLOW_AUTO' }
+    }
+    if (!normalizedTaskId) {
+      return { triggered: false, reason: 'TASK_ID_NOT_FOUND' }
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const instance = await findActiveDemandInstance(conn, normalizedDemandId, { forUpdate: true })
+      if (!instance) {
+        await conn.rollback()
+        return { triggered: false, reason: 'WORKFLOW_INSTANCE_NOT_FOUND' }
+      }
+
+      const [taskRows] = await conn.query(
+        `SELECT
+           t.id,
+           t.instance_id,
+           t.instance_node_id,
+           t.assignee_user_id,
+           t.status,
+           n.node_key
+         FROM wf_process_tasks t
+         LEFT JOIN wf_process_instance_nodes n ON n.id = t.instance_node_id
+         WHERE t.id = ?
+           AND t.instance_id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [normalizedTaskId, instance.id],
+      )
+      const task = taskRows[0] || null
+      if (!task) {
+        await conn.rollback()
+        return { triggered: false, reason: 'WORKFLOW_TASK_NOT_FOUND' }
+      }
+      if (
+        normalizedUserId &&
+        Number(task.assignee_user_id || 0) > 0 &&
+        Number(task.assignee_user_id) !== Number(normalizedUserId)
+      ) {
+        await conn.rollback()
+        return { triggered: false, reason: 'TASK_ASSIGNEE_MISMATCH' }
+      }
+
+      if (String(task.status || '').toUpperCase() !== TASK_STATUS.CANCELLED) {
+        await conn.query(
+          `UPDATE wf_process_tasks
+           SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+           WHERE id = ?`,
+          [TASK_STATUS.CANCELLED, task.id],
+        )
+
+        await insertAction(conn, {
+          instanceId: instance.id,
+          instanceNodeId: task.instance_node_id || null,
+          actionType: 'CANCEL_TASK',
+          fromNodeKey: task.node_key || null,
+          toNodeKey: task.node_key || null,
+          operatorUserId: normalizedOperatorUserId,
+          targetUserId: toPositiveInt(task.assignee_user_id) || null,
+          comment: normalizeText(comment, 500) || '删除工作记录后同步取消流程任务',
+          sourceType: 'TASK',
+          sourceId: task.id,
+        })
+      }
+
+      await conn.commit()
+      return {
+        triggered: true,
+        taskId: task.id,
+        workflow: await this.getDemandWorkflowByInstanceId(instance.id),
+      }
+    } catch (err) {
+      await conn.rollback()
+      throw wrapWorkflowError(err)
+    } finally {
+      conn.release()
+    }
+  },
+
+  async syncTaskHoursFromWorkLog({
+    demandId,
+    phaseKey,
+    assigneeUserId,
+    taskSource,
+    personalEstimatedHours,
+    actualHours,
+    description = '',
+    operatorUserId,
+  } = {}) {
+    const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
+    const normalizedPhaseKey = normalizeText(phaseKey, 64).toUpperCase()
+    const normalizedAssigneeUserId = toPositiveInt(assigneeUserId)
+    const normalizedTaskSource = normalizeText(taskSource, 32).toUpperCase()
+    const normalizedOperatorUserId = toPositiveInt(operatorUserId)
+    const hasPersonalHoursInput = personalEstimatedHours !== undefined
+    const hasActualHoursInput = actualHours !== undefined
+    const normalizedPersonalHours = normalizeHours(personalEstimatedHours)
+    const normalizedActualHours = normalizeHours(actualHours)
+    const candidateTaskId = parseTaskIdFromAutoWorkLogDescription(description)
+
+    if (normalizedTaskSource !== 'WORKFLOW_AUTO') {
+      return { triggered: false, reason: 'TASK_SOURCE_NOT_WORKFLOW_AUTO' }
+    }
+    if (!normalizedDemandId || !normalizedPhaseKey || !normalizedAssigneeUserId) {
+      return { triggered: false, reason: 'DEMAND_OR_PHASE_OR_ASSIGNEE_MISSING' }
+    }
+    if (!normalizedOperatorUserId) {
+      return { triggered: false, reason: 'OPERATOR_INVALID' }
+    }
+    if (!hasPersonalHoursInput && !hasActualHoursInput) {
+      return { triggered: false, reason: 'NO_FIELDS_TO_SYNC' }
+    }
+
+    if (
+      (hasPersonalHoursInput && normalizedPersonalHours === undefined) ||
+      (hasActualHoursInput && normalizedActualHours === undefined)
+    ) {
+      return { triggered: false, reason: 'INVALID_INPUT' }
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const instance = await findActiveDemandInstance(conn, normalizedDemandId, { forUpdate: true })
+      if (!instance) {
+        await conn.commit()
+        return { triggered: false, reason: 'INSTANCE_NOT_FOUND' }
+      }
+
+      let targetTask = null
+
+      if (candidateTaskId) {
+        const [taskRows] = await conn.query(
+          `SELECT
+             t.id,
+             t.instance_node_id
+           FROM wf_process_tasks t
+           INNER JOIN wf_process_instance_nodes n ON n.id = t.instance_node_id
+           WHERE t.id = ?
+             AND t.instance_id = ?
+             AND t.assignee_user_id = ?
+             AND n.phase_key = ?
+           LIMIT 1
+           FOR UPDATE`,
+          [candidateTaskId, instance.id, normalizedAssigneeUserId, normalizedPhaseKey],
+        )
+        targetTask = taskRows[0] || null
+      }
+
+      if (!targetTask) {
+        const [taskRows] = await conn.query(
+          `SELECT
+             t.id,
+             t.instance_node_id
+           FROM wf_process_tasks t
+           INNER JOIN wf_process_instance_nodes n ON n.id = t.instance_node_id
+           WHERE t.instance_id = ?
+             AND t.assignee_user_id = ?
+             AND n.phase_key = ?
+             AND t.status IN (?, ?)
+           ORDER BY t.id DESC
+           LIMIT 2
+           FOR UPDATE`,
+          [instance.id, normalizedAssigneeUserId, normalizedPhaseKey, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+        )
+        if ((taskRows || []).length !== 1) {
+          await conn.commit()
+          return {
+            triggered: false,
+            reason: (taskRows || []).length === 0 ? 'TASK_NOT_FOUND' : 'TASK_NOT_UNIQUE',
+          }
+        }
+        targetTask = taskRows[0]
+      }
+
+      const updateFields = []
+      const updateParams = []
+
+      if (hasPersonalHoursInput) {
+        updateFields.push('personal_estimated_hours = ?')
+        updateParams.push(normalizedPersonalHours)
+      }
+      if (hasActualHoursInput) {
+        updateFields.push('actual_hours = ?')
+        updateParams.push(normalizedActualHours)
+      }
+
+      if (updateFields.length === 0) {
+        await conn.commit()
+        return { triggered: false, reason: 'NO_FIELDS_TO_SYNC' }
+      }
+
+      await conn.query(
+        `UPDATE wf_process_tasks
+         SET ${updateFields.join(', ')}, updated_at = NOW()
+         WHERE id = ?`,
+        [...updateParams, targetTask.id],
+      )
+
+      await insertAction(conn, {
+        instanceId: instance.id,
+        instanceNodeId: targetTask.instance_node_id || null,
+        actionType: 'SYNC_TASK_HOURS_FROM_WORKLOG',
+        operatorUserId: normalizedOperatorUserId,
+        comment: '工作台预估/实填已同步至流程任务',
+        sourceType: 'WORK_LOG',
+        sourceId: targetTask.id,
+      })
+
+      await conn.commit()
+      return {
+        triggered: true,
+        instance_id: instance.id,
+        task_id: Number(targetTask.id),
+      }
     } catch (err) {
       await conn.rollback()
       throw wrapWorkflowError(err)

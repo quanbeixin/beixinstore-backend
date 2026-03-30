@@ -95,6 +95,22 @@ const DEFAULT_DAILY_CAPACITY_HOURS = Number.isFinite(Number(process.env.DAILY_CA
 let ensureDailyTablesPromise = null
 let isDailyTablesReady = false
 
+function buildWorkflowNodeNameSql(logAlias = 'l') {
+  return `(
+    SELECT n.node_name_snapshot
+    FROM wf_process_instances i
+    INNER JOIN wf_process_instance_nodes n ON n.instance_id = i.id
+    WHERE i.biz_type = 'DEMAND'
+      AND i.biz_id = ${logAlias}.demand_id
+      AND n.node_key = ${logAlias}.phase_key
+    ORDER BY
+      CASE i.status WHEN 'IN_PROGRESS' THEN 0 WHEN 'NOT_STARTED' THEN 1 ELSE 2 END ASC,
+      i.id DESC,
+      n.id DESC
+    LIMIT 1
+  )`
+}
+
 function normalizeStatus(value) {
   const status = String(value || 'TODO').trim().toUpperCase()
   return DEMAND_STATUSES.includes(status) ? status : 'TODO'
@@ -1408,6 +1424,8 @@ const Work = {
         DATE_FORMAT(d.actual_start_time, '%Y-%m-%d %H:%i:%s') AS actual_start_time,
         DATE_FORMAT(d.actual_end_time, '%Y-%m-%d %H:%i:%s') AS actual_end_time,
         d.doc_link,
+        d.ui_design_link,
+        d.test_case_link,
         d.business_group_code,
         bg.item_name AS business_group_name,
         DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
@@ -1495,6 +1513,8 @@ const Work = {
          DATE_FORMAT(d.actual_start_time, '%Y-%m-%d %H:%i:%s') AS actual_start_time,
          DATE_FORMAT(d.actual_end_time, '%Y-%m-%d %H:%i:%s') AS actual_end_time,
          d.doc_link,
+         d.ui_design_link,
+         d.test_case_link,
          d.business_group_code,
          bg.item_name AS business_group_name,
          DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
@@ -1536,6 +1556,8 @@ const Work = {
     actualStartTime = null,
     actualEndTime = null,
     docLink = null,
+    uiDesignLink = null,
+    testCaseLink = null,
     businessGroupCode = null,
     expectedReleaseDate = null,
     status = 'TODO',
@@ -1551,9 +1573,9 @@ const Work = {
       await conn.query(
         `INSERT INTO work_demands (
           id, name, owner_user_id, management_mode, template_id, project_manager, health_status,
-          actual_start_time, actual_end_time, doc_link, business_group_code,
+          actual_start_time, actual_end_time, doc_link, ui_design_link, test_case_link, business_group_code,
           expected_release_date, status, priority, description, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           finalDemandId,
           name,
@@ -1565,6 +1587,8 @@ const Work = {
           normalizeDateTime(actualStartTime, null),
           normalizeDateTime(actualEndTime, null),
           normalizeText(docLink, 500) || null,
+          normalizeText(uiDesignLink, 500) || null,
+          normalizeText(testCaseLink, 500) || null,
           businessGroupCode || null,
           expectedReleaseDate || null,
           normalizeStatus(status),
@@ -1596,6 +1620,8 @@ const Work = {
       actualStartTime = null,
       actualEndTime = null,
       docLink = null,
+      uiDesignLink = null,
+      testCaseLink = null,
       businessGroupCode = null,
       expectedReleaseDate = null,
       status,
@@ -1616,6 +1642,8 @@ const Work = {
          actual_start_time = ?,
          actual_end_time = ?,
          doc_link = ?,
+         ui_design_link = ?,
+         test_case_link = ?,
          business_group_code = ?,
          expected_release_date = ?,
          status = ?,
@@ -1633,6 +1661,8 @@ const Work = {
         normalizeDateTime(actualStartTime, null),
         normalizeDateTime(actualEndTime, null),
         normalizeText(docLink, 500) || null,
+        normalizeText(uiDesignLink, 500) || null,
+        normalizeText(testCaseLink, 500) || null,
         businessGroupCode || null,
         expectedReleaseDate || null,
         normalizeStatus(status),
@@ -2160,7 +2190,7 @@ const Work = {
         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
         DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
-        COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
+        COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
         d.name AS demand_name,
         DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
         DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
@@ -2218,6 +2248,7 @@ const Work = {
          l.remaining_hours,
          COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
          COALESCE(l.task_source, 'SELF') AS task_source,
+         l.relate_task_id,
          l.demand_id,
          l.phase_key,
          l.assigned_by_user_id,
@@ -2863,7 +2894,7 @@ const Work = {
          l.demand_id,
          d.name AS demand_name,
          l.phase_key,
-         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
+         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
          ${todayPlannedHoursSql} AS today_planned_hours,
          ${todayActualHoursSql} AS today_actual_hours,
          COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS cumulative_actual_hours
@@ -3087,7 +3118,7 @@ const Work = {
          l.demand_id,
          d.name AS demand_name,
          l.phase_key,
-         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name
+         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name
        FROM work_logs l
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
        LEFT JOIN work_demands d ON d.id = l.demand_id
@@ -3541,7 +3572,7 @@ const Work = {
          d.name AS demand_name,
          d.priority AS demand_priority,
          l.phase_key,
-         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
+         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
          l.personal_estimate_hours,
          COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS cumulative_actual_hours,
          ${todayPlannedHoursSql} AS today_planned_hours,
@@ -3601,7 +3632,7 @@ const Work = {
          d.name AS demand_name,
          d.priority AS demand_priority,
          l.phase_key,
-         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
+         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
          l.personal_estimate_hours,
          COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS cumulative_actual_hours
        FROM work_logs l
@@ -3637,7 +3668,7 @@ const Work = {
          d.name AS demand_name,
          d.priority AS demand_priority,
          l.phase_key,
-         COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
+         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
          l.personal_estimate_hours,
          COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS cumulative_actual_hours,
          ${todayPlannedHoursSql} AS today_planned_hours,
@@ -4223,7 +4254,7 @@ const Work = {
        l.phase_key,
        l.assigned_by_user_id,
        COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
-       COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
+       COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
@@ -4262,7 +4293,7 @@ const Work = {
        l.phase_key,
        l.assigned_by_user_id,
        COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
-       COALESCE(pdi.item_name, l.phase_key, '-') AS phase_name,
+       COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,

@@ -24,6 +24,7 @@ const {
   listWorkItemTypes,
   listDemandPhaseTypes,
   listProjectTemplatePhaseTypes,
+  listDemandWorkflowNodeOptions,
   listWorkflowAssignees,
   createWorkItemType,
   listProjectTemplates,
@@ -134,6 +135,7 @@ router.put(
 
 router.get('/demands', authMiddleware.requirePermission('demand.view'), listDemands)
 router.get('/demands/:id', authMiddleware.requirePermission('demand.view'), getDemandById)
+router.get('/demands/:id/workflow/node-options', authMiddleware.requirePermission('demand.view'), listDemandWorkflowNodeOptions)
 router.get('/demands/:id/bug-stats', authMiddleware.requireAnyPermission(['demand.view', 'bug.view']), getDemandBugStats)
 router.get('/demands/:id/bugs', authMiddleware.requireAnyPermission(['demand.view', 'bug.view']), listDemandBugs)
 router.get('/demands/:id/members', authMiddleware.requirePermission('demand.view'), listDemandMembers)

@@ -16,12 +16,28 @@ const configRoutes = require('./routes/configRoutes')
 const orgRoutes = require('./routes/orgRoutes')
 const rbacRoutes = require('./routes/rbacRoutes')
 const workRoutes = require('./routes/workRoutes')
-const { apiLimiter } = require('./middleware/security')
+const { apiLimiter, loginLimiter } = require('./middleware/security')
 
 const app = express()
 const PORT = process.env.PORT || 3000
 const HOST = process.env.HOST || '0.0.0.0'
 const LOG_OPTIONS_REQUESTS = process.env.LOG_OPTIONS_REQUESTS === 'true'
+
+function resolveTrustProxy(rawValue) {
+  if (rawValue === undefined || rawValue === null || rawValue === '') return false
+  const normalized = String(rawValue).trim().toLowerCase()
+
+  if (['0', 'false', 'off', 'no'].includes(normalized)) return false
+  if (['1', 'true', 'on', 'yes'].includes(normalized)) return 1
+
+  const numericValue = Number.parseInt(normalized, 10)
+  if (Number.isFinite(numericValue) && numericValue >= 0) return numericValue
+
+  return rawValue
+}
+
+const trustProxy = resolveTrustProxy(process.env.TRUST_PROXY)
+app.set('trust proxy', trustProxy)
 
 const allowedOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:5173')
   .split(',')
@@ -59,6 +75,7 @@ app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 
 // API请求频率限制
+app.use('/api/auth/login', loginLimiter)
 app.use('/api/', apiLimiter)
 
 app.use((req, res, next) => {
@@ -111,7 +128,7 @@ app.use((req, res) => {
   })
 })
 
-app.use((err, req, res, next) => {
+app.use((err, req, res, _next) => {
   console.error('Server error:', err)
   res.status(500).json({
     success: false,
@@ -124,6 +141,7 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`Server running at http://${HOST}:${PORT}`)
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`)
   console.log(`CORS origins: ${allowedOrigins.join(', ') || 'none'}`)
+  console.log(`Trust proxy: ${String(trustProxy)}`)
   console.log(`Loaded env file: ${envFile}`)
 })
 

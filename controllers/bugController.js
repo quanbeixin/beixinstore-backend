@@ -77,6 +77,7 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
   const priorityCode = normalizeCode(payload.priority_code)
   const bugTypeCode = normalizeCode(payload.bug_type_code)
   const productCode = normalizeCode(payload.product_code)
+  const issueStage = normalizeCode(payload.issue_stage)
   const reproduceSteps = normalizeText(payload.reproduce_steps, 20000)
   const expectedResult = normalizeText(payload.expected_result, 20000)
   const actualResult = normalizeText(payload.actual_result, 20000)
@@ -107,6 +108,9 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
   if (!(await Bug.validateDictCode('bug_product', productCode, { allowNull: true }))) {
     return { ok: false, message: '产品模块不存在或已停用' }
   }
+  if (!(await Bug.validateDictCode('bug_stage', issueStage, { allowNull: true }))) {
+    return { ok: false, message: 'Bug阶段不存在或已停用' }
+  }
 
   const demand = await ensureDemandExists(demandId)
   if (demandId && !demand) {
@@ -122,6 +126,7 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
       priorityCode,
       bugTypeCode: bugTypeCode || null,
       productCode: productCode || null,
+      issueStage: issueStage || null,
       reproduceSteps,
       expectedResult,
       actualResult,
@@ -156,6 +161,7 @@ const listBugs = async (req, res) => {
       priorityCode: req.query.priority_code,
       bugTypeCode: req.query.bug_type_code,
       productCode: req.query.product_code,
+      issueStage: req.query.issue_stage,
       demandId: req.query.demand_id,
       assigneeId: req.query.assignee_id,
       reporterId: req.query.reporter_id,
@@ -379,6 +385,9 @@ const listDemandBugs = async (req, res) => {
       statusCode: req.query.status_code,
       severityCode: req.query.severity_code,
       priorityCode: req.query.priority_code,
+      bugTypeCode: req.query.bug_type_code,
+      productCode: req.query.product_code,
+      issueStage: req.query.issue_stage,
       demandId,
     })
     return res.json({ success: true, data })

@@ -20,6 +20,16 @@ function toPositiveInt(value) {
   return Number.isInteger(num) && num > 0 ? num : null
 }
 
+function parseAssigneeUserIdsFromBody(body = {}) {
+  const list = Array.isArray(body.assignee_user_ids)
+    ? body.assignee_user_ids.map((item) => toPositiveInt(item)).filter(Boolean)
+    : []
+  const normalizedList = Array.from(new Set(list))
+  if (normalizedList.length > 0) return normalizedList
+  const single = toPositiveInt(body.assignee_user_id)
+  return single ? [single] : []
+}
+
 function toBool(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback
   return value === true || value === 'true' || value === 1 || value === '1'
@@ -38,7 +48,7 @@ function normalizeDemandId(value) {
 function normalizePhaseKey(value) {
   const key = String(value || '').trim().toUpperCase()
   if (!key) return ''
-  return /^[A-Z][A-Z0-9_]{0,31}$/.test(key) ? key : ''
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(key) ? key : ''
 }
 
 function normalizeBusinessGroupCode(value) {
@@ -62,6 +72,32 @@ function normalizeDateTime(value) {
   if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$/.test(str)) return `${str}:00`
   if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}$/.test(str)) return str
   return ''
+}
+
+async function resolveDemandTaskSelection(demandId, phaseKey) {
+  const normalizedDemandId = normalizeDemandId(demandId)
+  const normalizedPhaseKey = normalizePhaseKey(phaseKey)
+  if (!normalizedDemandId || !normalizedPhaseKey) return null
+
+  const demandNode = await Workflow.findDemandSelectableNodeByKey(normalizedDemandId, normalizedPhaseKey)
+  if (demandNode?.node_key) {
+    return {
+      key: normalizePhaseKey(demandNode.node_key),
+      source: 'WORKFLOW_NODE',
+      node: demandNode,
+    }
+  }
+
+  const legacyPhase = await Work.findDemandPhaseTypeByKey(normalizedPhaseKey)
+  if (legacyPhase?.phase_key) {
+    return {
+      key: normalizePhaseKey(legacyPhase.phase_key),
+      source: 'LEGACY_PHASE_DICT',
+      node: null,
+    }
+  }
+
+  return null
 }
 
 function formatDate(date) {
@@ -333,6 +369,39 @@ const listProjectTemplatePhaseTypes = async (req, res) => {
     return res.json({ success: true, data: rows })
   } catch (err) {
     console.error('获取模板需求阶段字典失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listDemandWorkflowNodeOptions = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const rows = await Workflow.listDemandSelectableNodes(demandId)
+    return res.json({
+      success: true,
+      data: rows.map((item) => ({
+        node_key: item.node_key,
+        node_name: item.node_name,
+        node_type: item.node_type,
+        phase_key: item.phase_key,
+        sort_order: item.sort_order,
+        status: item.status || '',
+      })),
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    console.error('获取需求流程节点选项失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -816,6 +885,8 @@ const createDemand = async (req, res) => {
   const actualEndTimeRaw = req.body.actual_end_time
   const actualEndTime = normalizeDateTime(actualEndTimeRaw)
   const docLink = normalizeText(req.body.doc_link, 500)
+  const uiDesignLink = normalizeText(req.body.ui_design_link, 500)
+  const testCaseLink = normalizeText(req.body.test_case_link, 500)
   const expectedReleaseDateRaw = req.body.expected_release_date
   const expectedReleaseDate = normalizeDate(expectedReleaseDateRaw)
   const status = normalizeStatus(req.body.status)
@@ -921,6 +992,8 @@ const createDemand = async (req, res) => {
       actualStartTime: actualStartTime || null,
       actualEndTime: actualEndTime || null,
       docLink: docLink || null,
+      uiDesignLink: uiDesignLink || null,
+      testCaseLink: testCaseLink || null,
       businessGroupCode,
       expectedReleaseDate: expectedReleaseDate || null,
       status,
@@ -1076,6 +1149,14 @@ const updateDemand = async (req, res) => {
     }
     const docLink =
       req.body.doc_link === undefined ? existing.doc_link : normalizeText(req.body.doc_link, 500) || null
+    const uiDesignLink =
+      req.body.ui_design_link === undefined
+        ? existing.ui_design_link
+        : normalizeText(req.body.ui_design_link, 500) || null
+    const testCaseLink =
+      req.body.test_case_link === undefined
+        ? existing.test_case_link
+        : normalizeText(req.body.test_case_link, 500) || null
     let expectedReleaseDate = existing.expected_release_date || null
     if (req.body.expected_release_date !== undefined) {
       const raw = req.body.expected_release_date
@@ -1142,6 +1223,8 @@ const updateDemand = async (req, res) => {
       actualStartTime,
       actualEndTime,
       docLink,
+      uiDesignLink,
+      testCaseLink,
       businessGroupCode,
       expectedReleaseDate,
       status,
@@ -1513,10 +1596,11 @@ const createLog = async (req, res) => {
         return res.status(400).json({ success: false, message: '关联需求时必须选择阶段' })
       }
 
-      const phase = await Work.findDemandPhaseTypeByKey(phaseKey)
-      if (!phase) {
+      const resolvedSelection = await resolveDemandTaskSelection(demandId, phaseKey)
+      if (!resolvedSelection?.key) {
         return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
       }
+      phaseKey = resolvedSelection.key
 
     } else {
       phaseKey = null
@@ -1725,10 +1809,11 @@ const createOwnerAssignedLog = async (req, res) => {
         return res.status(400).json({ success: false, message: '关联需求时必须选择阶段' })
       }
 
-      const phase = await Work.findDemandPhaseTypeByKey(phaseKey)
-      if (!phase) {
+      const resolvedSelection = await resolveDemandTaskSelection(demandId, phaseKey)
+      if (!resolvedSelection?.key) {
         return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
       }
+      phaseKey = resolvedSelection.key
 
     } else {
       phaseKey = null
@@ -1925,10 +2010,11 @@ const updateLog = async (req, res) => {
         return res.status(400).json({ success: false, message: '关联需求时必须选择阶段' })
       }
 
-      const phase = await Work.findDemandPhaseTypeByKey(phaseKey)
-      if (!phase) {
+      const resolvedSelection = await resolveDemandTaskSelection(demandId, phaseKey)
+      if (!resolvedSelection?.key) {
         return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
       }
+      phaseKey = resolvedSelection.key
 
     } else {
       phaseKey = null
@@ -1987,6 +2073,25 @@ const updateLog = async (req, res) => {
       }
     }
 
+    let workflowHoursSync = null
+    try {
+      workflowHoursSync = await Workflow.syncTaskHoursFromWorkLog({
+        demandId,
+        phaseKey,
+        assigneeUserId: existing.user_id,
+        taskSource: existing.task_source || 'SELF',
+        personalEstimatedHours:
+          req.body.personal_estimate_hours !== undefined ? personalEstimateHours : undefined,
+        actualHours: req.body.actual_hours !== undefined ? actualHours : undefined,
+        description,
+        operatorUserId: req.user.id,
+      })
+    } catch (workflowHoursErr) {
+      if (!isWorkflowTablesMissing(workflowHoursErr)) {
+        console.error('更新工作记录后同步流程工时失败:', workflowHoursErr)
+      }
+    }
+
     const updated = await Work.findLogById(id)
     return res.json({
       success: true,
@@ -1994,6 +2099,7 @@ const updateLog = async (req, res) => {
       data: {
         ...updated,
         workflow_sync: workflowSync,
+        workflow_hours_sync: workflowHoursSync,
       },
     })
   } catch (err) {
@@ -2018,8 +2124,28 @@ const deleteLog = async (req, res) => {
       return res.status(403).json({ success: false, message: '仅可删除自己的工作记录' })
     }
 
+    let workflowDeleteSync = null
+    try {
+      workflowDeleteSync = await Workflow.cancelTaskByWorkLog({
+        demandId: existing.demand_id,
+        log: existing,
+        operatorUserId: req.user.id,
+        comment: '删除工作记录后同步取消流程任务',
+      })
+    } catch (workflowErr) {
+      if (!isWorkflowTablesMissing(workflowErr)) {
+        console.error('删除工作记录后同步流程任务失败:', workflowErr)
+      }
+    }
+
     await Work.deleteLog(id)
-    return res.json({ success: true, message: '工作记录已删除' })
+    return res.json({
+      success: true,
+      message: '工作记录已删除',
+      data: {
+        workflow_delete_sync: workflowDeleteSync,
+      },
+    })
   } catch (err) {
     console.error('删除工作记录失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
@@ -2442,15 +2568,15 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
     return res.status(400).json({ success: false, message: '需求 ID 无效' })
   }
 
-  const assigneeUserId = toPositiveInt(req.body.assignee_user_id)
+  const assigneeUserIds = parseAssigneeUserIdsFromBody(req.body)
   const dueAtRaw = req.body.due_at
   const dueAt = normalizeDate(dueAtRaw)
   const expectedStartDateRaw = req.body.expected_start_date
   const expectedStartDate = normalizeDate(expectedStartDateRaw)
   const comment = normalizeText(req.body.comment, 500)
 
-  if (!assigneeUserId) {
-    return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
+  if (assigneeUserIds.length === 0) {
+    return res.status(400).json({ success: false, message: '至少选择一个参与人' })
   }
   if (
     expectedStartDateRaw !== undefined &&
@@ -2475,14 +2601,17 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
-    const targetUser = await User.findById(assigneeUserId)
-    if (!targetUser) {
-      return res.status(400).json({ success: false, message: '指派目标用户不存在' })
+    for (const userId of assigneeUserIds) {
+      const targetUser = await User.findById(userId)
+      if (!targetUser) {
+        return res.status(400).json({ success: false, message: `指派目标用户不存在: ${userId}` })
+      }
     }
 
     const workflow = await Workflow.assignCurrentNode({
       demandId,
-      assigneeUserId,
+      assigneeUserIds,
+      assigneeUserId: assigneeUserIds[0],
       operatorUserId: req.user.id,
       dueAt,
       expectedStartDate,
@@ -2490,7 +2619,7 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
     })
     return res.json({
       success: true,
-      message: '当前节点已指派并生成待办',
+      message: '当前节点参与人已更新',
       data: workflow,
     })
   } catch (err) {
@@ -2515,15 +2644,15 @@ const assignDemandWorkflowNode = async (req, res) => {
     return res.status(400).json({ success: false, message: '节点标识无效' })
   }
 
-  const assigneeUserId = toPositiveInt(req.body.assignee_user_id)
+  const assigneeUserIds = parseAssigneeUserIdsFromBody(req.body)
   const dueAtRaw = req.body.due_at
   const dueAt = normalizeDate(dueAtRaw)
   const expectedStartDateRaw = req.body.expected_start_date
   const expectedStartDate = normalizeDate(expectedStartDateRaw)
   const comment = normalizeText(req.body.comment, 500)
 
-  if (!assigneeUserId) {
-    return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
+  if (assigneeUserIds.length === 0) {
+    return res.status(400).json({ success: false, message: '至少选择一个参与人' })
   }
   if (
     expectedStartDateRaw !== undefined &&
@@ -2548,15 +2677,18 @@ const assignDemandWorkflowNode = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
-    const targetUser = await User.findById(assigneeUserId)
-    if (!targetUser) {
-      return res.status(400).json({ success: false, message: '指派目标用户不存在' })
+    for (const userId of assigneeUserIds) {
+      const targetUser = await User.findById(userId)
+      if (!targetUser) {
+        return res.status(400).json({ success: false, message: `指派目标用户不存在: ${userId}` })
+      }
     }
 
     const workflow = await Workflow.assignNode({
       demandId,
       nodeKey,
-      assigneeUserId,
+      assigneeUserIds,
+      assigneeUserId: assigneeUserIds[0],
       operatorUserId: req.user.id,
       dueAt,
       expectedStartDate,
@@ -2564,7 +2696,7 @@ const assignDemandWorkflowNode = async (req, res) => {
     })
     return res.json({
       success: true,
-      message: '节点已指派',
+      message: '节点参与人已更新',
       data: workflow,
     })
   } catch (err) {
@@ -2989,6 +3121,10 @@ const updateDemandWorkflowTaskHours = async (req, res) => {
   const actualHours = parseOptionalNonNegativeNumber(req.body.actual_hours, { scale: 2 })
   const deadlineRaw = req.body.deadline
   const deadline = normalizeDateTime(deadlineRaw)
+  const expectedStartDateRaw = req.body.expected_start_date
+  const expectedStartDateNormalized = normalizeDate(expectedStartDateRaw)
+  const expectedCompletionDateRaw = req.body.expected_completion_date
+  const expectedCompletionDateNormalized = normalizeDate(expectedCompletionDateRaw)
   const comment = normalizeText(req.body.comment, 500)
 
   if (!personalHours.ok) return res.status(400).json({ success: false, message: 'personal_estimated_hours 不能小于 0' })
@@ -2996,11 +3132,41 @@ const updateDemandWorkflowTaskHours = async (req, res) => {
   if (deadlineRaw !== undefined && deadlineRaw !== null && String(deadlineRaw).trim() !== '' && !deadline) {
     return res.status(400).json({ success: false, message: 'deadline 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm[:ss]' })
   }
+  if (
+    expectedStartDateRaw !== undefined &&
+    expectedStartDateRaw !== null &&
+    String(expectedStartDateRaw).trim() !== '' &&
+    !expectedStartDateNormalized
+  ) {
+    return res.status(400).json({ success: false, message: 'expected_start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (
+    expectedCompletionDateRaw !== undefined &&
+    expectedCompletionDateRaw !== null &&
+    String(expectedCompletionDateRaw).trim() !== '' &&
+    !expectedCompletionDateNormalized
+  ) {
+    return res.status(400).json({ success: false, message: 'expected_completion_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (
+    expectedStartDateNormalized &&
+    expectedCompletionDateNormalized &&
+    expectedStartDateNormalized > expectedCompletionDateNormalized
+  ) {
+    return res.status(400).json({ success: false, message: '预计开始时间不能晚于预计结束时间' })
+  }
+
+  const expectedStartDate =
+    req.body.expected_start_date === undefined ? undefined : (expectedStartDateNormalized || undefined)
+  const expectedCompletionDate =
+    req.body.expected_completion_date === undefined ? undefined : (expectedCompletionDateNormalized || undefined)
 
   const hasAnyField =
     req.body.personal_estimated_hours !== undefined ||
     req.body.actual_hours !== undefined ||
-    req.body.deadline !== undefined
+    req.body.deadline !== undefined ||
+    req.body.expected_start_date !== undefined ||
+    req.body.expected_completion_date !== undefined
   if (!hasAnyField) {
     return res.status(400).json({ success: false, message: '至少提供一个要更新的字段' })
   }
@@ -3017,6 +3183,8 @@ const updateDemandWorkflowTaskHours = async (req, res) => {
       personalEstimatedHours: personalHours.value,
       actualHours: actualHours.value,
       deadline,
+      expectedStartDate,
+      expectedCompletionDate,
       operatorUserId: req.user.id,
       comment,
     })
@@ -3364,6 +3532,7 @@ module.exports = {
   listWorkItemTypes,
   listDemandPhaseTypes,
   listProjectTemplatePhaseTypes,
+  listDemandWorkflowNodeOptions,
   listWorkflowAssignees,
   createWorkItemType,
   listProjectTemplates,
