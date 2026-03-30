@@ -8,6 +8,7 @@ const WORK_LOG_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE']
 const WORK_LOG_TASK_SOURCES = ['SELF', 'OWNER_ASSIGN', 'WORKFLOW_AUTO']
 const DEMAND_PHASE_DICT_KEY = 'demand_phase_type'
 const PROJECT_TEMPLATE_PHASE_DICT_KEY = 'project_template_phase_type'
+const DEMAND_COMMUNICATION_TYPE_DICT_KEY = 'demand_communication_type'
 const ISSUE_TYPE_DICT_KEY = 'issue_type'
 const BUSINESS_GROUP_DICT_KEY = 'business_group'
 const OWNER_ESTIMATE_RULES = ['NONE', 'OPTIONAL', 'REQUIRED']
@@ -1110,6 +1111,30 @@ const Work = {
     }))
   },
 
+  async findDemandCommunicationTypeByCode(code, { enabledOnly = true } = {}) {
+    const normalizedCode = normalizeText(code, 50).toUpperCase()
+    if (!normalizedCode) return null
+    const whereEnabled = enabledOnly ? 'AND i.enabled = 1' : ''
+    const [rows] = await pool.query(
+      `SELECT
+         i.id,
+         i.item_code,
+         i.item_name,
+         i.enabled,
+         i.sort_order,
+         i.color
+       FROM config_dict_items i
+       INNER JOIN config_dict_types t ON t.type_key = i.type_key
+       WHERE i.type_key = ?
+         AND i.item_code = ?
+         AND t.enabled = 1
+         ${whereEnabled}
+       LIMIT 1`,
+      [DEMAND_COMMUNICATION_TYPE_DICT_KEY, normalizedCode],
+    )
+    return rows[0] || null
+  },
+
   async findItemTypeById(id) {
     const dictItem = await this.findIssueTypeDictItemById(id)
     if (dictItem) {
@@ -1398,53 +1423,56 @@ const Work = {
     mineUserId = null,
   } = {}) {
     const offset = (page - 1) * pageSize
-    const conditions = ['1 = 1']
-    const params = []
+    const baseConditions = ['1 = 1']
+    const baseParams = []
 
     if (keyword) {
-      conditions.push('(d.id LIKE ? OR d.name LIKE ?)')
-      params.push(`%${keyword}%`, `%${keyword}%`)
+      baseConditions.push('(d.id LIKE ? OR d.name LIKE ?)')
+      baseParams.push(`%${keyword}%`, `%${keyword}%`)
     }
 
     if (status) {
-      conditions.push('d.status = ?')
-      params.push(normalizeStatus(status))
+      baseConditions.push('d.status = ?')
+      baseParams.push(normalizeStatus(status))
     }
 
     if (priority) {
-      conditions.push('d.priority = ?')
-      params.push(normalizePriority(priority))
+      baseConditions.push('d.priority = ?')
+      baseParams.push(normalizePriority(priority))
     }
 
+    if (ownerUserId) {
+      baseConditions.push('d.owner_user_id = ?')
+      baseParams.push(ownerUserId)
+    }
+
+    if (updatedStartDate) {
+      baseConditions.push('d.updated_at >= ?')
+      baseParams.push(`${updatedStartDate} 00:00:00`)
+    }
+
+    if (updatedEndDate) {
+      baseConditions.push('d.updated_at < DATE_ADD(?, INTERVAL 1 DAY)')
+      baseParams.push(updatedEndDate)
+    }
+
+    if (mineUserId) {
+      baseConditions.push(
+        `(d.owner_user_id = ? OR EXISTS (
+          SELECT 1 FROM work_logs mwl WHERE mwl.demand_id = d.id AND mwl.user_id = ?
+        ))`,
+      )
+      baseParams.push(mineUserId, mineUserId)
+    }
+
+    const conditions = [...baseConditions]
+    const params = [...baseParams]
     if (businessGroupCode) {
       conditions.push('d.business_group_code = ?')
       params.push(businessGroupCode)
     }
 
-    if (ownerUserId) {
-      conditions.push('d.owner_user_id = ?')
-      params.push(ownerUserId)
-    }
-
-    if (updatedStartDate) {
-      conditions.push('d.updated_at >= ?')
-      params.push(`${updatedStartDate} 00:00:00`)
-    }
-
-    if (updatedEndDate) {
-      conditions.push('d.updated_at < DATE_ADD(?, INTERVAL 1 DAY)')
-      params.push(updatedEndDate)
-    }
-
-    if (mineUserId) {
-      conditions.push(
-        `(d.owner_user_id = ? OR EXISTS (
-          SELECT 1 FROM work_logs mwl WHERE mwl.demand_id = d.id AND mwl.user_id = ?
-        ))`,
-      )
-      params.push(mineUserId, mineUserId)
-    }
-
+    const baseWhereSql = baseConditions.join(' AND ')
     const whereSql = conditions.join(' AND ')
     const normalizedPriorityOrder = String(priorityOrder || '').trim().toLowerCase() === 'desc' ? 'DESC' : 'ASC'
     const listSql = `
@@ -1468,6 +1496,8 @@ const Work = {
         d.business_group_code,
         bg.item_name AS business_group_name,
         DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
+        ci.current_phase_key,
+        ci.current_phase_name,
         d.status,
         d.priority,
         d.description,
@@ -1476,8 +1506,10 @@ const Work = {
         DATE_FORMAT(d.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
         DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,
         COALESCE(pm2.member_count, 0) AS member_count,
-        COALESCE(ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,
-        COALESCE(ta.total_actual_hours, 0) AS total_actual_hours,
+        COALESCE(d.overall_estimated_hours, ta.total_personal_estimate_hours, 0) AS total_personal_estimate_hours,
+        COALESCE(d.overall_actual_hours, ta.total_actual_hours, 0) AS total_actual_hours,
+        COALESCE(d.overall_estimated_hours, 0) AS overall_estimated_hours,
+        COALESCE(d.overall_actual_hours, 0) AS overall_actual_hours,
         COALESCE(lr.remaining_hours, 0) AS latest_remaining_hours
       FROM work_demands d
       LEFT JOIN users u ON u.id = d.owner_user_id
@@ -1486,6 +1518,30 @@ const Work = {
       LEFT JOIN config_dict_items bg
         ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
        AND bg.item_code = d.business_group_code
+      LEFT JOIN (
+        SELECT
+          x.biz_id AS demand_id,
+          x.current_node_key AS current_phase_key,
+          COALESCE(NULLIF(n.node_name_snapshot, ''), pdi_phase.item_name, pdi_node.item_name, x.current_node_key) AS current_phase_name
+        FROM wf_process_instances x
+        LEFT JOIN wf_process_instance_nodes n
+          ON n.instance_id = x.id
+         AND n.node_key = x.current_node_key
+        LEFT JOIN config_dict_items pdi_phase
+          ON pdi_phase.type_key = '${DEMAND_PHASE_DICT_KEY}'
+         AND pdi_phase.item_code = n.phase_key
+        LEFT JOIN config_dict_items pdi_node
+          ON pdi_node.type_key = '${DEMAND_PHASE_DICT_KEY}'
+         AND pdi_node.item_code = n.node_key
+        INNER JOIN (
+          SELECT biz_id, MAX(id) AS latest_instance_id
+          FROM wf_process_instances
+          WHERE biz_type = 'DEMAND'
+            AND status <> 'TERMINATED'
+          GROUP BY biz_id
+        ) latest
+          ON latest.latest_instance_id = x.id
+      ) ci ON ci.demand_id = d.id
       LEFT JOIN (
         SELECT demand_id, COUNT(*) AS member_count
         FROM project_members
@@ -1528,6 +1584,26 @@ const Work = {
        WHERE ${whereSql}`,
       params,
     )
+    const [[{ all_total: allTotal }]] = await pool.query(
+      `SELECT COUNT(*) AS all_total
+       FROM work_demands d
+       WHERE ${baseWhereSql}`,
+      baseParams,
+    )
+    const [groupCountRows] = await pool.query(
+      `SELECT
+         COALESCE(d.business_group_code, '') AS business_group_code,
+         COALESCE(bg.item_name, d.business_group_code, '') AS business_group_name,
+         COUNT(*) AS total
+       FROM work_demands d
+       LEFT JOIN config_dict_items bg
+         ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
+        AND bg.item_code = d.business_group_code
+       WHERE ${baseWhereSql}
+       GROUP BY d.business_group_code, bg.item_name
+       ORDER BY total DESC, business_group_code ASC`,
+      baseParams,
+    )
 
     const todayDate = getBeijingTodayDateString()
     const normalizedRows = (rows || []).map((row) => {
@@ -1540,7 +1616,16 @@ const Work = {
         { todayDate },
       )
     })
-    return { rows: normalizedRows, total }
+    return {
+      rows: normalizedRows,
+      total,
+      allTotal: Number(allTotal || 0),
+      groupCounts: (groupCountRows || []).map((item) => ({
+        business_group_code: item.business_group_code || '',
+        business_group_name: item.business_group_name || item.business_group_code || '',
+        total: Number(item.total || 0),
+      })),
+    }
   },
 
   async findDemandById(id) {
@@ -1562,6 +1647,8 @@ const Work = {
          d.doc_link,
          d.ui_design_link,
          d.test_case_link,
+         COALESCE(d.overall_estimated_hours, 0) AS overall_estimated_hours,
+         COALESCE(d.overall_actual_hours, 0) AS overall_actual_hours,
          d.business_group_code,
          bg.item_name AS business_group_name,
          DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
@@ -1750,6 +1837,125 @@ const Work = {
     return Number(row?.total || 0)
   },
 
+  async calculateDemandHourSummary(demandId, { conn = null } = {}) {
+    const normalizedDemandId = String(demandId || '').trim().toUpperCase()
+    if (!normalizedDemandId) {
+      return {
+        overall_estimated_hours: 0,
+        overall_actual_hours: 0,
+      }
+    }
+
+    const db = conn || pool
+
+    let latestInstanceId = null
+    let workflowTaskEstimatedHours = 0
+    let workflowNodeEstimatedHours = 0
+    let workflowNodeActualHours = 0
+
+    try {
+      const [instanceRows] = await db.query(
+        `SELECT id
+         FROM wf_process_instances
+         WHERE biz_type = 'DEMAND'
+           AND biz_id = ?
+           AND status <> 'TERMINATED'
+         ORDER BY id DESC
+         LIMIT 1`,
+        [normalizedDemandId],
+      )
+      latestInstanceId = Number(instanceRows?.[0]?.id || 0) || null
+
+      if (latestInstanceId) {
+        const [[taskAggRow]] = await db.query(
+          `SELECT ROUND(COALESCE(SUM(CASE
+                    WHEN COALESCE(status, 'TODO') <> 'CANCELLED' AND COALESCE(personal_estimated_hours, 0) > 0
+                      THEN personal_estimated_hours
+                    ELSE 0
+                  END), 0), 1) AS total_estimated_hours
+           FROM wf_process_tasks
+           WHERE instance_id = ?`,
+          [latestInstanceId],
+        )
+        workflowTaskEstimatedHours = normalizeDecimal(taskAggRow?.total_estimated_hours, 0) || 0
+
+        const [[nodeAggRow]] = await db.query(
+          `SELECT
+             ROUND(COALESCE(SUM(CASE
+               WHEN COALESCE(status, 'TODO') <> 'CANCELLED'
+                 THEN COALESCE(personal_estimated_hours, owner_estimated_hours, 0)
+               ELSE 0
+             END), 0), 1) AS total_estimated_hours,
+             ROUND(COALESCE(SUM(CASE
+               WHEN COALESCE(status, 'TODO') <> 'CANCELLED'
+                 THEN COALESCE(actual_hours, 0)
+               ELSE 0
+             END), 0), 1) AS total_actual_hours
+           FROM wf_process_instance_nodes
+           WHERE instance_id = ?`,
+          [latestInstanceId],
+        )
+        workflowNodeEstimatedHours = normalizeDecimal(nodeAggRow?.total_estimated_hours, 0) || 0
+        workflowNodeActualHours = normalizeDecimal(nodeAggRow?.total_actual_hours, 0) || 0
+      }
+    } catch (err) {
+      if (!isMissingTableError(err)) throw err
+    }
+
+    const [[manualLogAggRow]] = await db.query(
+      `SELECT
+         ROUND(COALESCE(SUM(CASE
+           WHEN COALESCE(log_status, 'IN_PROGRESS') <> 'CANCELLED'
+             AND COALESCE(task_source, 'SELF') <> 'WORKFLOW_AUTO'
+             AND COALESCE(personal_estimate_hours, 0) > 0
+             THEN personal_estimate_hours
+           ELSE 0
+         END), 0), 1) AS total_estimated_hours,
+         ROUND(COALESCE(SUM(CASE
+           WHEN COALESCE(log_status, 'IN_PROGRESS') <> 'CANCELLED'
+             THEN COALESCE(actual_hours, 0)
+           ELSE 0
+         END), 0), 1) AS total_actual_hours
+       FROM work_logs
+       WHERE demand_id = ?`,
+      [normalizedDemandId],
+    )
+
+    const manualLogEstimatedHours = normalizeDecimal(manualLogAggRow?.total_estimated_hours, 0) || 0
+    const logActualHours = normalizeDecimal(manualLogAggRow?.total_actual_hours, 0) || 0
+
+    const rolledEstimatedHours =
+      workflowTaskEstimatedHours + manualLogEstimatedHours > 0
+        ? normalizeDecimal(workflowTaskEstimatedHours + manualLogEstimatedHours, 0) || 0
+        : workflowNodeEstimatedHours
+    const rolledActualHours = logActualHours > 0 ? logActualHours : workflowNodeActualHours
+
+    return {
+      overall_estimated_hours: normalizeDecimal(rolledEstimatedHours, 0) || 0,
+      overall_actual_hours: normalizeDecimal(rolledActualHours, 0) || 0,
+    }
+  },
+
+  async refreshDemandHourSummary(demandId, { conn = null } = {}) {
+    const normalizedDemandId = String(demandId || '').trim().toUpperCase()
+    if (!normalizedDemandId) {
+      return {
+        overall_estimated_hours: 0,
+        overall_actual_hours: 0,
+      }
+    }
+
+    const db = conn || pool
+    const summary = await this.calculateDemandHourSummary(normalizedDemandId, { conn: db })
+    await db.query(
+      `UPDATE work_demands
+       SET overall_estimated_hours = ?, overall_actual_hours = ?
+       WHERE id = ?`,
+      [summary.overall_estimated_hours, summary.overall_actual_hours, normalizedDemandId],
+    )
+    return summary
+  },
+
   async deleteDemand(demandId) {
     const relatedLogCount = await this.countLogsByDemandId(demandId)
 
@@ -1855,6 +2061,146 @@ const Work = {
        WHERE demand_id = ?
          AND user_id = ?`,
       [normalizedDemandId, normalizedUserId],
+    )
+    return Number(result?.affectedRows || 0)
+  },
+
+  async listDemandCommunications(demandId, { recordTypeCode = '', limit = 200 } = {}) {
+    const normalizedDemandId = String(demandId || '').trim().toUpperCase()
+    if (!normalizedDemandId) return []
+    const normalizedRecordTypeCode = normalizeText(recordTypeCode, 50).toUpperCase()
+    const normalizedLimit = Math.min(Math.max(Number(limit) || 100, 1), 500)
+
+    const conditions = ['dc.demand_id = ?']
+    const params = [normalizedDemandId]
+    if (normalizedRecordTypeCode) {
+      conditions.push('dc.record_type_code = ?')
+      params.push(normalizedRecordTypeCode)
+    }
+
+    const [rows] = await pool.query(
+      `SELECT
+         dc.id,
+         dc.demand_id,
+         dc.record_type_code,
+         COALESCE(dti.item_name, dc.record_type_code) AS record_type_name,
+         dti.color AS record_type_color,
+         dc.content,
+         dc.created_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS created_by_name,
+         dc.updated_by,
+         COALESCE(NULLIF(uu.real_name, ''), uu.username) AS updated_by_name,
+         DATE_FORMAT(dc.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(dc.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM work_demand_communications dc
+       LEFT JOIN users u ON u.id = dc.created_by
+       LEFT JOIN users uu ON uu.id = dc.updated_by
+       LEFT JOIN config_dict_items dti
+         ON dti.type_key = '${DEMAND_COMMUNICATION_TYPE_DICT_KEY}'
+        AND dti.item_code = dc.record_type_code
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY dc.created_at DESC, dc.id DESC
+       LIMIT ?`,
+      [...params, normalizedLimit],
+    )
+
+    return (rows || []).map((row) => ({
+      id: Number(row.id),
+      demand_id: row.demand_id,
+      record_type_code: row.record_type_code || '',
+      record_type_name: row.record_type_name || row.record_type_code || '',
+      record_type_color: row.record_type_color || null,
+      content: row.content || '',
+      created_by: Number(row.created_by),
+      created_by_name: row.created_by_name || '',
+      updated_by: row.updated_by ? Number(row.updated_by) : null,
+      updated_by_name: row.updated_by_name || '',
+      created_at: row.created_at || null,
+      updated_at: row.updated_at || null,
+    }))
+  },
+
+  async findDemandCommunicationById(id) {
+    const normalizedId = toPositiveInt(id)
+    if (!normalizedId) return null
+
+    const [rows] = await pool.query(
+      `SELECT
+         dc.id,
+         dc.demand_id,
+         dc.record_type_code,
+         COALESCE(dti.item_name, dc.record_type_code) AS record_type_name,
+         dti.color AS record_type_color,
+         dc.content,
+         dc.created_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS created_by_name,
+         dc.updated_by,
+         COALESCE(NULLIF(uu.real_name, ''), uu.username) AS updated_by_name,
+         DATE_FORMAT(dc.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(dc.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM work_demand_communications dc
+       LEFT JOIN users u ON u.id = dc.created_by
+       LEFT JOIN users uu ON uu.id = dc.updated_by
+       LEFT JOIN config_dict_items dti
+         ON dti.type_key = '${DEMAND_COMMUNICATION_TYPE_DICT_KEY}'
+        AND dti.item_code = dc.record_type_code
+       WHERE dc.id = ?
+       LIMIT 1`,
+      [normalizedId],
+    )
+
+    const row = rows[0] || null
+    if (!row) return null
+    return {
+      id: Number(row.id),
+      demand_id: row.demand_id,
+      record_type_code: row.record_type_code || '',
+      record_type_name: row.record_type_name || row.record_type_code || '',
+      record_type_color: row.record_type_color || null,
+      content: row.content || '',
+      created_by: Number(row.created_by),
+      created_by_name: row.created_by_name || '',
+      updated_by: row.updated_by ? Number(row.updated_by) : null,
+      updated_by_name: row.updated_by_name || '',
+      created_at: row.created_at || null,
+      updated_at: row.updated_at || null,
+    }
+  },
+
+  async createDemandCommunication({
+    demandId,
+    recordTypeCode,
+    content,
+    createdBy,
+  }) {
+    const normalizedDemandId = String(demandId || '').trim().toUpperCase()
+    const normalizedRecordTypeCode = normalizeText(recordTypeCode, 50).toUpperCase()
+    const normalizedContent = normalizeText(content, 5000)
+    const normalizedCreatedBy = toPositiveInt(createdBy)
+    if (!normalizedDemandId || !normalizedRecordTypeCode || !normalizedContent || !normalizedCreatedBy) return null
+
+    const [result] = await pool.query(
+      `INSERT INTO work_demand_communications (
+         demand_id,
+         record_type_code,
+         content,
+         created_by,
+         updated_by
+       ) VALUES (?, ?, ?, ?, ?)`,
+      [normalizedDemandId, normalizedRecordTypeCode, normalizedContent, normalizedCreatedBy, normalizedCreatedBy],
+    )
+
+    return this.findDemandCommunicationById(result.insertId)
+  },
+
+  async deleteDemandCommunication(id) {
+    const normalizedId = toPositiveInt(id)
+    if (!normalizedId) return 0
+
+    const [result] = await pool.query(
+      `DELETE FROM work_demand_communications
+       WHERE id = ?`,
+      [normalizedId],
     )
     return Number(result?.affectedRows || 0)
   },

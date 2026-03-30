@@ -20,6 +20,16 @@ const NOTIFICATION_SCENES = new Set([
   'bug_reopen',
 ])
 
+const DEMAND_NODE_QUICK_ADD_SCENE = 'DEMAND_NODE_QUICK_ADD'
+const QUICK_ADD_DEFAULT_ITEM_TYPE_KEYS = Array.from(
+  new Set(
+    String(process.env.WORKFLOW_TRACK_ITEM_TYPE_KEYS || 'DEMAND_DEV')
+      .split(',')
+      .map((item) => String(item || '').trim().toUpperCase())
+      .filter(Boolean),
+  ),
+)
+
 function toPositiveInt(value) {
   const num = Number(value)
   return Number.isInteger(num) && num > 0 ? num : null
@@ -60,6 +70,13 @@ function normalizeBusinessGroupCode(value) {
   if (value === undefined) return undefined
   const code = String(value || '').trim().toUpperCase()
   if (!code) return null
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : ''
+}
+
+function normalizeDictCode(value) {
+  if (value === undefined) return undefined
+  const code = String(value || '').trim().toUpperCase()
+  if (!code) return ''
   return /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : ''
 }
 
@@ -367,6 +384,21 @@ function canEditDemand(req, demand) {
   return Number(req.user?.id) === Number(demand.owner_user_id)
 }
 
+async function resolveQuickAddDefaultItemType() {
+  const itemTypes = await Work.listItemTypes({ enabledOnly: true })
+  if (!Array.isArray(itemTypes) || itemTypes.length === 0) return null
+
+  const matchedByKey = itemTypes.find((item) =>
+    QUICK_ADD_DEFAULT_ITEM_TYPE_KEYS.includes(String(item?.type_key || '').trim().toUpperCase()),
+  )
+  if (matchedByKey?.id) return matchedByKey
+
+  const demandRequiredItem = itemTypes.find((item) => Number(item?.require_demand) === 1)
+  if (demandRequiredItem?.id) return demandRequiredItem
+
+  return itemTypes[0] || null
+}
+
 function ensureSuperAdmin(req, res) {
   if (req.userAccess?.is_super_admin) return true
   res.status(403).json({ success: false, message: '仅超级管理员可访问效能总览' })
@@ -375,6 +407,17 @@ function ensureSuperAdmin(req, res) {
 
 function isWorkflowTablesMissing(err) {
   return err?.code === 'WORKFLOW_TABLES_MISSING'
+}
+
+async function refreshDemandHourSummaryQuietly(demandId) {
+  const normalizedDemandId = normalizeDemandId(demandId)
+  if (!normalizedDemandId) return null
+  try {
+    return await Work.refreshDemandHourSummary(normalizedDemandId)
+  } catch (err) {
+    console.error(`刷新需求工时汇总失败: ${normalizedDemandId}`, err)
+    return null
+  }
 }
 
 const listWorkItemTypes = async (req, res) => {
@@ -769,7 +812,7 @@ const listDemands = async (req, res) => {
   }
 
   try {
-    const { rows, total } = await Work.listDemands({
+    const { rows, total, allTotal, groupCounts } = await Work.listDemands({
       page,
       pageSize,
       keyword,
@@ -788,6 +831,8 @@ const listDemands = async (req, res) => {
       data: {
         list: rows,
         total,
+        all_total: allTotal,
+        group_counts: groupCounts || [],
         page,
         pageSize,
       },
@@ -891,6 +936,114 @@ const removeDemandMember = async (req, res) => {
     })
   } catch (err) {
     console.error('移除项目成员失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listDemandCommunications = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  const recordTypeCode = normalizeDictCode(req.query.record_type_code)
+  if (recordTypeCode === '') {
+    return res.status(400).json({ success: false, message: 'record_type_code 格式不正确' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    if (recordTypeCode) {
+      const typeItem = await Work.findDemandCommunicationTypeByCode(recordTypeCode, { enabledOnly: true })
+      if (!typeItem) {
+        return res.status(400).json({ success: false, message: 'record_type_code 不存在或已停用' })
+      }
+    }
+
+    const rows = await Work.listDemandCommunications(demandId, { recordTypeCode })
+    return res.json({ success: true, data: rows })
+  } catch (err) {
+    console.error('获取需求沟通记录失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const createDemandCommunication = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const recordTypeCode = normalizeDictCode(req.body.record_type_code)
+  const content = normalizeText(req.body.content, 5000)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!recordTypeCode) {
+    return res.status(400).json({ success: false, message: '请选择记录类型' })
+  }
+  if (!content) {
+    return res.status(400).json({ success: false, message: '请输入记录内容' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const typeItem = await Work.findDemandCommunicationTypeByCode(recordTypeCode, { enabledOnly: true })
+    if (!typeItem) {
+      return res.status(400).json({ success: false, message: '记录类型不存在或已停用' })
+    }
+
+    const created = await Work.createDemandCommunication({
+      demandId,
+      recordTypeCode,
+      content,
+      createdBy: req.user.id,
+    })
+    return res.status(201).json({ success: true, message: '沟通记录已保存', data: created })
+  } catch (err) {
+    console.error('创建需求沟通记录失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const deleteDemandCommunication = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const communicationId = toPositiveInt(req.params.communicationId)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!communicationId) {
+    return res.status(400).json({ success: false, message: 'communicationId 无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const existing = await Work.findDemandCommunicationById(communicationId)
+    if (!existing || String(existing.demand_id || '').trim().toUpperCase() !== demandId) {
+      return res.status(404).json({ success: false, message: '沟通记录不存在' })
+    }
+
+    const canDelete = canEditDemand(req, demand) || Number(existing.created_by) === Number(req.user?.id)
+    if (!canDelete) {
+      return res.status(403).json({ success: false, message: '仅记录人、需求负责人或管理员可删除' })
+    }
+
+    await Work.deleteDemandCommunication(communicationId)
+    return res.json({
+      success: true,
+      message: '沟通记录已删除',
+      data: { id: communicationId, demand_id: demandId },
+    })
+  } catch (err) {
+    console.error('删除需求沟通记录失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -1071,6 +1224,7 @@ const createDemand = async (req, res) => {
       }
     }
 
+    await refreshDemandHourSummaryQuietly(finalDemandId)
     const created = await Work.findDemandById(finalDemandId)
     return res.status(201).json({
       success: true,
@@ -1304,7 +1458,6 @@ const updateDemand = async (req, res) => {
       completedAt,
     })
 
-    const updated = await Work.findDemandById(demandId)
     let workflowSyncNotice = ''
     let workflowAutoReplaced = false
 
@@ -1344,6 +1497,9 @@ const updateDemand = async (req, res) => {
         }
       }
     }
+
+    await refreshDemandHourSummaryQuietly(demandId)
+    const updated = await Work.findDemandById(demandId)
 
     return res.json({
       success: true,
@@ -1785,6 +1941,7 @@ const createLog = async (req, res) => {
       }
     }
 
+    await refreshDemandHourSummaryQuietly(demandId)
     const created = await Work.findLogById(id)
     return res.status(201).json({
       success: true,
@@ -1810,27 +1967,16 @@ const createOwnerAssignedLog = async (req, res) => {
     return res.status(400).json({ success: false, message: 'Owner 指派接口不允许写入受限字段' })
   }
 
-  const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
-  if (!isSuperAdmin) {
-    const isManager = await Work.isDepartmentManager(req.user.id)
-    if (!isManager) {
-      return res.status(403).json({ success: false, message: '仅部门负责人可新增指派事项' })
-    }
-  }
-
   const assigneeUserId = toPositiveInt(req.body.assignee_user_id)
   if (!assigneeUserId) {
     return res.status(400).json({ success: false, message: 'assignee_user_id 无效' })
   }
 
-  const canAssign = await Work.canManageAssigneeByOwner(req.user.id, assigneeUserId, { isSuperAdmin })
-  if (!canAssign) {
-    return res.status(403).json({ success: false, message: '仅可指派给管理范围内成员' })
-  }
-
   const logDateRaw = req.body.log_date
   const logDate = normalizeDate(logDateRaw) || formatDate(new Date())
-  const itemTypeId = toPositiveInt(req.body.item_type_id)
+  const createScene = normalizeText(req.body.create_scene, 64).toUpperCase()
+  const isDemandNodeQuickAdd = createScene === DEMAND_NODE_QUICK_ADD_SCENE
+  let itemTypeId = toPositiveInt(req.body.item_type_id)
   const description = normalizeText(req.body.description, 2000)
   const ownerEstimateHours = normalizeHours(
     req.body.owner_estimate_hours,
@@ -1843,6 +1989,7 @@ const createOwnerAssignedLog = async (req, res) => {
     personalEstimateHours !== null ? personalEstimateHours : 0,
   )
   const demandId = normalizeDemandId(req.body.demand_id)
+  let demand = null
   let phaseKey = normalizePhaseKey(req.body.phase_key)
   const expectedStartDateRaw = req.body.expected_start_date
   let expectedStartDate = normalizeDate(expectedStartDateRaw)
@@ -1856,6 +2003,40 @@ const createOwnerAssignedLog = async (req, res) => {
   const logCompletedAtRaw = req.body.log_completed_at
   const logCompletedAt = normalizeDateTime(logCompletedAtRaw)
 
+  if (demandId) {
+    demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(400).json({ success: false, message: '关联需求不存在' })
+    }
+  }
+
+  const canQuickAddForDemandNode =
+    isDemandNodeQuickAdd &&
+    demand &&
+    (hasPermission(req, 'demand.manage') ||
+      hasPermission(req, 'demand.workflow.manage') ||
+      canEditDemand(req, demand))
+
+  const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+  if (!canQuickAddForDemandNode && !isSuperAdmin) {
+    const isManager = await Work.isDepartmentManager(req.user.id)
+    if (!isManager) {
+      return res.status(403).json({ success: false, message: '仅部门负责人可新增指派事项' })
+    }
+  }
+
+  if (!canQuickAddForDemandNode) {
+    const canAssign = await Work.canManageAssigneeByOwner(req.user.id, assigneeUserId, { isSuperAdmin })
+    if (!canAssign) {
+      return res.status(403).json({ success: false, message: '仅可指派给管理范围内成员' })
+    }
+  }
+
+  if (!itemTypeId && isDemandNodeQuickAdd) {
+    const defaultItemType = await resolveQuickAddDefaultItemType()
+    itemTypeId = Number(defaultItemType?.id || 0) || null
+  }
+
   if (!itemTypeId) {
     return res.status(400).json({ success: false, message: 'item_type_id 无效' })
   }
@@ -1864,7 +2045,11 @@ const createOwnerAssignedLog = async (req, res) => {
     return res.status(400).json({ success: false, message: '工作描述不能为空' })
   }
 
-  if (ownerEstimateHours === null || ownerEstimateHours <= 0) {
+  if (ownerEstimateHours !== null && ownerEstimateHours < 0) {
+    return res.status(400).json({ success: false, message: 'owner_estimate_hours 不能小于 0' })
+  }
+
+  if (!isDemandNodeQuickAdd && (ownerEstimateHours === null || ownerEstimateHours <= 0)) {
     return res.status(400).json({ success: false, message: 'owner_estimate_hours 必须大于 0' })
   }
 
@@ -1925,11 +2110,6 @@ const createOwnerAssignedLog = async (req, res) => {
     }
 
     if (demandId) {
-      const demand = await Work.findDemandById(demandId)
-      if (!demand) {
-        return res.status(400).json({ success: false, message: '关联需求不存在' })
-      }
-
       if (!phaseKey) {
         return res.status(400).json({ success: false, message: '关联需求时必须选择阶段' })
       }
@@ -1983,10 +2163,12 @@ const createOwnerAssignedLog = async (req, res) => {
     }
 
     try {
-      await Work.updateLogOwnerEstimate(id, {
-        ownerEstimateHours,
-        ownerEstimatedBy: req.user.id,
-      })
+      if (ownerEstimateHours !== null) {
+        await Work.updateLogOwnerEstimate(id, {
+          ownerEstimateHours,
+          ownerEstimatedBy: req.user.id,
+        })
+      }
     } catch (ownerEstimateErr) {
       if (ownerEstimateErr?.code === 'OWNER_ESTIMATE_FIELDS_MISSING') {
         return res.status(500).json({
@@ -1997,10 +2179,11 @@ const createOwnerAssignedLog = async (req, res) => {
       throw ownerEstimateErr
     }
 
+    await refreshDemandHourSummaryQuietly(demandId)
     const created = await Work.findLogById(id)
     return res.status(201).json({
       success: true,
-      message: 'Owner 指派事项创建成功',
+      message: isDemandNodeQuickAdd ? '任务创建成功' : 'Owner 指派事项创建成功',
       data: created,
     })
   } catch (err) {
@@ -2221,6 +2404,10 @@ const updateLog = async (req, res) => {
       }
     }
 
+    await refreshDemandHourSummaryQuietly(existing.demand_id)
+    if (String(existing.demand_id || '') !== String(demandId || '')) {
+      await refreshDemandHourSummaryQuietly(demandId)
+    }
     const updated = await Work.findLogById(id)
     return res.json({
       success: true,
@@ -2268,6 +2455,7 @@ const deleteLog = async (req, res) => {
     }
 
     await Work.deleteLog(id)
+    await refreshDemandHourSummaryQuietly(existing.demand_id)
     return res.json({
       success: true,
       message: '工作记录已删除',
@@ -2449,6 +2637,7 @@ const createLogDailyEntry = async (req, res) => {
       startDate: entryDate,
       endDate: entryDate,
     })
+    await refreshDemandHourSummaryQuietly(existing.demand_id)
     const created = rows.find((item) => Number(item.id) === Number(entryId)) || rows[0] || null
     return res.status(201).json({
       success: true,
@@ -2644,6 +2833,7 @@ const initDemandWorkflowInstance = async (req, res) => {
       ownerUserId: demand.owner_user_id,
       operatorUserId: req.user.id,
     })
+    await refreshDemandHourSummaryQuietly(demandId)
     return res.json({
       success: true,
       message: '需求流程实例已初始化',
@@ -2680,6 +2870,7 @@ const getDemandWorkflow = async (req, res) => {
         ownerUserId: demand.owner_user_id,
         operatorUserId: req.user.id,
       })
+      await refreshDemandHourSummaryQuietly(demandId)
     }
     return res.json({ success: true, data: workflow })
   } catch (err) {
@@ -2705,7 +2896,7 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
   const comment = normalizeText(req.body.comment, 500)
 
   if (assigneeUserIds.length === 0) {
-    return res.status(400).json({ success: false, message: '至少选择一个参与人' })
+    return res.status(400).json({ success: false, message: '请选择节点负责人' })
   }
   if (
     expectedStartDateRaw !== undefined &&
@@ -2746,9 +2937,10 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
       expectedStartDate,
       comment,
     })
+    await refreshDemandHourSummaryQuietly(demandId)
     return res.json({
       success: true,
-      message: '当前节点参与人已更新',
+      message: '当前节点负责人已更新',
       data: workflow,
     })
   } catch (err) {
@@ -2758,7 +2950,7 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
     if (err?.code === 'WORKFLOW_INSTANCE_NOT_FOUND') {
       return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
     }
-    console.error('指派需求流程节点失败:', err)
+    console.error('更新需求流程当前节点负责人失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -2781,7 +2973,7 @@ const assignDemandWorkflowNode = async (req, res) => {
   const comment = normalizeText(req.body.comment, 500)
 
   if (assigneeUserIds.length === 0) {
-    return res.status(400).json({ success: false, message: '至少选择一个参与人' })
+    return res.status(400).json({ success: false, message: '请选择节点负责人' })
   }
   if (
     expectedStartDateRaw !== undefined &&
@@ -2823,9 +3015,10 @@ const assignDemandWorkflowNode = async (req, res) => {
       expectedStartDate,
       comment,
     })
+    await refreshDemandHourSummaryQuietly(demandId)
     return res.json({
       success: true,
-      message: '节点参与人已更新',
+      message: '节点负责人已更新',
       data: workflow,
     })
   } catch (err) {
@@ -2841,7 +3034,7 @@ const assignDemandWorkflowNode = async (req, res) => {
     if (err?.code === 'WORKFLOW_NODE_CLOSED') {
       return res.status(400).json({ success: false, message: '当前节点已关闭，无法指派' })
     }
-    console.error('按节点指派需求流程失败:', err)
+    console.error('更新需求流程节点负责人失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -2866,6 +3059,7 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
       comment,
       sourceType: 'MANUAL',
     })
+    await refreshDemandHourSummaryQuietly(demandId)
 
     return res.json({
       success: true,
@@ -2912,6 +3106,7 @@ const submitDemandWorkflowNode = async (req, res) => {
       comment,
       sourceType: 'MANUAL',
     })
+    await refreshDemandHourSummaryQuietly(demandId)
 
     return res.json({
       success: true,
@@ -2963,6 +3158,7 @@ const rejectDemandWorkflowCurrentNode = async (req, res) => {
       rejectReason,
       comment,
     })
+    await refreshDemandHourSummaryQuietly(demandId)
 
     return res.json({
       success: true,
@@ -3016,6 +3212,7 @@ const rejectDemandWorkflowNode = async (req, res) => {
       rejectReason,
       comment,
     })
+    await refreshDemandHourSummaryQuietly(demandId)
 
     return res.json({
       success: true,
@@ -3064,6 +3261,7 @@ const forceCompleteDemandWorkflowCurrentNode = async (req, res) => {
       sourceType: 'FORCE',
       skipAssigneeCheck: true,
     })
+    await refreshDemandHourSummaryQuietly(demandId)
 
     return res.json({
       success: true,
@@ -3108,6 +3306,7 @@ const forceCompleteDemandWorkflowNode = async (req, res) => {
       sourceType: 'FORCE',
       skipAssigneeCheck: true,
     })
+    await refreshDemandHourSummaryQuietly(demandId)
 
     return res.json({
       success: true,
@@ -3209,6 +3408,7 @@ const updateDemandWorkflowNodeHours = async (req, res) => {
       operatorUserId: req.user.id,
       comment,
     })
+    await refreshDemandHourSummaryQuietly(demandId)
 
     return res.json({
       success: true,
@@ -3317,6 +3517,7 @@ const updateDemandWorkflowTaskHours = async (req, res) => {
       operatorUserId: req.user.id,
       comment,
     })
+    await refreshDemandHourSummaryQuietly(demandId)
 
     return res.json({
       success: true,
@@ -3526,6 +3727,7 @@ const replaceDemandWorkflowLatestTemplate = async (req, res) => {
       operatorUserId: req.user.id,
       autoAssignCurrentNode: false,
     })
+    await refreshDemandHourSummaryQuietly(demandId)
 
     return res.json({
       success: true,
@@ -3675,6 +3877,9 @@ module.exports = {
   listDemandMembers,
   addDemandMember,
   removeDemandMember,
+  listDemandCommunications,
+  createDemandCommunication,
+  deleteDemandCommunication,
   createDemand,
   updateDemand,
   deleteDemand,

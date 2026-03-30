@@ -2609,7 +2609,6 @@ const Workflow = {
     assigneeUserIds = [],
     operatorUserId,
     dueAt = null,
-    expectedStartDate = null,
     comment = '',
   } = {}) {
     const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
@@ -2621,7 +2620,6 @@ const Workflow = {
         : (normalizedSingleAssigneeUserId ? [normalizedSingleAssigneeUserId] : [])
     const normalizedOperatorUserId = toPositiveInt(operatorUserId)
     const normalizedDueAt = normalizeDate(dueAt)
-    const normalizedExpectedStartDate = normalizeDate(expectedStartDate)
 
     if (!normalizedDemandId) {
       const err = new Error('demand_id_required')
@@ -2669,21 +2667,6 @@ const Workflow = {
         [finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null, normalizedDueAt, currentNode.id],
       )
 
-      await syncActiveNodeTasksForAssignees(conn, {
-        instanceId: instance.id,
-        instanceNodeId: currentNode.id,
-        demandId: normalizedDemandId,
-        phaseKey: currentNode.phase_key,
-        nodeName: currentNode.node_name_snapshot,
-        assigneeUserIds: finalAssigneeUserIds,
-        dueAt: normalizedDueAt,
-        expectedStartDate: normalizedExpectedStartDate,
-        assignedByUserId: normalizedOperatorUserId,
-        createdBy: normalizedOperatorUserId,
-        sourceType: 'ASSIGN',
-        sourceId: currentNode.id,
-      })
-
       await insertAction(conn, {
         instanceId: instance.id,
         instanceNodeId: currentNode.id,
@@ -2712,7 +2695,6 @@ const Workflow = {
     assigneeUserIds = [],
     operatorUserId,
     dueAt = null,
-    expectedStartDate = null,
     comment = '',
   } = {}) {
     const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
@@ -2725,7 +2707,6 @@ const Workflow = {
         : (normalizedSingleAssigneeUserId ? [normalizedSingleAssigneeUserId] : [])
     const normalizedOperatorUserId = toPositiveInt(operatorUserId)
     const normalizedDueAt = normalizeDate(dueAt)
-    const normalizedExpectedStartDate = normalizeDate(expectedStartDate)
 
     if (!normalizedDemandId) {
       const err = new Error('demand_id_required')
@@ -2785,37 +2766,6 @@ const Workflow = {
       targetNode.assignee_user_id = finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null
 
       const isActiveNode = targetNode.status === NODE_STATUS.IN_PROGRESS
-
-      if (isActiveNode) {
-        await syncActiveNodeTasksForAssignees(conn, {
-          instanceId: instance.id,
-          instanceNodeId: targetNode.id,
-          demandId: normalizedDemandId,
-          phaseKey: targetNode.phase_key,
-          nodeName: targetNode.node_name_snapshot,
-          assigneeUserIds: finalAssigneeUserIds,
-          dueAt: normalizedDueAt,
-          expectedStartDate: normalizedExpectedStartDate,
-          assignedByUserId: normalizedOperatorUserId,
-          createdBy: normalizedOperatorUserId,
-          sourceType: 'ASSIGN',
-          sourceId: targetNode.id,
-        })
-      } else {
-        // For pre-assigned future nodes, also expose a TODO item in personal workbench.
-        for (const assigneeUserIdItem of finalAssigneeUserIds) {
-          await ensureAutoWorkLogForTask(conn, {
-            taskId: null,
-            demandId: normalizedDemandId,
-            phaseKey: targetNode.phase_key,
-            nodeName: targetNode.node_name_snapshot,
-            assigneeUserId: assigneeUserIdItem,
-            dueAt: normalizedDueAt,
-            expectedStartDate: normalizedExpectedStartDate,
-            assignedByUserId: normalizedOperatorUserId,
-          })
-        }
-      }
 
       await insertAction(conn, {
         instanceId: instance.id,

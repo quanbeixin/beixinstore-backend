@@ -96,6 +96,16 @@ WHERE NOT EXISTS (
 );
 
 UPDATE `config_dict_items`
+SET `item_name` = '运维开发', `sort_order` = 55, `enabled` = 1
+WHERE `type_key` = 'demand_participant_role' AND `item_code` = 'DEVOPS_DEV';
+INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`, `extra_json`)
+SELECT 'demand_participant_role', 'DEVOPS_DEV', '运维开发', 55, 1, NULL, '模板节点适配角色', NULL
+WHERE NOT EXISTS (
+  SELECT 1 FROM `config_dict_items`
+  WHERE `type_key` = 'demand_participant_role' AND `item_code` = 'DEVOPS_DEV'
+);
+
+UPDATE `config_dict_items`
 SET `item_name` = '大数据开发', `sort_order` = 60, `enabled` = 1
 WHERE `type_key` = 'demand_participant_role' AND `item_code` = 'BIGDATA_DEV';
 INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`, `extra_json`)

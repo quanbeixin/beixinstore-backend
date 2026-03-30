@@ -38,6 +38,9 @@ const {
   listDemandMembers,
   addDemandMember,
   removeDemandMember,
+  listDemandCommunications,
+  createDemandCommunication,
+  deleteDemandCommunication,
   createDemand,
   updateDemand,
   deleteDemand,
@@ -139,6 +142,13 @@ router.get('/demands/:id/workflow/node-options', authMiddleware.requirePermissio
 router.get('/demands/:id/bug-stats', authMiddleware.requireAnyPermission(['demand.view', 'bug.view']), getDemandBugStats)
 router.get('/demands/:id/bugs', authMiddleware.requireAnyPermission(['demand.view', 'bug.view']), listDemandBugs)
 router.get('/demands/:id/members', authMiddleware.requirePermission('demand.view'), listDemandMembers)
+router.get('/demands/:id/communications', authMiddleware.requirePermission('demand.view'), listDemandCommunications)
+router.post('/demands/:id/communications', authMiddleware.requirePermission('demand.view'), createDemandCommunication)
+router.delete(
+  '/demands/:id/communications/:communicationId',
+  authMiddleware.requirePermission('demand.view'),
+  deleteDemandCommunication,
+)
 router.post('/demands/:id/members', authMiddleware.requirePermission('demand.manage'), addDemandMember)
 router.delete(
   '/demands/:id/members/:userId',
