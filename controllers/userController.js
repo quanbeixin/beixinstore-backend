@@ -1,6 +1,7 @@
 ﻿const bcrypt = require('bcryptjs')
 const User = require('../models/User')
 const Department = require('../models/Department')
+const UserChangeLog = require('../models/UserChangeLog')
 
 function normalizeStatusCode(value) {
   const normalized = typeof value === 'string' ? value.trim().toUpperCase() : ''
@@ -51,6 +52,23 @@ function normalizeSortOrder(value) {
   return 'asc'
 }
 
+function normalizeDate(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return ''
+  const raw = String(value).trim()
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null
+}
+
+function toPositivePage(value, fallback) {
+  const num = Number(value)
+  return Number.isInteger(num) && num > 0 ? num : fallback
+}
+
+function writeUserChangeLog(payload) {
+  return UserChangeLog.create(payload).catch((error) => {
+    console.error('写入用户操作日志失败:', error)
+  })
+}
+
 // 获取用户列表（支持分页和关键字搜索）
 const getUsers = async (req, res) => {
   const { page = 1, pageSize = 10, keyword = '' } = req.query
@@ -81,6 +99,53 @@ const getUsers = async (req, res) => {
   }
 }
 
+const listUserChangeLogs = async (req, res) => {
+  const page = toPositivePage(req.query.page, 1)
+  const pageSize = toPositivePage(req.query.pageSize, 20)
+  const keyword = String(req.query.keyword || '').trim().slice(0, 100)
+  const actionType = String(req.query.action_type || '').trim().toUpperCase()
+  const operatorUserId = normalizeOptionalId(req.query.operator_user_id)
+  const startDate = normalizeDate(req.query.start_date)
+  const endDate = normalizeDate(req.query.end_date)
+
+  if (req.query.start_date !== undefined && String(req.query.start_date || '').trim() !== '' && !startDate) {
+    return res.status(400).json({ success: false, message: 'start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  if (req.query.end_date !== undefined && String(req.query.end_date || '').trim() !== '' && !endDate) {
+    return res.status(400).json({ success: false, message: 'end_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  if (startDate && endDate && startDate > endDate) {
+    return res.status(400).json({ success: false, message: '开始日期不能晚于结束日期' })
+  }
+
+  try {
+    const { rows, total } = await UserChangeLog.list({
+      page,
+      pageSize,
+      keyword,
+      actionType,
+      operatorUserId,
+      startDate,
+      endDate,
+    })
+
+    return res.json({
+      success: true,
+      data: {
+        list: rows,
+        total,
+        page,
+        pageSize,
+      },
+    })
+  } catch (err) {
+    console.error('获取用户操作日志失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 // 获取单个用户信息（含角色和部门）
 const getUserById = async (req, res) => {
   const { id } = req.params
@@ -90,6 +155,15 @@ const getUserById = async (req, res) => {
     if (!user) {
       return res.status(404).json({ success: false, message: '用户不存在' })
     }
+
+    await writeUserChangeLog({
+      actionType: UserChangeLog.ACTION_TYPES.VIEW,
+      source: 'ADMIN',
+      operatorUserId: req.user?.id || null,
+      operatorName: req.user?.username || '',
+      targetUserId: user.id,
+      afterSnapshot: user,
+    })
 
     return res.json({ success: true, data: user })
   } catch (err) {
@@ -155,6 +229,14 @@ const createUser = async (req, res) => {
     }
 
     const user = await User.findById(userId)
+    await writeUserChangeLog({
+      actionType: UserChangeLog.ACTION_TYPES.CREATE,
+      source: 'ADMIN',
+      operatorUserId: req.user?.id || null,
+      operatorName: req.user?.username || '',
+      targetUserId: user?.id || userId,
+      afterSnapshot: user,
+    })
     return res.status(201).json({ success: true, message: '创建成功', data: user })
   } catch (err) {
     console.error('创建用户失败:', err)
@@ -191,20 +273,20 @@ const updateUser = async (req, res) => {
 
     const roleIds = normalizeRoleIds(role_ids)
 
-    const user = await User.findById(id)
-    if (!user) {
+    const existingUser = await User.findById(id)
+    if (!existingUser) {
       return res.status(404).json({ success: false, message: '用户不存在' })
     }
 
-    const nextEmail = normalizedEmail === undefined ? user.email || null : normalizedEmail
+    const nextEmail = normalizedEmail === undefined ? existingUser.email || null : normalizedEmail
     if (nextEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextEmail)) {
       return res.status(400).json({ success: false, message: '邮箱格式不正确' })
     }
-    if (nextEmail && nextEmail !== (user.email || null) && (await User.isEmailTaken(nextEmail, Number(id)))) {
+    if (nextEmail && nextEmail !== (existingUser.email || null) && (await User.isEmailTaken(nextEmail, Number(id)))) {
       return res.status(409).json({ success: false, message: '邮箱已被占用' })
     }
 
-    const nextRealName = realNameRaw === undefined ? String(user.real_name || '').trim() : realName
+    const nextRealName = realNameRaw === undefined ? String(existingUser.real_name || '').trim() : realName
     if (!nextRealName) {
       return res.status(400).json({ success: false, message: '真实姓名不能为空' })
     }
@@ -219,7 +301,7 @@ const updateUser = async (req, res) => {
       status_code: normalizeStatusCode(status_code),
       include_in_metrics: normalizeIncludeInMetrics(
         include_in_metrics,
-        Number(user?.include_in_metrics ?? 1) === 1 ? 1 : 0,
+        Number(existingUser?.include_in_metrics ?? 1) === 1 ? 1 : 0,
       ),
     })
 
@@ -228,6 +310,15 @@ const updateUser = async (req, res) => {
     }
 
     const updated = await User.findById(id)
+    await writeUserChangeLog({
+      actionType: UserChangeLog.ACTION_TYPES.UPDATE,
+      source: 'ADMIN',
+      operatorUserId: req.user?.id || null,
+      operatorName: req.user?.username || '',
+      targetUserId: updated?.id || Number(id),
+      beforeSnapshot: existingUser,
+      afterSnapshot: updated,
+    })
     return res.json({ success: true, message: '更新成功', data: updated })
   } catch (err) {
     console.error('更新用户失败:', err)
@@ -250,10 +341,24 @@ const deleteUser = async (req, res) => {
       return res.status(400).json({ success: false, message: '不能删除当前登录用户' })
     }
 
+    const existingUser = await User.findById(id)
+    if (!existingUser) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+
     const affected = await User.delete(id)
     if (!affected) {
       return res.status(404).json({ success: false, message: '用户不存在' })
     }
+
+    await writeUserChangeLog({
+      actionType: UserChangeLog.ACTION_TYPES.DELETE,
+      source: 'ADMIN',
+      operatorUserId: req.user?.id || null,
+      operatorName: req.user?.username || '',
+      targetUserId: Number(id),
+      beforeSnapshot: existingUser,
+    })
 
     return res.json({ success: true, message: '删除成功' })
   } catch (err) {
@@ -262,4 +367,4 @@ const deleteUser = async (req, res) => {
   }
 }
 
-module.exports = { getUsers, getUserById, createUser, updateUser, deleteUser }
+module.exports = { getUsers, listUserChangeLogs, getUserById, createUser, updateUser, deleteUser }

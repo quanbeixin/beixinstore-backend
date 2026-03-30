@@ -145,7 +145,7 @@ router.delete(
   authMiddleware.requirePermission('demand.manage'),
   removeDemandMember,
 )
-router.post('/demands', authMiddleware.requirePermission('demand.manage'), createDemand)
+router.post('/demands', authMiddleware.requirePermission('demand.create'), createDemand)
 router.put('/demands/:id', authMiddleware.requirePermission('demand.view'), updateDemand)
 router.delete('/demands/:id', authMiddleware.requirePermission('demand.view'), deleteDemand)
 router.get('/archive/demands', authMiddleware.requirePermission('archive.view'), listArchivedDemands)

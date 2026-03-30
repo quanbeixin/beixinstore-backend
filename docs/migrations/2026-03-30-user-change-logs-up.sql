@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS `user_change_logs` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `target_user_id` BIGINT NULL COMMENT '被操作用户ID',
+  `action_type` VARCHAR(32) NOT NULL COMMENT '操作类型',
+  `action_label` VARCHAR(64) NOT NULL COMMENT '操作文案',
+  `source` VARCHAR(32) NOT NULL DEFAULT 'ADMIN' COMMENT '来源：ADMIN/SELF_REGISTER',
+  `operator_user_id` BIGINT NULL COMMENT '操作人ID',
+  `operator_name` VARCHAR(128) NULL COMMENT '操作人名称',
+  `target_username` VARCHAR(128) NULL COMMENT '被操作用户名',
+  `target_real_name` VARCHAR(128) NULL COMMENT '被操作真实姓名',
+  `change_summary` VARCHAR(500) NULL COMMENT '变更摘要',
+  `before_json` LONGTEXT NULL COMMENT '变更前快照',
+  `after_json` LONGTEXT NULL COMMENT '变更后快照',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_user_change_logs_target_user_id` (`target_user_id`),
+  KEY `idx_user_change_logs_operator_user_id` (`operator_user_id`),
+  KEY `idx_user_change_logs_action_type` (`action_type`),
+  KEY `idx_user_change_logs_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户管理操作日志';

@@ -20,7 +20,7 @@ function normalizeRoleKey(rawKey, fallbackName = '') {
 
 const PERMISSION_ALIAS_MAP = Object.freeze({
   'requirement.view': ['demand.view', 'demand.workflow.view'],
-  'requirement.create': ['demand.manage'],
+  'requirement.create': ['demand.create'],
   'requirement.edit': ['demand.manage'],
   'requirement.transition': ['demand.manage', 'demand.workflow.manage'],
 })

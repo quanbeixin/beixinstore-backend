@@ -478,24 +478,46 @@ function splitHoursAcrossDates(totalHours, dateCount) {
   })
 }
 
+function resolveEffectivePlanEndDate(expectedCompletionDate, { logStatus = '', logCompletedAt = null } = {}) {
+  const normalizedExpectedEnd = normalizeDateOnly(expectedCompletionDate)
+  const normalizedCompletedDate = normalizeDateOnly(logCompletedAt)
+  const normalizedStatus = String(logStatus || '').trim().toUpperCase()
+
+  if (normalizedStatus !== 'DONE' || !normalizedCompletedDate) {
+    return normalizedExpectedEnd
+  }
+
+  if (!normalizedExpectedEnd) return normalizedCompletedDate
+  return normalizedCompletedDate < normalizedExpectedEnd ? normalizedCompletedDate : normalizedExpectedEnd
+}
+
 function getTodayPlannedHoursSql(dateExpr = 'CURDATE()') {
-  return `COALESCE(pt.today_planned_hours, CASE
-    WHEN l.expected_start_date IS NOT NULL
-      AND WEEKDAY(${dateExpr}) < 5
-      AND l.expected_start_date <= ${dateExpr}
-      AND (l.expected_completion_date IS NULL OR l.expected_completion_date >= ${dateExpr})
-    THEN CASE
-      WHEN l.expected_completion_date IS NOT NULL
-        AND l.expected_completion_date >= l.expected_start_date
-      THEN ROUND(
-        COALESCE(l.personal_estimate_hours, 0) /
-        NULLIF(DATEDIFF(l.expected_completion_date, l.expected_start_date) + 1, 0),
-        1
-      )
-      ELSE COALESCE(l.personal_estimate_hours, 0)
-    END
-    ELSE 0
-  END)`
+  return `CASE
+    WHEN COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'
+      AND DATE(COALESCE(l.log_completed_at, l.updated_at)) < ${dateExpr}
+    THEN 0
+    ELSE COALESCE(pt.today_planned_hours, CASE
+      WHEN l.expected_start_date IS NOT NULL
+        AND WEEKDAY(${dateExpr}) < 5
+        AND l.expected_start_date <= ${dateExpr}
+        AND (l.expected_completion_date IS NULL OR l.expected_completion_date >= ${dateExpr})
+        AND (
+          COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
+          OR DATE(COALESCE(l.log_completed_at, l.updated_at)) >= ${dateExpr}
+        )
+      THEN CASE
+        WHEN l.expected_completion_date IS NOT NULL
+          AND l.expected_completion_date >= l.expected_start_date
+        THEN ROUND(
+          COALESCE(l.personal_estimate_hours, 0) /
+          NULLIF(DATEDIFF(l.expected_completion_date, l.expected_start_date) + 1, 0),
+          1
+        )
+        ELSE COALESCE(l.personal_estimate_hours, 0)
+      END
+      ELSE 0
+    END)
+  END`
 }
 
 function getTodayActualHoursSql() {
@@ -2429,6 +2451,8 @@ const Work = {
       userId,
       expectedStartDate,
       expectedCompletionDate = null,
+      logStatus = 'IN_PROGRESS',
+      logCompletedAt = null,
       totalPlannedHours = 0,
       source = 'SYSTEM_SPLIT',
       createdBy = null,
@@ -2439,7 +2463,9 @@ const Work = {
     const startDate = normalizeDateOnly(expectedStartDate)
     if (!normalizedLogId || !normalizedUserId || !startDate) return 0
 
-    const dateList = buildWorkDateRange(startDate, normalizeDateOnly(expectedCompletionDate) || startDate)
+    const effectiveEndDate =
+      resolveEffectivePlanEndDate(expectedCompletionDate, { logStatus, logCompletedAt }) || startDate
+    const dateList = buildWorkDateRange(startDate, effectiveEndDate)
     if (dateList.length === 0) return 0
 
     const hoursList = splitHoursAcrossDates(totalPlannedHours, dateList.length)
@@ -2579,6 +2605,8 @@ const Work = {
       userId,
       expectedStartDate,
       expectedCompletionDate = null,
+      logStatus = 'IN_PROGRESS',
+      logCompletedAt = null,
       totalPlannedHours = 0,
       source = 'SYSTEM_SPLIT_UPDATE',
       createdBy = null,
@@ -2589,7 +2617,8 @@ const Work = {
     const normalizedStart = normalizeDateOnly(expectedStartDate)
     if (!normalizedLogId || !normalizedUserId || !normalizedStart) return 0
 
-    const normalizedEnd = normalizeDateOnly(expectedCompletionDate) || normalizedStart
+    const normalizedEnd =
+      resolveEffectivePlanEndDate(expectedCompletionDate, { logStatus, logCompletedAt }) || normalizedStart
     const dateList = buildWorkDateRange(normalizedStart, normalizedEnd)
     if (dateList.length === 0) return 0
 
@@ -2906,6 +2935,9 @@ const Work = {
           filled_item_count_today: 0,
           assignable_hours_today: DEFAULT_DAILY_CAPACITY_HOURS,
         },
+        today_planned_detail_items: [],
+        today_actual_detail_items: [],
+        today_done_items: [],
         active_items: [],
         recent_logs: [],
       }
@@ -3057,6 +3089,140 @@ const Work = {
     const filledItemCount = Number(todaySummary.filled_item_count_today || 0)
     const assignableHours = calcAssignableHours(todayPlannedHours, todayActualHours)
 
+    const [todayDetailRows] = await pool.query(
+      `SELECT
+         l.id,
+         COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+         l.description,
+         l.demand_id,
+         d.name AS demand_name,
+         l.phase_key,
+         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
+         ${todayPlannedHoursSql} AS today_planned_hours,
+         ${todayActualHoursSql} AS today_actual_hours,
+         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status
+       FROM work_logs l
+       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+       LEFT JOIN work_demands d ON d.id = l.demand_id
+       LEFT JOIN config_dict_items pdi
+         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+        AND pdi.item_code = l.phase_key
+       LEFT JOIN (
+         SELECT log_id, ROUND(COALESCE(SUM(planned_hours), 0), 1) AS today_planned_hours
+         FROM work_log_daily_plans
+         WHERE plan_date = CURDATE()
+         GROUP BY log_id
+       ) pt ON pt.log_id = l.id
+       LEFT JOIN (
+         SELECT e.log_id, ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS today_actual_hours
+         FROM work_log_daily_entries e
+         INNER JOIN (
+           SELECT log_id, entry_date, MAX(id) AS latest_id
+           FROM work_log_daily_entries
+           GROUP BY log_id, entry_date
+         ) le ON le.latest_id = e.id
+         WHERE e.entry_date = CURDATE()
+         GROUP BY e.log_id
+       ) et ON et.log_id = l.id
+       WHERE l.user_id = ?
+         AND (${todayPlannedHoursSql} > 0 OR ${todayActualHoursSql} > 0)
+       ORDER BY l.id DESC`,
+      [normalizedUserId],
+    )
+
+    const mapTodayDetailItem = (row) => ({
+      id: Number(row.id),
+      item_type_name: row.item_type_name || '-',
+      description: row.description || '',
+      demand_id: row.demand_id || null,
+      demand_name: row.demand_name || row.demand_id || '-',
+      phase_name: row.phase_name || row.phase_key || '-',
+      log_status: row.log_status || 'IN_PROGRESS',
+      today_planned_hours: toDecimal1(row.today_planned_hours),
+      today_actual_hours: toDecimal1(row.today_actual_hours),
+    })
+
+    const todayPlannedDetailItems = (todayDetailRows || [])
+      .filter((row) => Number(row.today_planned_hours || 0) > 0)
+      .map(mapTodayDetailItem)
+
+    const todayActualDetailItems = (todayDetailRows || [])
+      .filter((row) => Number(row.today_actual_hours || 0) > 0)
+      .map(mapTodayDetailItem)
+
+    const [todayDoneRows] = await pool.query(
+      `SELECT
+         l.id,
+         DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+         l.item_type_id,
+         COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+         l.description,
+         l.personal_estimate_hours,
+         COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS actual_hours,
+         l.remaining_hours,
+         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+         COALESCE(l.task_source, 'SELF') AS task_source,
+         l.assigned_by_user_id,
+         COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
+         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+         DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+         l.demand_id,
+         d.name AS demand_name,
+         l.phase_key,
+         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
+         ${todayPlannedHoursSql} AS today_planned_hours,
+         ${todayActualHoursSql} AS today_actual_hours,
+         COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS cumulative_actual_hours
+       FROM work_logs l
+       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+       LEFT JOIN users au ON au.id = l.assigned_by_user_id
+       LEFT JOIN work_demands d ON d.id = l.demand_id
+       LEFT JOIN config_dict_items pdi
+         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+        AND pdi.item_code = l.phase_key
+       LEFT JOIN (
+         SELECT log_id, ROUND(COALESCE(SUM(planned_hours), 0), 1) AS today_planned_hours
+         FROM work_log_daily_plans
+         WHERE plan_date = CURDATE()
+         GROUP BY log_id
+       ) pt ON pt.log_id = l.id
+       LEFT JOIN (
+         SELECT e.log_id, ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS today_actual_hours
+         FROM work_log_daily_entries e
+         INNER JOIN (
+           SELECT log_id, entry_date, MAX(id) AS latest_id
+           FROM work_log_daily_entries
+           GROUP BY log_id, entry_date
+         ) le ON le.latest_id = e.id
+         WHERE e.entry_date = CURDATE()
+         GROUP BY log_id
+       ) et ON et.log_id = l.id
+       LEFT JOIN (
+         SELECT e.log_id, ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS total_actual_hours
+         FROM work_log_daily_entries e
+         INNER JOIN (
+           SELECT log_id, entry_date, MAX(id) AS latest_id
+           FROM work_log_daily_entries
+           GROUP BY log_id, entry_date
+         ) le ON le.latest_id = e.id
+         GROUP BY log_id
+       ) tt ON tt.log_id = l.id
+       WHERE l.user_id = ?
+         AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'
+         AND DATE(COALESCE(l.log_completed_at, l.updated_at)) = CURDATE()
+       ORDER BY COALESCE(l.log_completed_at, l.updated_at) DESC, l.id DESC`,
+      [normalizedUserId],
+    )
+
+    const todayDoneItems = (todayDoneRows || []).map((item) => ({
+      ...item,
+      today_planned_hours: toDecimal1(item.today_planned_hours),
+      today_actual_hours: toDecimal1(item.today_actual_hours),
+      cumulative_actual_hours: toDecimal1(item.cumulative_actual_hours || item.actual_hours || 0),
+      personal_estimate_hours: toDecimal1(item.personal_estimate_hours),
+    }))
+
     const [recentLogs] = await pool.query(
       `SELECT
          l.id,
@@ -3101,6 +3267,9 @@ const Work = {
         filled_item_count_today: filledItemCount,
         assignable_hours_today: assignableHours,
       },
+      today_planned_detail_items: todayPlannedDetailItems,
+      today_actual_detail_items: todayActualDetailItems,
+      today_done_items: todayDoneItems,
       active_items: activeItems,
       recent_logs: recentLogs,
     }
@@ -3565,6 +3734,8 @@ const Work = {
       focus_in_progress_items: [],
       focus_done_today_items: [],
       focus_todo_items: [],
+      today_planned_detail_items: [],
+      today_actual_detail_items: [],
       members: [],
       no_fill_members: [],
     }
@@ -3775,6 +3946,50 @@ const Work = {
       [userIds],
     )
 
+    const [todayDetailRows] = await pool.query(
+      `SELECT
+         l.id,
+         l.user_id,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+         COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+         l.description,
+         l.demand_id,
+         d.name AS demand_name,
+         l.phase_key,
+         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
+         ${todayPlannedHoursSql} AS today_planned_hours,
+         ${todayActualHoursSql} AS today_actual_hours,
+         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status
+       FROM work_logs l
+       INNER JOIN users u ON u.id = l.user_id
+       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+       LEFT JOIN work_demands d ON d.id = l.demand_id
+       LEFT JOIN config_dict_items pdi
+         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+        AND pdi.item_code = l.phase_key
+       LEFT JOIN (
+         SELECT log_id, ROUND(COALESCE(SUM(planned_hours), 0), 1) AS today_planned_hours
+         FROM work_log_daily_plans
+         WHERE plan_date = CURDATE()
+         GROUP BY log_id
+       ) pt ON pt.log_id = l.id
+       LEFT JOIN (
+         SELECT e.log_id, ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS today_actual_hours
+         FROM work_log_daily_entries e
+         INNER JOIN (
+           SELECT log_id, entry_date, MAX(id) AS latest_id
+           FROM work_log_daily_entries
+           GROUP BY log_id, entry_date
+         ) le ON le.latest_id = e.id
+         WHERE e.entry_date = CURDATE()
+         GROUP BY e.log_id
+       ) et ON et.log_id = l.id
+       WHERE l.user_id IN (?)
+         AND (${todayPlannedHoursSql} > 0 OR ${todayActualHoursSql} > 0)
+       ORDER BY u.id ASC, l.id DESC`,
+      [userIds],
+    )
+
     const dailyAggByUser = new Map()
     ;(dailyAggRows || []).forEach((row) => {
       const userId = Number(row.user_id)
@@ -3784,6 +3999,28 @@ const Work = {
         today_actual_hours: toDecimal1(row.today_actual_hours),
       })
     })
+
+    const mapTodayDetailItem = (row) => ({
+      id: Number(row.id),
+      user_id: Number(row.user_id),
+      username: row.username || `用户${Number(row.user_id)}`,
+      item_type_name: row.item_type_name || '-',
+      description: row.description || '',
+      demand_id: row.demand_id || null,
+      demand_name: row.demand_name || row.demand_id || '-',
+      phase_name: row.phase_name || row.phase_key || '-',
+      log_status: row.log_status || 'IN_PROGRESS',
+      today_planned_hours: toDecimal1(row.today_planned_hours),
+      today_actual_hours: toDecimal1(row.today_actual_hours),
+    })
+
+    const todayPlannedDetailItems = (todayDetailRows || [])
+      .filter((row) => Number(row.today_planned_hours || 0) > 0)
+      .map(mapTodayDetailItem)
+
+    const todayActualDetailItems = (todayDetailRows || [])
+      .filter((row) => Number(row.today_actual_hours || 0) > 0)
+      .map(mapTodayDetailItem)
 
     const [[todayRow]] = await pool.query(
       `SELECT
@@ -4099,6 +4336,8 @@ const Work = {
       focus_in_progress_items: inProgressItems,
       focus_done_today_items: doneTodayItems,
       focus_todo_items: todoPendingItems,
+      today_planned_detail_items: todayPlannedDetailItems,
+      today_actual_detail_items: todayActualDetailItems,
       members,
       no_fill_members: noFillMembers,
     }
@@ -5000,7 +5239,7 @@ const Work = {
   // 方案7：预估修改后重新计算每日计划
   async recalculateDailyPlans(logId) {
     const [logs] = await pool.query(
-      'SELECT personal_estimate_hours, expected_start_date, expected_completion_date FROM work_logs WHERE id = ?',
+      'SELECT personal_estimate_hours, expected_start_date, expected_completion_date, log_status, log_completed_at FROM work_logs WHERE id = ?',
       [logId]
     )
 
@@ -5016,9 +5255,14 @@ const Work = {
     )
 
     // 重新生成每日计划
-    if (log.expected_start_date && log.expected_completion_date && log.personal_estimate_hours > 0) {
+    const effectiveEndDate = resolveEffectivePlanEndDate(log.expected_completion_date, {
+      logStatus: log.log_status,
+      logCompletedAt: log.log_completed_at,
+    })
+
+    if (log.expected_start_date && effectiveEndDate && log.personal_estimate_hours > 0) {
       const startDate = new Date(Math.max(new Date(log.expected_start_date), new Date(today)))
-      const endDate = new Date(log.expected_completion_date)
+      const endDate = new Date(effectiveEndDate)
 
       // 计算工作日数量（排除周末）
       let workDays = 0

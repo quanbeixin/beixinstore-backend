@@ -2,6 +2,7 @@
 const User = require('../models/User')
 const Permission = require('../models/Permission')
 const UserPreference = require('../models/UserPreference')
+const UserChangeLog = require('../models/UserChangeLog')
 const { generateToken } = require('../utils/jwt')
 
 function normalizeStatusCode(value) {
@@ -154,6 +155,17 @@ const register = async (req, res) => {
       await User.delete(userId).catch(() => {})
       throw roleErr
     }
+
+    const createdUser = await User.findById(userId)
+    await UserChangeLog.create({
+      actionType: UserChangeLog.ACTION_TYPES.REGISTER,
+      source: 'SELF_REGISTER',
+      targetUserId: userId,
+      afterSnapshot: createdUser,
+      operatorName: '系统',
+    }).catch((error) => {
+      console.error('写入注册日志失败:', error)
+    })
 
     return res.status(201).json({
       success: true,
@@ -401,5 +413,3 @@ module.exports = {
   updatePreferences,
   getAccess,
 }
-
-
