@@ -405,6 +405,28 @@ function ensureSuperAdmin(req, res) {
   return false
 }
 
+function canViewEfficiencyBoard(req) {
+  if (req.userAccess?.is_super_admin) return true
+  if (hasRole(req, 'ADMIN')) return true
+  return Boolean(req.userAccess?.is_department_manager)
+}
+
+function ensureEfficiencyBoardAccess(req, res) {
+  if (canViewEfficiencyBoard(req)) return true
+  res.status(403).json({ success: false, message: '仅超级管理员、管理员或部门负责人可访问该看板' })
+  return false
+}
+
+function canAccessDepartmentInsight(req, departmentId) {
+  if (!departmentId) return false
+  if (req.userAccess?.is_super_admin) return true
+  if (hasRole(req, 'ADMIN')) return true
+  const managedDepartmentIds = Array.isArray(req.userAccess?.managed_department_ids)
+    ? req.userAccess.managed_department_ids.map((item) => Number(item))
+    : []
+  return managedDepartmentIds.includes(Number(departmentId))
+}
+
 function isWorkflowTablesMissing(err) {
   return err?.code === 'WORKFLOW_TABLES_MISSING'
 }
@@ -2711,13 +2733,59 @@ const updateLogOwnerEstimate = async (req, res) => {
 }
 
 const getInsightFilterOptions = async (req, res) => {
-  if (!ensureSuperAdmin(req, res)) return
+  if (!ensureEfficiencyBoardAccess(req, res)) return
 
   try {
-    const data = await Work.getInsightFilterOptions()
+    const scopedDepartmentIds =
+      req.userAccess?.is_super_admin || hasRole(req, 'ADMIN')
+        ? []
+        : Array.isArray(req.userAccess?.managed_department_ids)
+          ? req.userAccess.managed_department_ids
+          : []
+    const data = await Work.getInsightFilterOptions({ departmentIds: scopedDepartmentIds })
     return res.json({ success: true, data })
   } catch (err) {
     console.error('获取效能筛选项失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getDepartmentEfficiencyRanking = async (req, res) => {
+  if (!ensureEfficiencyBoardAccess(req, res)) return
+
+  const { startDate, endDate, error } = resolveInsightDateRange(req.query.start_date, req.query.end_date)
+  if (error) {
+    return res.status(400).json({ success: false, message: error })
+  }
+
+  const departmentId = toPositiveInt(req.query.department_id)
+  if (req.query.department_id !== undefined && req.query.department_id !== '' && !departmentId) {
+    return res.status(400).json({ success: false, message: 'department_id 无效' })
+  }
+  if (!departmentId) {
+    return res.status(400).json({ success: false, message: 'department_id 必填' })
+  }
+  if (!canAccessDepartmentInsight(req, departmentId)) {
+    return res.status(403).json({ success: false, message: '仅可查看本人负责部门的数据' })
+  }
+
+  const keyword = normalizeText(req.query.keyword, 100)
+  const sortOrder = String(req.query.sort_order || 'desc').trim().toLowerCase()
+  if (sortOrder && sortOrder !== 'asc' && sortOrder !== 'desc') {
+    return res.status(400).json({ success: false, message: 'sort_order 仅支持 asc / desc' })
+  }
+
+  try {
+    const data = await Work.getDepartmentEfficiencyRanking({
+      departmentId,
+      startDate,
+      endDate,
+      sortOrder,
+      keyword,
+    })
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取部门人效排行失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -2770,16 +2838,30 @@ const getDemandInsight = async (req, res) => {
 }
 
 const getMemberInsight = async (req, res) => {
-  if (!ensureSuperAdmin(req, res)) return
+  if (!ensureEfficiencyBoardAccess(req, res)) return
 
   const { startDate, endDate, error } = resolveInsightDateRange(req.query.start_date, req.query.end_date)
   if (error) {
     return res.status(400).json({ success: false, message: error })
   }
 
-  const departmentId = toPositiveInt(req.query.department_id)
-  if (req.query.department_id !== undefined && req.query.department_id !== '' && !departmentId) {
+  const requestedDepartmentId = toPositiveInt(req.query.department_id)
+  if (req.query.department_id !== undefined && req.query.department_id !== '' && !requestedDepartmentId) {
     return res.status(400).json({ success: false, message: 'department_id 无效' })
+  }
+  let departmentId = requestedDepartmentId
+  if (!departmentId && !req.userAccess?.is_super_admin && !hasRole(req, 'ADMIN')) {
+    const managedDepartmentIds = Array.isArray(req.userAccess?.managed_department_ids)
+      ? req.userAccess.managed_department_ids
+      : []
+    if (managedDepartmentIds.length === 1) {
+      departmentId = Number(managedDepartmentIds[0])
+    } else if (managedDepartmentIds.length > 1) {
+      return res.status(400).json({ success: false, message: '请先选择需要查看的部门' })
+    }
+  }
+  if (departmentId && !canAccessDepartmentInsight(req, departmentId)) {
+    return res.status(403).json({ success: false, message: '仅可查看本人负责部门的数据' })
   }
 
   const ownerUserId = toPositiveInt(req.query.owner_user_id)
@@ -3897,6 +3979,7 @@ module.exports = {
   createLogDailyEntry,
   updateLogOwnerEstimate,
   getInsightFilterOptions,
+  getDepartmentEfficiencyRanking,
   getDemandInsight,
   getMemberInsight,
   initDemandWorkflowInstance,

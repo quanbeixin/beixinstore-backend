@@ -11,6 +11,7 @@ const PROJECT_TEMPLATE_PHASE_DICT_KEY = 'project_template_phase_type'
 const DEMAND_COMMUNICATION_TYPE_DICT_KEY = 'demand_communication_type'
 const ISSUE_TYPE_DICT_KEY = 'issue_type'
 const BUSINESS_GROUP_DICT_KEY = 'business_group'
+const JOB_LEVEL_DICT_KEY = 'job_level'
 const OWNER_ESTIMATE_RULES = ['NONE', 'OPTIONAL', 'REQUIRED']
 const DEFAULT_NOTIFICATION_SCENES = [
   'node_assign',
@@ -426,6 +427,39 @@ function formatLocalDateOnly(date) {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function shiftDateOnly(value, days) {
+  const base = parseDateOnlyAtLocalMidnight(value)
+  if (!base) return ''
+  base.setDate(base.getDate() + Number(days || 0))
+  return formatLocalDateOnly(base)
+}
+
+function buildPreviousPeriodRange(startDate, endDate) {
+  const start = parseDateOnlyAtLocalMidnight(startDate)
+  const end = parseDateOnlyAtLocalMidnight(endDate)
+  if (!start || !end || end < start) {
+    return {
+      startDate: '',
+      endDate: '',
+      days: 0,
+    }
+  }
+
+  const millisPerDay = 24 * 60 * 60 * 1000
+  const diffDays = Math.floor((end.getTime() - start.getTime()) / millisPerDay)
+  const periodDays = diffDays + 1
+  const previousEnd = new Date(start)
+  previousEnd.setDate(previousEnd.getDate() - 1)
+  const previousStart = new Date(previousEnd)
+  previousStart.setDate(previousStart.getDate() - diffDays)
+
+  return {
+    startDate: formatLocalDateOnly(previousStart),
+    endDate: formatLocalDateOnly(previousEnd),
+    days: periodDays,
+  }
 }
 
 function buildDateRange(startDate, endDate) {
@@ -4987,28 +5021,42 @@ const Work = {
     }
   },
 
-  async getInsightFilterOptions() {
+  async getInsightFilterOptions({ departmentIds = [] } = {}) {
+    const scopedDepartmentIds = Array.from(
+      new Set(
+        (Array.isArray(departmentIds) ? departmentIds : [])
+          .map((item) => Number(item))
+          .filter((item) => Number.isInteger(item) && item > 0),
+      ),
+    )
+    const hasDepartmentScope = scopedDepartmentIds.length > 0
+
+    const departmentSql = `
+      SELECT
+        d.id,
+        d.name
+      FROM departments d
+      WHERE COALESCE(d.enabled, 1) = 1
+        ${hasDepartmentScope ? 'AND d.id IN (?)' : ''}
+      ORDER BY d.sort_order ASC, d.id ASC`
     const [departmentRows] = await pool.query(
-      `SELECT
-         d.id,
-         d.name
-       FROM departments d
-       WHERE COALESCE(d.enabled, 1) = 1
-       ORDER BY d.sort_order ASC, d.id ASC`,
+      departmentSql,
+      hasDepartmentScope ? [scopedDepartmentIds] : [],
     )
 
-    const [ownerRows] = await pool.query(
-      `SELECT
-         u.id,
-         COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
-         u.department_id,
-         COALESCE(d.name, CONCAT('部门#', u.department_id)) AS department_name
-       FROM users u
-       LEFT JOIN departments d ON d.id = u.department_id
-       WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
-         AND COALESCE(u.include_in_metrics, 1) = 1
-       ORDER BY u.id ASC`,
-    )
+    const ownerSql = `
+      SELECT
+        u.id,
+        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+        u.department_id,
+        COALESCE(d.name, CONCAT('部门#', u.department_id)) AS department_name
+      FROM users u
+      LEFT JOIN departments d ON d.id = u.department_id
+      WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+        AND COALESCE(u.include_in_metrics, 1) = 1
+        ${hasDepartmentScope ? 'AND u.department_id IN (?)' : ''}
+      ORDER BY u.id ASC`
+    const [ownerRows] = await pool.query(ownerSql, hasDepartmentScope ? [scopedDepartmentIds] : [])
 
     const [businessGroupRows] = await pool.query(
       `SELECT
@@ -5038,6 +5086,189 @@ const Work = {
         code: item.code,
         name: item.name || item.code,
       })),
+    }
+  },
+
+  async getDepartmentEfficiencyRanking({
+    departmentId,
+    startDate,
+    endDate,
+    sortOrder = 'desc',
+    keyword = '',
+  } = {}) {
+    const normalizedDepartmentId = toPositiveInt(departmentId)
+    if (!normalizedDepartmentId) {
+      return {
+        filters: {
+          department_id: null,
+          start_date: startDate,
+          end_date: endDate,
+          keyword: keyword || '',
+          sort_order: 'desc',
+          previous_start_date: '',
+          previous_end_date: '',
+        },
+        summary: {
+          department_id: null,
+          department_name: '-',
+          member_count: 0,
+          avg_actual_hours: 0,
+          total_owner_estimate_hours: 0,
+          total_personal_estimate_hours: 0,
+          total_actual_hours: 0,
+        },
+        rows: [],
+      }
+    }
+
+    const normalizedSortOrder = String(sortOrder || '').trim().toLowerCase() === 'asc' ? 'ASC' : 'DESC'
+    const normalizedKeyword = String(keyword || '').trim().toLowerCase()
+    const previousRange = buildPreviousPeriodRange(startDate, endDate)
+
+    const [departmentRows, currentRows, previousRows] = await Promise.all([
+      pool.query(
+        `SELECT id, name
+         FROM departments
+         WHERE id = ?
+         LIMIT 1`,
+        [normalizedDepartmentId],
+      ).then((result) => result[0] || []),
+      pool.query(
+        `SELECT
+           u.id AS user_id,
+           COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+           u.department_id,
+           COALESCE(dep.name, CONCAT('部门#', u.department_id)) AS department_name,
+           COALESCE(u.job_level, '') AS job_level,
+           jl.item_name AS job_level_name,
+           COUNT(DISTINCT l.log_date) AS filled_days,
+           ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS total_owner_estimate_hours,
+           ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
+           ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
+           DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
+         FROM users u
+         LEFT JOIN departments dep ON dep.id = u.department_id
+         LEFT JOIN config_dict_items jl
+           ON jl.type_key = '${JOB_LEVEL_DICT_KEY}'
+          AND jl.item_code = u.job_level
+         LEFT JOIN work_logs l
+           ON l.user_id = u.id
+          AND l.log_date >= ?
+          AND l.log_date <= ?
+         LEFT JOIN work_demands d ON d.id = l.demand_id
+         LEFT JOIN config_dict_items pdi
+           ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+          AND pdi.item_code = l.phase_key
+         LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+         WHERE u.department_id = ?
+           AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+           AND COALESCE(u.include_in_metrics, 1) = 1
+         GROUP BY
+           u.id,
+           COALESCE(NULLIF(u.real_name, ''), u.username),
+           u.department_id,
+           COALESCE(dep.name, CONCAT('部门#', u.department_id)),
+           COALESCE(u.job_level, ''),
+           jl.item_name
+         ORDER BY total_actual_hours ${normalizedSortOrder}, u.id ASC`,
+        [startDate, endDate, normalizedDepartmentId],
+      ).then((result) => result[0] || []),
+      previousRange.startDate && previousRange.endDate
+        ? pool.query(
+            `SELECT
+               l.user_id,
+               ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS previous_actual_hours
+             FROM work_logs l
+             INNER JOIN users u ON u.id = l.user_id
+             WHERE u.department_id = ?
+               AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+               AND COALESCE(u.include_in_metrics, 1) = 1
+               AND l.log_date >= ?
+               AND l.log_date <= ?
+             GROUP BY l.user_id`,
+            [normalizedDepartmentId, previousRange.startDate, previousRange.endDate],
+          ).then((result) => result[0] || [])
+        : Promise.resolve([]),
+    ])
+
+    const departmentName =
+      departmentRows?.[0]?.name || `部门#${normalizedDepartmentId}`
+    const previousActualByUserId = new Map(
+      (previousRows || []).map((row) => [Number(row.user_id), Number(row.previous_actual_hours || 0)]),
+    )
+
+    let rows = (currentRows || []).map((row) => {
+      const userId = Number(row.user_id)
+      const totalActualHours = Number(row.total_actual_hours || 0)
+      const previousActualHours = Number(previousActualByUserId.get(userId) || 0)
+      const trendDeltaActualHours = toDecimal1(totalActualHours - previousActualHours)
+      let trendDirection = 'FLAT'
+      if (trendDeltaActualHours > 0) trendDirection = 'UP'
+      if (trendDeltaActualHours < 0) trendDirection = 'DOWN'
+
+      return {
+        rank: 0,
+        user_id: userId,
+        username: row.username || `用户${userId}`,
+        department_id: toPositiveInt(row.department_id),
+        department_name: row.department_name || departmentName,
+        job_level: row.job_level || null,
+        job_level_name: row.job_level_name || row.job_level || '-',
+        filled_days: Number(row.filled_days || 0),
+        total_owner_estimate_hours: toDecimal1(row.total_owner_estimate_hours),
+        total_personal_estimate_hours: toDecimal1(row.total_personal_estimate_hours),
+        total_actual_hours: toDecimal1(totalActualHours),
+        net_efficiency_value: null,
+        previous_actual_hours: toDecimal1(previousActualHours),
+        trend_direction: trendDirection,
+        trend_delta_actual_hours: trendDeltaActualHours,
+        last_log_date: row.last_log_date || null,
+      }
+    })
+
+    if (normalizedKeyword) {
+      rows = rows.filter((row) => {
+        const usernameHit = String(row.username || '').toLowerCase().includes(normalizedKeyword)
+        const levelHit = String(row.job_level_name || row.job_level || '').toLowerCase().includes(normalizedKeyword)
+        return usernameHit || levelHit
+      })
+    }
+
+    rows = rows.map((row, index) => ({
+      ...row,
+      rank: index + 1,
+    }))
+
+    const totalOwnerEstimateHours = toDecimal1(
+      rows.reduce((sum, row) => sum + Number(row.total_owner_estimate_hours || 0), 0),
+    )
+    const totalPersonalEstimateHours = toDecimal1(
+      rows.reduce((sum, row) => sum + Number(row.total_personal_estimate_hours || 0), 0),
+    )
+    const totalActualHours = toDecimal1(
+      rows.reduce((sum, row) => sum + Number(row.total_actual_hours || 0), 0),
+    )
+
+    return {
+      filters: {
+        department_id: normalizedDepartmentId,
+        start_date: startDate,
+        end_date: endDate,
+        keyword: keyword || '',
+        sort_order: normalizedSortOrder.toLowerCase(),
+        previous_start_date: previousRange.startDate,
+        previous_end_date: previousRange.endDate,
+      },
+      summary: {
+        department_id: normalizedDepartmentId,
+        department_name: departmentName,
+        member_count: rows.length,
+        avg_actual_hours: rows.length > 0 ? toDecimal1(totalActualHours / rows.length) : 0,
+        total_owner_estimate_hours: totalOwnerEstimateHours,
+        total_personal_estimate_hours: totalPersonalEstimateHours,
+        total_actual_hours: totalActualHours,
+      },
+      rows,
     }
   },
 

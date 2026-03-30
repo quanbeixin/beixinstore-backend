@@ -58,6 +58,7 @@ const {
   createLogDailyEntry,
   updateLogOwnerEstimate,
   getInsightFilterOptions,
+  getDepartmentEfficiencyRanking,
   getDemandInsight,
   getMemberInsight,
   initDemandWorkflowInstance,
@@ -254,6 +255,7 @@ router.put(
 )
 
 router.get('/insight/filters', getInsightFilterOptions)
+router.get('/insight/department-ranking', getDepartmentEfficiencyRanking)
 router.get('/insight/demand', getDemandInsight)
 router.get('/insight/member', getMemberInsight)
 

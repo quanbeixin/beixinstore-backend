@@ -39,6 +39,14 @@ function normalizeIncludeInMetrics(value, fallback = 1) {
   return fallback
 }
 
+function normalizeOptionalDictCode(value) {
+  if (value === undefined) return undefined
+  if (value === null || value === '') return null
+  const code = String(value).trim().toUpperCase()
+  if (!code) return null
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : ''
+}
+
 function normalizeSortBy(value) {
   const sortBy = String(value || '').trim().toLowerCase()
   if (!sortBy) return 'real_name'
@@ -177,6 +185,7 @@ const createUser = async (req, res) => {
   const { username, password, email, department_id, role_ids, status_code, include_in_metrics } = req.body
   const realName = normalizeRealName(req.body.real_name)
   const normalizedEmail = normalizeEmail(email)
+  const jobLevel = normalizeOptionalDictCode(req.body.job_level)
 
   if (!username || !password || !realName) {
     return res.status(400).json({ success: false, message: '用户名、真实姓名和密码不能为空' })
@@ -187,6 +196,10 @@ const createUser = async (req, res) => {
   }
 
   try {
+    if (jobLevel === '') {
+      return res.status(400).json({ success: false, message: 'job_level 无效' })
+    }
+
     if (normalizedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       return res.status(400).json({ success: false, message: '邮箱格式不正确' })
     }
@@ -220,6 +233,7 @@ const createUser = async (req, res) => {
       password: hashedPassword,
       email: normalizedEmail,
       department_id: departmentId,
+      job_level: jobLevel ?? null,
       status_code: normalizeStatusCode(status_code),
       include_in_metrics: normalizeIncludeInMetrics(include_in_metrics, 1),
     })
@@ -257,8 +271,13 @@ const updateUser = async (req, res) => {
   const realNameRaw = req.body.real_name
   const realName = normalizeRealName(realNameRaw)
   const normalizedEmail = normalizeEmail(email)
+  const jobLevel = normalizeOptionalDictCode(req.body.job_level)
 
   try {
+    if (jobLevel === '') {
+      return res.status(400).json({ success: false, message: 'job_level 无效' })
+    }
+
     const departmentId = normalizeOptionalId(department_id)
     if (department_id !== undefined && department_id !== null && department_id !== '' && !departmentId) {
       return res.status(400).json({ success: false, message: 'department_id 无效' })
@@ -298,6 +317,7 @@ const updateUser = async (req, res) => {
       real_name: nextRealName,
       email: nextEmail,
       department_id: departmentId,
+      job_level: jobLevel === undefined ? existingUser.job_level || null : jobLevel,
       status_code: normalizeStatusCode(status_code),
       include_in_metrics: normalizeIncludeInMetrics(
         include_in_metrics,
