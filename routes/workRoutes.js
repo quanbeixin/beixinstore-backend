@@ -33,6 +33,8 @@ const {
   updateProjectTemplate,
   listNotificationConfigs,
   updateNotificationConfig,
+  getEfficiencyFactorSettings,
+  updateEfficiencyFactorSettings,
   listDemands,
   getDemandById,
   listDemandMembers,
@@ -60,8 +62,10 @@ const {
   updateLogOwnerEstimate,
   getInsightFilterOptions,
   getDepartmentEfficiencyRanking,
+  getDepartmentEfficiencyDetail,
   getDemandInsight,
   getMemberInsight,
+  getMemberEfficiencyDetail,
   initDemandWorkflowInstance,
   getDemandWorkflow,
   assignDemandWorkflowCurrentNode,
@@ -145,6 +149,8 @@ router.put(
   authMiddleware.requirePermission('notification.config.manage'),
   updateNotificationConfig,
 )
+router.get('/efficiency-factor-settings', getEfficiencyFactorSettings)
+router.put('/efficiency-factor-settings', updateEfficiencyFactorSettings)
 
 router.get('/demands', authMiddleware.requirePermission('demand.view'), listDemands)
 router.get('/demands/:id', authMiddleware.requirePermission('demand.view'), getDemandById)
@@ -270,8 +276,10 @@ router.put(
 
 router.get('/insight/filters', getInsightFilterOptions)
 router.get('/insight/department-ranking', getDepartmentEfficiencyRanking)
+router.get('/insight/department-detail', getDepartmentEfficiencyDetail)
 router.get('/insight/demand', getDemandInsight)
 router.get('/insight/member', getMemberInsight)
+router.get('/insight/member-detail', getMemberEfficiencyDetail)
 
 router.get('/workbench/me', authMiddleware.requirePermission('workbench.view.self'), getMyWorkbench)
 router.get('/workbench/me/weekly-report', authMiddleware.requirePermission('workbench.view.self'), getMyWeeklyReport)

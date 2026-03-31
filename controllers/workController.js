@@ -1,6 +1,7 @@
 ﻿const Work = require('../models/Work')
 const User = require('../models/User')
 const Workflow = require('../models/Workflow')
+const ConfigDict = require('../models/ConfigDict')
 const {
   normalizeTemplateGraph,
   filterTemplateGraphByParticipantRoles,
@@ -21,6 +22,12 @@ const NOTIFICATION_SCENES = new Set([
 ])
 
 const DEMAND_NODE_QUICK_ADD_SCENE = 'DEMAND_NODE_QUICK_ADD'
+const JOB_LEVEL_DICT_KEY = 'job_level'
+const TASK_DIFFICULTY_DICT_KEY = 'task_difficulty'
+const EFFICIENCY_FACTOR_TYPES = Work.EFFICIENCY_FACTOR_TYPES || {
+  JOB_LEVEL_WEIGHT: 'JOB_LEVEL_WEIGHT',
+  TASK_DIFFICULTY_WEIGHT: 'TASK_DIFFICULTY_WEIGHT',
+}
 const QUICK_ADD_DEFAULT_ITEM_TYPE_KEYS = Array.from(
   new Set(
     String(process.env.WORKFLOW_TRACK_ITEM_TYPE_KEYS || 'DEMAND_DEV')
@@ -417,6 +424,62 @@ function ensureEfficiencyBoardAccess(req, res) {
   return false
 }
 
+function ensureEfficiencyFactorSettingsAccess(req, res) {
+  if (req.userAccess?.is_super_admin || hasRole(req, 'ADMIN')) return true
+  res.status(403).json({ success: false, message: '仅超级管理员、管理员可维护效能系数设置' })
+  return false
+}
+
+function mapEnabledDictItems(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((item) => Number(item?.enabled) === 1)
+    .map((item) => ({
+      id: toPositiveInt(item?.id),
+      item_code: String(item?.item_code || '').trim().toUpperCase(),
+      item_name: String(item?.item_name || '').trim() || String(item?.item_code || '').trim().toUpperCase(),
+      sort_order: Number(item?.sort_order || 0),
+      color: item?.color || null,
+    }))
+    .filter((item) => item.item_code)
+    .sort((a, b) => {
+      if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order
+      return a.item_code.localeCompare(b.item_code)
+    })
+}
+
+function buildEfficiencyFactorSection(dictItems, storedRows, factorType) {
+  const storedMap = new Map(
+    (Array.isArray(storedRows) ? storedRows : [])
+      .filter((item) => String(item?.factor_type || '').trim().toUpperCase() === factorType)
+      .map((item) => [String(item?.item_code || '').trim().toUpperCase(), item]),
+  )
+
+  return (Array.isArray(dictItems) ? dictItems : []).map((dictItem) => {
+    const stored = storedMap.get(dictItem.item_code)
+    const updatedAt = stored?.updated_at || null
+    const updatedByName = stored?.updated_by_name || ''
+    const updatedBy = toPositiveInt(stored?.updated_by)
+    let adjustmentRecord = '未调整'
+    if (updatedAt) {
+      const operatorLabel = updatedByName || (updatedBy ? `用户#${updatedBy}` : '系统')
+      adjustmentRecord = `${operatorLabel} · ${updatedAt}`
+    }
+    return {
+      factor_type: factorType,
+      item_code: dictItem.item_code,
+      item_name: dictItem.item_name,
+      color: dictItem.color || null,
+      sort_order: Number(dictItem.sort_order || 0),
+      coefficient: Number.isFinite(Number(stored?.coefficient)) ? Number(stored.coefficient) : 1,
+      enabled: stored ? (Number(stored.enabled) === 1 ? 1 : 0) : 1,
+      remark: stored?.remark || '',
+      updated_at: updatedAt,
+      updated_by_name: updatedByName || null,
+      last_adjustment_record: adjustmentRecord,
+    }
+  })
+}
+
 function canAccessDepartmentInsight(req, departmentId) {
   if (!departmentId) return false
   if (req.userAccess?.is_super_admin) return true
@@ -782,6 +845,143 @@ const updateNotificationConfig = async (req, res) => {
     })
   } catch (err) {
     console.error('更新通知配置失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getEfficiencyFactorSettings = async (req, res) => {
+  if (!ensureEfficiencyFactorSettingsAccess(req, res)) return
+
+  try {
+    const [jobLevelRows, taskDifficultyRows, storedRows] = await Promise.all([
+      ConfigDict.listItems(JOB_LEVEL_DICT_KEY, { enabledOnly: true }),
+      ConfigDict.listItems(TASK_DIFFICULTY_DICT_KEY, { enabledOnly: true }),
+      Work.listEfficiencyFactorSettings(),
+    ])
+
+    const jobLevelItems = mapEnabledDictItems(jobLevelRows)
+    const taskDifficultyItems = mapEnabledDictItems(taskDifficultyRows)
+
+    return res.json({
+      success: true,
+      data: {
+        job_level_weights: buildEfficiencyFactorSection(
+          jobLevelItems,
+          storedRows,
+          EFFICIENCY_FACTOR_TYPES.JOB_LEVEL_WEIGHT,
+        ),
+        task_difficulty_weights: buildEfficiencyFactorSection(
+          taskDifficultyItems,
+          storedRows,
+          EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT,
+        ),
+      },
+    })
+  } catch (err) {
+    console.error('获取效能系数设置失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const updateEfficiencyFactorSettings = async (req, res) => {
+  if (!ensureEfficiencyFactorSettingsAccess(req, res)) return
+
+  const hasJobLevelWeights = Object.prototype.hasOwnProperty.call(req.body || {}, 'job_level_weights')
+  const hasTaskDifficultyWeights = Object.prototype.hasOwnProperty.call(req.body || {}, 'task_difficulty_weights')
+  if (!hasJobLevelWeights && !hasTaskDifficultyWeights) {
+    return res.status(400).json({ success: false, message: '至少需要提交一组系数配置' })
+  }
+
+  if (hasJobLevelWeights && !Array.isArray(req.body.job_level_weights)) {
+    return res.status(400).json({ success: false, message: 'job_level_weights 必须是数组' })
+  }
+  if (hasTaskDifficultyWeights && !Array.isArray(req.body.task_difficulty_weights)) {
+    return res.status(400).json({ success: false, message: 'task_difficulty_weights 必须是数组' })
+  }
+
+  try {
+    const [jobLevelRows, taskDifficultyRows] = await Promise.all([
+      ConfigDict.listItems(JOB_LEVEL_DICT_KEY, { enabledOnly: true }),
+      ConfigDict.listItems(TASK_DIFFICULTY_DICT_KEY, { enabledOnly: true }),
+    ])
+
+    const jobLevelItems = mapEnabledDictItems(jobLevelRows)
+    const taskDifficultyItems = mapEnabledDictItems(taskDifficultyRows)
+    const jobLevelMap = new Map(jobLevelItems.map((item) => [item.item_code, item]))
+    const taskDifficultyMap = new Map(taskDifficultyItems.map((item) => [item.item_code, item]))
+
+    const normalizedRows = []
+
+    const normalizePayloadRows = (rows, factorType, dictMap, payloadKeyLabel) => {
+      const dedupMap = new Map()
+      ;(rows || []).forEach((item) => {
+        const itemCode = normalizeDictCode(item?.item_code)
+        if (!itemCode) {
+          throw new Error(`${payloadKeyLabel} 中存在无效 item_code`)
+        }
+        const dictItem = dictMap.get(itemCode)
+        if (!dictItem) {
+          throw new Error(`${payloadKeyLabel} 中存在未启用或不存在的字典项：${itemCode}`)
+        }
+        const coefficientResult = parseOptionalNonNegativeNumber(item?.coefficient, { scale: 2 })
+        if (!coefficientResult.ok) {
+          throw new Error(`${payloadKeyLabel} 中 ${itemCode} 的系数格式不正确`)
+        }
+        dedupMap.set(itemCode, {
+          factor_type: factorType,
+          item_code: itemCode,
+          item_name_snapshot: dictItem.item_name,
+          coefficient: coefficientResult.value === undefined || coefficientResult.value === null ? 1 : coefficientResult.value,
+          enabled: item?.enabled === undefined ? 1 : (toBool(item.enabled, true) ? 1 : 0),
+          remark: normalizeText(item?.remark, 255),
+        })
+      })
+      normalizedRows.push(...dedupMap.values())
+    }
+
+    if (hasJobLevelWeights) {
+      normalizePayloadRows(
+        req.body.job_level_weights,
+        EFFICIENCY_FACTOR_TYPES.JOB_LEVEL_WEIGHT,
+        jobLevelMap,
+        'job_level_weights',
+      )
+    }
+    if (hasTaskDifficultyWeights) {
+      normalizePayloadRows(
+        req.body.task_difficulty_weights,
+        EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT,
+        taskDifficultyMap,
+        'task_difficulty_weights',
+      )
+    }
+
+    await Work.upsertEfficiencyFactorSettings(normalizedRows, {
+      updatedBy: req.user.id,
+    })
+
+    const storedRows = await Work.listEfficiencyFactorSettings()
+    return res.json({
+      success: true,
+      message: '效能系数设置保存成功',
+      data: {
+        job_level_weights: buildEfficiencyFactorSection(
+          jobLevelItems,
+          storedRows,
+          EFFICIENCY_FACTOR_TYPES.JOB_LEVEL_WEIGHT,
+        ),
+        task_difficulty_weights: buildEfficiencyFactorSection(
+          taskDifficultyItems,
+          storedRows,
+          EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT,
+        ),
+      },
+    })
+  } catch (err) {
+    if (err instanceof Error && err.message) {
+      return res.status(400).json({ success: false, message: err.message })
+    }
+    console.error('更新效能系数设置失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -2765,12 +2965,30 @@ const updateLogOwnerEstimate = async (req, res) => {
     req.body.log_completed_at !== undefined ||
     req.body.log_status !== undefined
   ) {
-    return res.status(400).json({ success: false, message: '负责人预估接口仅允许更新 owner_estimate_hours' })
+    return res.status(400).json({ success: false, message: '负责人预估接口仅允许更新 owner_estimate_hours、task_difficulty_code' })
   }
 
   const ownerEstimateHours = normalizeHours(req.body.owner_estimate_hours, null)
   if (ownerEstimateHours === null || ownerEstimateHours < 0) {
     return res.status(400).json({ success: false, message: 'owner_estimate_hours 不能小于 0' })
+  }
+  const hasTaskDifficultyField = Object.prototype.hasOwnProperty.call(req.body || {}, 'task_difficulty_code')
+  const taskDifficultyCodeRaw = req.body.task_difficulty_code
+  const taskDifficultyCode = normalizeDictCode(taskDifficultyCodeRaw)
+  if (
+    hasTaskDifficultyField &&
+    taskDifficultyCodeRaw !== undefined &&
+    taskDifficultyCodeRaw !== null &&
+    String(taskDifficultyCodeRaw).trim() !== '' &&
+    !taskDifficultyCode
+  ) {
+    return res.status(400).json({ success: false, message: 'task_difficulty_code 格式不正确' })
+  }
+  if (taskDifficultyCode) {
+    const dictItem = await ConfigDict.getItemByCode(TASK_DIFFICULTY_DICT_KEY, taskDifficultyCode)
+    if (!dictItem || Number(dictItem.enabled) !== 1) {
+      return res.status(400).json({ success: false, message: '任务难度配置不存在或已停用' })
+    }
   }
 
   try {
@@ -2795,6 +3013,7 @@ const updateLogOwnerEstimate = async (req, res) => {
     await Work.updateLogOwnerEstimate(id, {
       ownerEstimateHours,
       ownerEstimatedBy: req.user.id,
+      ...(hasTaskDifficultyField ? { taskDifficultyCode: taskDifficultyCode || null } : {}),
     })
 
     const updated = await Work.findLogById(id)
@@ -2865,6 +3084,38 @@ const getDepartmentEfficiencyRanking = async (req, res) => {
     return res.json({ success: true, data })
   } catch (err) {
     console.error('获取部门人效排行失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getDepartmentEfficiencyDetail = async (req, res) => {
+  if (!ensureEfficiencyBoardAccess(req, res)) return
+
+  const { startDate, endDate, error } = resolveInsightDateRange(req.query.start_date, req.query.end_date)
+  if (error) {
+    return res.status(400).json({ success: false, message: error })
+  }
+
+  const departmentId = toPositiveInt(req.query.department_id)
+  if (req.query.department_id !== undefined && req.query.department_id !== '' && !departmentId) {
+    return res.status(400).json({ success: false, message: 'department_id 无效' })
+  }
+  if (!departmentId) {
+    return res.status(400).json({ success: false, message: 'department_id 必填' })
+  }
+  if (!canAccessDepartmentInsight(req, departmentId)) {
+    return res.status(403).json({ success: false, message: '仅可查看本人负责部门的数据' })
+  }
+
+  try {
+    const data = await Work.getDepartmentEfficiencyDetail({
+      departmentId,
+      startDate,
+      endDate,
+    })
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取部门人效详情失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -3976,6 +4227,45 @@ const getOwnerWorkbench = async (req, res) => {
   }
 }
 
+const getMemberEfficiencyDetail = async (req, res) => {
+  if (!ensureEfficiencyBoardAccess(req, res)) return
+
+  const { startDate, endDate, error } = resolveInsightDateRange(req.query.start_date, req.query.end_date)
+  if (error) {
+    return res.status(400).json({ success: false, message: error })
+  }
+
+  const userId = toPositiveInt(req.query.user_id)
+  if (req.query.user_id !== undefined && req.query.user_id !== '' && !userId) {
+    return res.status(400).json({ success: false, message: 'user_id 无效' })
+  }
+  if (!userId) {
+    return res.status(400).json({ success: false, message: 'user_id 必填' })
+  }
+
+  const targetUser = await User.findById(userId)
+  if (!targetUser) {
+    return res.status(404).json({ success: false, message: '用户不存在' })
+  }
+
+  const departmentId = toPositiveInt(targetUser.department_id)
+  if (!canAccessDepartmentInsight(req, departmentId)) {
+    return res.status(403).json({ success: false, message: '仅可查看本人负责部门的数据' })
+  }
+
+  try {
+    const data = await Work.getMemberEfficiencyDetail({
+      userId,
+      startDate,
+      endDate,
+    })
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取个人人效详情失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getMorningStandupBoard = async (req, res) => {
   try {
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
@@ -4033,6 +4323,8 @@ module.exports = {
   updateProjectTemplate,
   listNotificationConfigs,
   updateNotificationConfig,
+  getEfficiencyFactorSettings,
+  updateEfficiencyFactorSettings,
   listDemands,
   getDemandById,
   listDemandMembers,
@@ -4060,8 +4352,10 @@ module.exports = {
   updateLogOwnerEstimate,
   getInsightFilterOptions,
   getDepartmentEfficiencyRanking,
+  getDepartmentEfficiencyDetail,
   getDemandInsight,
   getMemberInsight,
+  getMemberEfficiencyDetail,
   initDemandWorkflowInstance,
   getDemandWorkflow,
   assignDemandWorkflowCurrentNode,

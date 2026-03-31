@@ -16,6 +16,11 @@ const DEMAND_COMMUNICATION_TYPE_DICT_KEY = 'demand_communication_type'
 const ISSUE_TYPE_DICT_KEY = 'issue_type'
 const BUSINESS_GROUP_DICT_KEY = 'business_group'
 const JOB_LEVEL_DICT_KEY = 'job_level'
+const TASK_DIFFICULTY_DICT_KEY = 'task_difficulty'
+const EFFICIENCY_FACTOR_TYPES = {
+  JOB_LEVEL_WEIGHT: 'JOB_LEVEL_WEIGHT',
+  TASK_DIFFICULTY_WEIGHT: 'TASK_DIFFICULTY_WEIGHT',
+}
 const OWNER_ESTIMATE_RULES = ['NONE', 'OPTIONAL', 'REQUIRED']
 const DEFAULT_NOTIFICATION_SCENES = [
   'node_assign',
@@ -100,6 +105,38 @@ const DEFAULT_DAILY_CAPACITY_HOURS = Number.isFinite(Number(process.env.DAILY_CA
 
 let ensureDailyTablesPromise = null
 let isDailyTablesReady = false
+let ensureEfficiencyFactorSettingsTablePromise = null
+let isEfficiencyFactorSettingsTableReady = false
+
+async function ensureEfficiencyFactorSettingsTable() {
+  if (isEfficiencyFactorSettingsTableReady) return
+  if (ensureEfficiencyFactorSettingsTablePromise) return ensureEfficiencyFactorSettingsTablePromise
+
+  ensureEfficiencyFactorSettingsTablePromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS efficiency_factor_settings (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        factor_type VARCHAR(64) NOT NULL COMMENT '系数类型：职级权重、任务难度系数等',
+        item_code VARCHAR(64) NOT NULL COMMENT '对应字典编码',
+        item_name_snapshot VARCHAR(128) NULL COMMENT '保存时的字典名称快照',
+        coefficient DECIMAL(10,2) NOT NULL DEFAULT 1.00 COMMENT '配置系数值',
+        enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用当前映射',
+        remark VARCHAR(255) NULL COMMENT '备注',
+        updated_by BIGINT NULL COMMENT '最后维护人',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uk_efficiency_factor_type_item (factor_type, item_code),
+        KEY idx_efficiency_factor_updated_by (updated_by)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='效能系数配置表'
+    `)
+    isEfficiencyFactorSettingsTableReady = true
+  })().finally(() => {
+    ensureEfficiencyFactorSettingsTablePromise = null
+  })
+
+  return ensureEfficiencyFactorSettingsTablePromise
+}
 
 function buildWorkflowNodeNameSql(logAlias = 'l') {
   return `(
@@ -1029,6 +1066,7 @@ const Work = {
   WORK_LOG_STATUSES,
   WORK_UNIFIED_STATUSES: WORK_UNIFIED_STATUS_VALUES,
   WORK_LOG_TASK_SOURCES,
+  EFFICIENCY_FACTOR_TYPES,
 
   async isDepartmentManager(userId) {
     const rows = await listManagedDepartmentRows(userId)
@@ -1504,6 +1542,94 @@ const Work = {
       ],
     )
     return Number(result?.affectedRows || 0)
+  },
+
+  async listEfficiencyFactorSettings() {
+    await ensureEfficiencyFactorSettingsTable()
+
+    const [rows] = await pool.query(
+      `SELECT
+         e.id,
+         e.factor_type,
+         e.item_code,
+         e.item_name_snapshot,
+         e.coefficient,
+         e.enabled,
+         e.remark,
+         e.updated_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS updated_by_name,
+         DATE_FORMAT(e.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(e.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM efficiency_factor_settings e
+       LEFT JOIN users u ON u.id = e.updated_by
+       ORDER BY factor_type ASC, item_code ASC`,
+    )
+
+    return (rows || []).map((row) => ({
+      id: Number(row.id),
+      factor_type: row.factor_type,
+      item_code: row.item_code,
+      item_name_snapshot: row.item_name_snapshot || row.item_code || '',
+      coefficient: Number(Number(row.coefficient || 1).toFixed(2)),
+      enabled: Number(row.enabled) === 1 ? 1 : 0,
+      remark: row.remark || '',
+      updated_by: toPositiveInt(row.updated_by),
+      updated_by_name: row.updated_by_name || '',
+      created_at: row.created_at || null,
+      updated_at: row.updated_at || null,
+    }))
+  },
+
+  async upsertEfficiencyFactorSettings(settings = [], { updatedBy = null } = {}) {
+    await ensureEfficiencyFactorSettingsTable()
+    if (!Array.isArray(settings) || settings.length === 0) return 0
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      let affectedRows = 0
+
+      for (const item of settings) {
+        const factorType = normalizeText(item?.factor_type, 64).toUpperCase()
+        const itemCode = normalizeText(item?.item_code, 64).toUpperCase()
+        if (!factorType || !itemCode) continue
+
+        const coefficient = normalizeDecimal(item?.coefficient, 1)
+        const enabled = Number(item?.enabled) === 1 ? 1 : 0
+        const remark = normalizeText(item?.remark, 255) || null
+        const itemNameSnapshot = normalizeText(item?.item_name_snapshot, 128) || itemCode
+        const [result] = await conn.query(
+          `INSERT INTO efficiency_factor_settings
+             (factor_type, item_code, item_name_snapshot, coefficient, enabled, remark, updated_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+             item_name_snapshot = VALUES(item_name_snapshot),
+             coefficient = VALUES(coefficient),
+             enabled = VALUES(enabled),
+             remark = VALUES(remark),
+             updated_by = VALUES(updated_by),
+             updated_at = CURRENT_TIMESTAMP`,
+          [
+            factorType,
+            itemCode,
+            itemNameSnapshot,
+            coefficient === null ? 1 : coefficient,
+            enabled,
+            remark,
+            toPositiveInt(updatedBy),
+          ],
+        )
+        affectedRows += Number(result?.affectedRows || 0)
+      }
+
+      await conn.commit()
+      return affectedRows
+    } catch (err) {
+      await conn.rollback()
+      throw err
+    } finally {
+      conn.release()
+    }
   },
 
   async listDemands({
@@ -2796,33 +2922,106 @@ const Work = {
   },
 
   async findLogById(id) {
-    const [rows] = await pool.query(
-      `SELECT
-         l.id,
-         l.user_id,
-         DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
-         l.item_type_id,
-         l.description,
-         l.personal_estimate_hours,
-         l.actual_hours,
-         l.remaining_hours,
-         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
-         COALESCE(l.task_source, 'SELF') AS task_source,
-         l.relate_task_id,
-         l.demand_id,
-         l.phase_key,
-         l.assigned_by_user_id,
-         COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
-         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
-         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
-         DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
-         DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
-         DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
-       FROM work_logs l
-       LEFT JOIN users au ON au.id = l.assigned_by_user_id
-       WHERE l.id = ?`,
-      [id],
-    )
+    const fullSql = `SELECT
+       l.id,
+       l.user_id,
+       DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+       l.item_type_id,
+       l.description,
+       l.personal_estimate_hours,
+       l.actual_hours,
+       l.remaining_hours,
+       l.owner_estimate_hours,
+       l.task_difficulty_code,
+       COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
+       COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+       COALESCE(l.task_source, 'SELF') AS task_source,
+       l.relate_task_id,
+       l.demand_id,
+       l.phase_key,
+       l.assigned_by_user_id,
+       COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
+       DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+       DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+       DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+       DATE_FORMAT(l.owner_estimated_at, '%Y-%m-%d %H:%i:%s') AS owner_estimated_at,
+       DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+       DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+     FROM work_logs l
+     LEFT JOIN users au ON au.id = l.assigned_by_user_id
+     LEFT JOIN config_dict_items td
+       ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+      AND td.item_code = l.task_difficulty_code
+     WHERE l.id = ?`
+    const ownerOnlySql = `SELECT
+       l.id,
+       l.user_id,
+       DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+       l.item_type_id,
+       l.description,
+       l.personal_estimate_hours,
+       l.actual_hours,
+       l.remaining_hours,
+       l.owner_estimate_hours,
+       NULL AS task_difficulty_code,
+       NULL AS task_difficulty_name,
+       COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+       COALESCE(l.task_source, 'SELF') AS task_source,
+       l.relate_task_id,
+       l.demand_id,
+       l.phase_key,
+       l.assigned_by_user_id,
+       COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
+       DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+       DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+       DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+       DATE_FORMAT(l.owner_estimated_at, '%Y-%m-%d %H:%i:%s') AS owner_estimated_at,
+       DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+       DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+     FROM work_logs l
+     LEFT JOIN users au ON au.id = l.assigned_by_user_id
+     WHERE l.id = ?`
+    const legacySql = `SELECT
+       l.id,
+       l.user_id,
+       DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+       l.item_type_id,
+       l.description,
+       l.personal_estimate_hours,
+       l.actual_hours,
+       l.remaining_hours,
+       NULL AS owner_estimate_hours,
+       NULL AS task_difficulty_code,
+       NULL AS task_difficulty_name,
+       COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+       COALESCE(l.task_source, 'SELF') AS task_source,
+       l.relate_task_id,
+       l.demand_id,
+       l.phase_key,
+       l.assigned_by_user_id,
+       COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
+       DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+       DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+       DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+       NULL AS owner_estimated_at,
+       DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+       DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+     FROM work_logs l
+     LEFT JOIN users au ON au.id = l.assigned_by_user_id
+     WHERE l.id = ?`
+    try {
+      const [rows] = await pool.query(fullSql, [id])
+      return rows[0] || null
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+    }
+    try {
+      const [rows] = await pool.query(ownerOnlySql, [id])
+      return rows[0] || null
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+    }
+    const [rows] = await pool.query(legacySql, [id])
     return rows[0] || null
   },
 
@@ -3477,16 +3676,25 @@ const Work = {
     })
   },
 
-  async updateLogOwnerEstimate(logId, { ownerEstimateHours, ownerEstimatedBy }) {
+  async updateLogOwnerEstimate(logId, payload = {}) {
+    const { ownerEstimateHours, ownerEstimatedBy, taskDifficultyCode } = payload
+    const updates = [
+      'owner_estimate_hours = ?',
+      'owner_estimated_by = ?',
+      'owner_estimated_at = NOW()',
+    ]
+    const params = [normalizeDecimal(ownerEstimateHours, 0), ownerEstimatedBy || null]
+    if (Object.prototype.hasOwnProperty.call(payload, 'taskDifficultyCode')) {
+      updates.push('task_difficulty_code = ?')
+      params.push(taskDifficultyCode || null)
+    }
+    params.push(logId)
     try {
       const [result] = await pool.query(
         `UPDATE work_logs
-         SET
-           owner_estimate_hours = ?,
-           owner_estimated_by = ?,
-           owner_estimated_at = NOW()
+         SET ${updates.join(', ')}
          WHERE id = ?`,
-        [normalizeDecimal(ownerEstimateHours, 0), ownerEstimatedBy || null, logId],
+        params,
       )
       return result.affectedRows
     } catch (err) {
@@ -5123,6 +5331,52 @@ const Work = {
        l.personal_estimate_hours,
        l.actual_hours,
        l.owner_estimate_hours,
+       l.task_difficulty_code,
+       COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
+       l.owner_estimated_by,
+       DATE_FORMAT(l.owner_estimated_at, '%Y-%m-%d %H:%i:%s') AS owner_estimated_at,
+       COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+       COALESCE(l.task_source, 'SELF') AS task_source,
+       l.demand_id,
+       d.name AS demand_name,
+       l.phase_key,
+       l.assigned_by_user_id,
+       COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
+       COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
+       DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+       DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+       DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+       COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule
+     FROM work_logs l
+     INNER JOIN users u ON u.id = l.user_id
+     LEFT JOIN users au ON au.id = l.assigned_by_user_id
+     LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+     LEFT JOIN work_demands d ON d.id = l.demand_id
+     LEFT JOIN config_dict_items td
+       ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+      AND td.item_code = l.task_difficulty_code
+     LEFT JOIN config_dict_items pdi
+       ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+      AND pdi.item_code = l.phase_key
+     WHERE ${ownerEstimateQueryConditions.join(' AND ')}
+     ORDER BY
+       CASE WHEN l.owner_estimate_hours IS NULL THEN 0 ELSE 1 END ASC,
+       l.updated_at DESC,
+       l.id DESC
+     LIMIT 400`
+
+    const ownerEstimateOwnerOnlySql = `SELECT
+       l.id,
+       l.user_id,
+       COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+       DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+       COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+       l.description,
+       l.personal_estimate_hours,
+       l.actual_hours,
+       l.owner_estimate_hours,
+       NULL AS task_difficulty_code,
+       NULL AS task_difficulty_name,
        l.owner_estimated_by,
        DATE_FORMAT(l.owner_estimated_at, '%Y-%m-%d %H:%i:%s') AS owner_estimated_at,
        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
@@ -5146,13 +5400,10 @@ const Work = {
        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
       AND pdi.item_code = l.phase_key
      WHERE ${ownerEstimateQueryConditions.join(' AND ')}
-     ORDER BY
-       CASE WHEN l.owner_estimate_hours IS NULL THEN 0 ELSE 1 END ASC,
-       l.updated_at DESC,
-       l.id DESC
+     ORDER BY l.updated_at DESC, l.id DESC
      LIMIT 400`
 
-    const ownerEstimateFallbackSql = `SELECT
+    const ownerEstimateLegacySql = `SELECT
        l.id,
        l.user_id,
        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
@@ -5162,6 +5413,8 @@ const Work = {
        l.personal_estimate_hours,
        l.actual_hours,
        NULL AS owner_estimate_hours,
+       NULL AS task_difficulty_code,
+       NULL AS task_difficulty_name,
        NULL AS owner_estimated_by,
        NULL AS owner_estimated_at,
        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
@@ -5193,8 +5446,14 @@ const Work = {
       ownerEstimateItems = queryRows
     } catch (err) {
       if (!isMissingColumnError(err)) throw err
-      const [queryRows] = await pool.query(ownerEstimateFallbackSql, ownerEstimateQueryParams)
-      ownerEstimateItems = queryRows
+      try {
+        const [queryRows] = await pool.query(ownerEstimateOwnerOnlySql, ownerEstimateQueryParams)
+        ownerEstimateItems = queryRows
+      } catch (innerErr) {
+        if (!isMissingColumnError(innerErr)) throw innerErr
+        const [queryRows] = await pool.query(ownerEstimateLegacySql, ownerEstimateQueryParams)
+        ownerEstimateItems = queryRows
+      }
     }
 
     const todayDate = getBeijingTodayDateString()
@@ -5998,6 +6257,465 @@ const Work = {
         low_load_day_count: lowLoadDayCount,
       },
       member_list: memberList,
+    }
+  },
+
+  async getDepartmentEfficiencyDetail({
+    departmentId,
+    startDate,
+    endDate,
+  } = {}) {
+    const normalizedDepartmentId = toPositiveInt(departmentId)
+    if (!normalizedDepartmentId) {
+      return {
+        filters: {
+          department_id: null,
+          start_date: startDate,
+          end_date: endDate,
+        },
+        summary: {
+          department_id: null,
+          department_name: '-',
+          member_count: 0,
+          total_owner_estimate_hours: 0,
+          total_personal_estimate_hours: 0,
+          total_actual_hours: 0,
+          net_efficiency_value: null,
+          avg_actual_hours: 0,
+          avg_actual_hours_per_member: 0,
+          variance_owner_hours: 0,
+          variance_personal_hours: 0,
+        },
+        work_type_distribution: [],
+        member_ranking: [],
+        demand_top_list: [],
+        trend: [],
+        alerts: {
+          high_load_members: [],
+          low_load_members: [],
+          high_variance_demands: [],
+        },
+      }
+    }
+
+    const [rankingData, memberInsight, demandInsight, workTypeRows, trendRows] = await Promise.all([
+      this.getDepartmentEfficiencyRanking({
+        departmentId: normalizedDepartmentId,
+        startDate,
+        endDate,
+        sortOrder: 'desc',
+      }),
+      this.getMemberInsight({
+        startDate,
+        endDate,
+        departmentId: normalizedDepartmentId,
+      }),
+      this.getDemandInsight({
+        startDate,
+        endDate,
+        departmentId: normalizedDepartmentId,
+      }),
+      pool.query(
+        `SELECT
+           COALESCE(t.id, l.item_type_id) AS item_type_id,
+           COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+           COUNT(*) AS task_count,
+           ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS owner_estimate_hours,
+           ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS personal_estimate_hours,
+           ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS actual_hours
+         FROM work_logs l
+         INNER JOIN users u ON u.id = l.user_id
+         LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+         WHERE u.department_id = ?
+           AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+           AND COALESCE(u.include_in_metrics, 1) = 1
+           AND l.log_date >= ?
+           AND l.log_date <= ?
+         GROUP BY COALESCE(t.id, l.item_type_id), COALESCE(t.name, CONCAT('类型#', l.item_type_id))
+         ORDER BY actual_hours DESC, task_count DESC, item_type_id ASC`,
+        [normalizedDepartmentId, startDate, endDate],
+      ).then((r) => r[0] || []),
+      pool.query(
+        `SELECT
+           DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+           ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS owner_estimate_hours,
+           ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS personal_estimate_hours,
+           ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS actual_hours
+         FROM work_logs l
+         INNER JOIN users u ON u.id = l.user_id
+         LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+         WHERE u.department_id = ?
+           AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+           AND COALESCE(u.include_in_metrics, 1) = 1
+           AND l.log_date >= ?
+           AND l.log_date <= ?
+         GROUP BY DATE_FORMAT(l.log_date, '%Y-%m-%d')
+         ORDER BY log_date ASC`,
+        [normalizedDepartmentId, startDate, endDate],
+      ).then((r) => r[0] || []),
+    ])
+
+    const summary = rankingData?.summary || {}
+    const trendMap = new Map(
+      (trendRows || []).map((row) => [
+        String(row.log_date || ''),
+        {
+          date: row.log_date,
+          owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
+          personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
+          actual_hours: toDecimal1(row.actual_hours),
+        },
+      ]),
+    )
+    const trend = buildDateRange(startDate, endDate).map((date) => {
+      const found = trendMap.get(date)
+      return (
+        found || {
+          date,
+          owner_estimate_hours: 0,
+          personal_estimate_hours: 0,
+          actual_hours: 0,
+        }
+      )
+    })
+
+    const demandTopList = Array.isArray(demandInsight?.demand_list)
+      ? demandInsight.demand_list.slice(0, 10).map((item) => ({
+          demand_id: item.demand_id,
+          demand_name: item.demand_name,
+          member_count: Number(item.member_count || 0),
+          total_owner_estimate_hours: toDecimal1(item.total_owner_estimate_hours),
+          total_personal_estimate_hours: toDecimal1(item.total_personal_estimate_hours),
+          total_actual_hours: toDecimal1(item.total_actual_hours),
+          last_log_date: item.last_log_date || null,
+        }))
+      : []
+
+    const memberList = Array.isArray(memberInsight?.member_list) ? memberInsight.member_list : []
+    const highLoadMembers = memberList
+      .filter((item) => Number(item.avg_saturation_rate || 0) > 100)
+      .sort((a, b) => Number(b.avg_saturation_rate || 0) - Number(a.avg_saturation_rate || 0))
+      .slice(0, 10)
+      .map((item) => ({
+        user_id: item.user_id,
+        username: item.username,
+        avg_saturation_rate: toPercent2(item.avg_saturation_rate),
+        avg_actual_hours_per_day: toDecimal1(item.avg_actual_hours_per_day),
+        total_actual_hours: toDecimal1(item.total_actual_hours),
+      }))
+    const lowLoadMembers = memberList
+      .filter((item) => Number(item.avg_saturation_rate || 0) < 60)
+      .sort((a, b) => Number(a.avg_saturation_rate || 0) - Number(b.avg_saturation_rate || 0))
+      .slice(0, 10)
+      .map((item) => ({
+        user_id: item.user_id,
+        username: item.username,
+        avg_saturation_rate: toPercent2(item.avg_saturation_rate),
+        avg_actual_hours_per_day: toDecimal1(item.avg_actual_hours_per_day),
+        total_actual_hours: toDecimal1(item.total_actual_hours),
+      }))
+    const highVarianceDemands = demandTopList
+      .map((item) => ({
+        ...item,
+        variance_owner_hours: toDecimal1(
+          Number(item.total_actual_hours || 0) - Number(item.total_owner_estimate_hours || 0),
+        ),
+      }))
+      .sort((a, b) => Math.abs(Number(b.variance_owner_hours || 0)) - Math.abs(Number(a.variance_owner_hours || 0)))
+      .slice(0, 10)
+
+    return {
+      filters: {
+        department_id: normalizedDepartmentId,
+        start_date: startDate,
+        end_date: endDate,
+      },
+      summary: {
+        department_id: normalizedDepartmentId,
+        department_name: summary.department_name || `部门#${normalizedDepartmentId}`,
+        member_count: Number(summary.member_count || 0),
+        total_owner_estimate_hours: toDecimal1(summary.total_owner_estimate_hours),
+        total_personal_estimate_hours: toDecimal1(summary.total_personal_estimate_hours),
+        total_actual_hours: toDecimal1(summary.total_actual_hours),
+        net_efficiency_value: null,
+        avg_actual_hours: toDecimal1(summary.avg_actual_hours),
+        avg_actual_hours_per_member:
+          Number(summary.member_count || 0) > 0
+            ? toDecimal1(Number(summary.total_actual_hours || 0) / Number(summary.member_count || 0))
+            : 0,
+        variance_owner_hours: toDecimal1(
+          Number(summary.total_actual_hours || 0) - Number(summary.total_owner_estimate_hours || 0),
+        ),
+        variance_personal_hours: toDecimal1(
+          Number(summary.total_actual_hours || 0) - Number(summary.total_personal_estimate_hours || 0),
+        ),
+      },
+      work_type_distribution: (workTypeRows || []).map((row) => ({
+        item_type_id: toPositiveInt(row.item_type_id),
+        item_type_name: row.item_type_name || '-',
+        task_count: Number(row.task_count || 0),
+        owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
+        personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
+        actual_hours: toDecimal1(row.actual_hours),
+      })),
+      member_ranking: Array.isArray(rankingData?.rows) ? rankingData.rows : [],
+      demand_top_list: demandTopList,
+      trend,
+      alerts: {
+        high_load_members: highLoadMembers,
+        low_load_members: lowLoadMembers,
+        high_variance_demands: highVarianceDemands,
+      },
+    }
+  },
+
+  async getMemberEfficiencyDetail({
+    userId,
+    startDate,
+    endDate,
+  } = {}) {
+    const normalizedUserId = toPositiveInt(userId)
+    if (!normalizedUserId) {
+      return {
+        filters: {
+          user_id: null,
+          start_date: startDate,
+          end_date: endDate,
+        },
+        summary: {
+          user_id: null,
+          username: '-',
+          department_id: null,
+          department_name: '-',
+          job_level: null,
+          job_level_name: '-',
+          filled_days: 0,
+          total_owner_estimate_hours: 0,
+          total_personal_estimate_hours: 0,
+          total_actual_hours: 0,
+          net_efficiency_value: null,
+          avg_actual_hours_per_day: 0,
+        },
+        work_type_distribution: [],
+        demand_summary_list: [],
+        work_item_list: [],
+        trend: [],
+        phase_distribution: [],
+      }
+    }
+
+    const [userRows, memberInsight, demandInsight, workTypeRows, workItemRows, trendRows, phaseRows] =
+      await Promise.all([
+        pool.query(
+          `SELECT
+             u.id AS user_id,
+             COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+             u.department_id,
+             COALESCE(dep.name, CONCAT('部门#', u.department_id)) AS department_name,
+             COALESCE(u.job_level, '') AS job_level,
+             COALESCE(jl.item_name, COALESCE(u.job_level, ''), '-') AS job_level_name
+           FROM users u
+           LEFT JOIN departments dep ON dep.id = u.department_id
+           LEFT JOIN config_dict_items jl
+             ON jl.type_key = '${JOB_LEVEL_DICT_KEY}'
+            AND jl.item_code = u.job_level
+           WHERE u.id = ?
+           LIMIT 1`,
+          [normalizedUserId],
+        ).then((r) => r[0] || []),
+        this.getMemberInsight({
+          startDate,
+          endDate,
+          memberUserId: normalizedUserId,
+        }),
+        this.getDemandInsight({
+          startDate,
+          endDate,
+          memberUserId: normalizedUserId,
+        }),
+        pool.query(
+          `SELECT
+             COALESCE(t.id, l.item_type_id) AS item_type_id,
+             COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+             COUNT(*) AS task_count,
+             ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS owner_estimate_hours,
+             ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS personal_estimate_hours,
+             ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS actual_hours
+           FROM work_logs l
+           LEFT JOIN work_demands d ON d.id = l.demand_id
+           LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+           WHERE l.user_id = ?
+             AND l.log_date >= ?
+             AND l.log_date <= ?
+           GROUP BY COALESCE(t.id, l.item_type_id), COALESCE(t.name, CONCAT('类型#', l.item_type_id))
+           ORDER BY actual_hours DESC, task_count DESC, item_type_id ASC`,
+          [normalizedUserId, startDate, endDate],
+        ).then((r) => r[0] || []),
+        pool.query(
+          `SELECT
+             l.id AS log_id,
+             DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+             COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+             COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+             l.demand_id,
+             d.name AS demand_name,
+             l.phase_key,
+             COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
+             l.description,
+             ROUND(COALESCE(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}, 0), 1) AS owner_estimate_hours,
+             ROUND(COALESCE(l.personal_estimate_hours, 0), 1) AS personal_estimate_hours,
+             ROUND(COALESCE(l.actual_hours, 0), 1) AS actual_hours,
+             DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+             DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+             DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS last_log_date
+           FROM work_logs l
+           LEFT JOIN work_demands d ON d.id = l.demand_id
+           LEFT JOIN config_dict_items pdi
+             ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+            AND pdi.item_code = l.phase_key
+           LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+           WHERE l.user_id = ?
+             AND l.log_date >= ?
+             AND l.log_date <= ?
+           ORDER BY l.log_date DESC, l.id DESC
+           LIMIT 500`,
+          [normalizedUserId, startDate, endDate],
+        ).then((r) => r[0] || []),
+        pool.query(
+          `SELECT
+             DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+             ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS owner_estimate_hours,
+             ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS personal_estimate_hours,
+             ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS actual_hours
+           FROM work_logs l
+           LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+           WHERE l.user_id = ?
+             AND l.log_date >= ?
+             AND l.log_date <= ?
+           GROUP BY DATE_FORMAT(l.log_date, '%Y-%m-%d')
+           ORDER BY log_date ASC`,
+          [normalizedUserId, startDate, endDate],
+        ).then((r) => r[0] || []),
+        pool.query(
+          `SELECT
+             COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__') AS phase_key,
+             COALESCE(
+               MAX(${buildWorkflowNodeNameSql('l')}),
+               MAX(pdi.item_name),
+               NULLIF(MAX(l.phase_key), ''),
+               '未分阶段'
+             ) AS phase_name,
+             COUNT(*) AS task_count,
+             ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS actual_hours
+           FROM work_logs l
+           LEFT JOIN config_dict_items pdi
+             ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+            AND pdi.item_code = l.phase_key
+           LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+           WHERE l.user_id = ?
+             AND l.log_date >= ?
+             AND l.log_date <= ?
+           GROUP BY COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__')
+           ORDER BY actual_hours DESC, task_count DESC`,
+          [normalizedUserId, startDate, endDate],
+        ).then((r) => r[0] || []),
+      ])
+
+    const userInfo = userRows?.[0] || {}
+    const memberSummary = Array.isArray(memberInsight?.member_list)
+      ? memberInsight.member_list.find((item) => Number(item.user_id) === normalizedUserId) || {}
+      : {}
+
+    const trendMap = new Map(
+      (trendRows || []).map((row) => [
+        String(row.log_date || ''),
+        {
+          date: row.log_date,
+          owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
+          personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
+          actual_hours: toDecimal1(row.actual_hours),
+        },
+      ]),
+    )
+    const trend = buildDateRange(startDate, endDate).map((date) => {
+      const found = trendMap.get(date)
+      return (
+        found || {
+          date,
+          owner_estimate_hours: 0,
+          personal_estimate_hours: 0,
+          actual_hours: 0,
+        }
+      )
+    })
+
+    return {
+      filters: {
+        user_id: normalizedUserId,
+        start_date: startDate,
+        end_date: endDate,
+      },
+      summary: {
+        user_id: normalizedUserId,
+        username: userInfo.username || memberSummary.username || `用户${normalizedUserId}`,
+        department_id: toPositiveInt(userInfo.department_id),
+        department_name: userInfo.department_name || memberSummary.department_name || '-',
+        job_level: userInfo.job_level || null,
+        job_level_name: userInfo.job_level_name || userInfo.job_level || '-',
+        filled_days: Number(memberSummary.filled_days || 0),
+        total_owner_estimate_hours: toDecimal1(memberSummary.total_owner_estimate_hours),
+        total_personal_estimate_hours: toDecimal1(memberSummary.total_personal_estimate_hours),
+        total_actual_hours: toDecimal1(memberSummary.total_actual_hours),
+        net_efficiency_value: null,
+        avg_actual_hours_per_day: toDecimal1(memberSummary.avg_actual_hours_per_day),
+      },
+      work_type_distribution: (workTypeRows || []).map((row) => ({
+        item_type_id: toPositiveInt(row.item_type_id),
+        item_type_name: row.item_type_name || '-',
+        task_count: Number(row.task_count || 0),
+        owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
+        personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
+        actual_hours: toDecimal1(row.actual_hours),
+      })),
+      demand_summary_list: Array.isArray(demandInsight?.demand_list)
+        ? demandInsight.demand_list.map((item) => ({
+            demand_id: item.demand_id,
+            demand_name: item.demand_name,
+            business_group_code: item.business_group_code || null,
+            business_group_name: item.business_group_name || '-',
+            phase_count: Number(item.phase_count || 0),
+            total_owner_estimate_hours: toDecimal1(item.total_owner_estimate_hours),
+            total_personal_estimate_hours: toDecimal1(item.total_personal_estimate_hours),
+            total_actual_hours: toDecimal1(item.total_actual_hours),
+            variance_owner_hours: toDecimal1(item.variance_owner_hours),
+            variance_personal_hours: toDecimal1(item.variance_personal_hours),
+            last_log_date: item.last_log_date || null,
+          }))
+        : [],
+      work_item_list: (workItemRows || []).map((row) => ({
+        log_id: Number(row.log_id),
+        log_date: row.log_date || null,
+        item_type_name: row.item_type_name || '-',
+        log_status: row.log_status || 'IN_PROGRESS',
+        demand_id: row.demand_id || null,
+        demand_name: row.demand_name || null,
+        phase_key: row.phase_key || '',
+        phase_name: row.phase_name || row.phase_key || '-',
+        description: row.description || '',
+        owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
+        personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
+        actual_hours: toDecimal1(row.actual_hours),
+        expected_start_date: row.expected_start_date || null,
+        expected_completion_date: row.expected_completion_date || null,
+        last_log_date: row.last_log_date || null,
+      })),
+      trend,
+      phase_distribution: (phaseRows || []).map((row) => ({
+        phase_key: row.phase_key === '__NO_PHASE__' ? '' : row.phase_key || '',
+        phase_name: row.phase_name || '未分阶段',
+        task_count: Number(row.task_count || 0),
+        actual_hours: toDecimal1(row.actual_hours),
+      })),
     }
   },
 
