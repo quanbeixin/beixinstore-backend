@@ -6125,9 +6125,35 @@ const Work = {
       ORDER BY l.user_id ASC, log_date ASC
       LIMIT 20000`
 
-    const [memberRows, dailyRows] = await Promise.all([
+    const dailyItemSql = `
+      SELECT
+        l.user_id,
+        DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+        l.id AS log_id,
+        l.demand_id,
+        COALESCE(d.name, '无需求') AS demand_name,
+        l.description,
+        l.phase_key,
+        COALESCE(pdi.item_name, l.phase_key) AS phase_name,
+        COALESCE(t.name, '其他') AS item_type_name,
+        ROUND(COALESCE(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}, 0), 1) AS owner_estimate_hours,
+        ROUND(COALESCE(l.personal_estimate_hours, 0), 1) AS personal_estimate_hours,
+        ROUND(COALESCE(l.actual_hours, 0), 1) AS actual_hours
+      FROM work_logs l
+      INNER JOIN users u ON u.id = l.user_id
+      LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN config_dict_items pdi
+        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+       AND pdi.item_code = l.phase_key
+      LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+      WHERE ${logWhereSql}
+      ORDER BY l.user_id ASC, log_date ASC, l.id ASC
+      LIMIT 50000`
+
+    const [memberRows, dailyRows, dailyItemRows] = await Promise.all([
       pool.query(memberSql, logParams).then((r) => r[0] || []),
       pool.query(dailySql, logParams).then((r) => r[0] || []),
+      pool.query(dailyItemSql, logParams).then((r) => r[0] || []),
     ])
 
     const memberAggByUser = new Map()
@@ -6135,17 +6161,42 @@ const Work = {
       memberAggByUser.set(Number(row.user_id), row)
     })
 
+    const dailyItemsByUserDate = new Map()
+    ;(dailyItemRows || []).forEach((row) => {
+      const userId = Number(row.user_id)
+      const logDate = String(row.log_date || '')
+      const key = `${userId}_${logDate}`
+      if (!dailyItemsByUserDate.has(key)) {
+        dailyItemsByUserDate.set(key, [])
+      }
+      dailyItemsByUserDate.get(key).push({
+        log_id: Number(row.log_id),
+        demand_id: row.demand_id || null,
+        demand_name: row.demand_name || '无需求',
+        description: row.description || '',
+        phase_key: row.phase_key || '',
+        phase_name: row.phase_name || '',
+        item_type_name: row.item_type_name || '其他',
+        owner_estimate_hours: toDecimal1(Number(row.owner_estimate_hours || 0)),
+        personal_estimate_hours: toDecimal1(Number(row.personal_estimate_hours || 0)),
+        actual_hours: toDecimal1(Number(row.actual_hours || 0)),
+      })
+    })
+
     const dailyByUser = new Map()
     ;(dailyRows || []).forEach((row) => {
       const userId = Number(row.user_id)
+      const logDate = String(row.log_date || '')
       if (!dailyByUser.has(userId)) {
         dailyByUser.set(userId, [])
       }
       const actualHours = Number(row.actual_hours || 0)
       const ownerEstimateHours = Number(row.owner_estimate_hours || 0)
       const personalEstimateHours = Number(row.personal_estimate_hours || 0)
+      const key = `${userId}_${logDate}`
+      const items = dailyItemsByUserDate.get(key) || []
       dailyByUser.get(userId).push({
-        log_date: row.log_date,
+        log_date: logDate,
         owner_estimate_hours: toDecimal1(ownerEstimateHours),
         personal_estimate_hours: toDecimal1(personalEstimateHours),
         actual_hours: toDecimal1(actualHours),
@@ -6154,6 +6205,7 @@ const Work = {
         variance_owner_hours: toDecimal1(actualHours - ownerEstimateHours),
         variance_personal_hours: toDecimal1(actualHours - personalEstimateHours),
         saturation_rate: toPercent2((actualHours / 8) * 100),
+        items: items,
       })
     })
 
