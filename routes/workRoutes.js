@@ -56,6 +56,7 @@ const {
   upsertLogDailyPlan,
   listLogDailyEntries,
   createLogDailyEntry,
+  updateLogDailyEntry,
   updateLogOwnerEstimate,
   getInsightFilterOptions,
   getDepartmentEfficiencyRanking,
@@ -126,8 +127,16 @@ router.get(
   listWorkflowAssignees,
 )
 router.post('/item-types', authMiddleware.requirePermission('demand.manage'), createWorkItemType)
-router.get('/project-templates', authMiddleware.requirePermission('project.template.view'), listProjectTemplates)
-router.get('/project-templates/:id', authMiddleware.requirePermission('project.template.view'), getProjectTemplateById)
+router.get(
+  '/project-templates',
+  authMiddleware.requireAnyPermission(['project.template.view', 'demand.create']),
+  listProjectTemplates,
+)
+router.get(
+  '/project-templates/:id',
+  authMiddleware.requireAnyPermission(['project.template.view', 'demand.create']),
+  getProjectTemplateById,
+)
 router.post('/project-templates', authMiddleware.requirePermission('project.template.manage'), createProjectTemplate)
 router.put('/project-templates/:id', authMiddleware.requirePermission('project.template.manage'), updateProjectTemplate)
 router.get('/notification-configs', authMiddleware.requirePermission('notification.config.view'), listNotificationConfigs)
@@ -248,6 +257,11 @@ router.get('/logs/:id/daily-plans', authMiddleware.requirePermission('worklog.vi
 router.post('/logs/:id/daily-plan', authMiddleware.requirePermission('worklog.update.self'), upsertLogDailyPlan)
 router.get('/logs/:id/daily-entries', authMiddleware.requirePermission('worklog.view.self'), listLogDailyEntries)
 router.post('/logs/:id/daily-entries', authMiddleware.requirePermission('worklog.update.self'), createLogDailyEntry)
+router.put(
+  '/logs/:id/daily-entries/:entryId',
+  authMiddleware.requirePermission('worklog.update.self'),
+  updateLogDailyEntry,
+)
 router.put(
   '/logs/:id/owner-estimate',
   authMiddleware.requireAnyPermission(['workbench.view.owner', 'workbench.view.self']),

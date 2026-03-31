@@ -1615,6 +1615,288 @@ async function ensureNextNodeTask(conn, nextNode, demandId, operatorUserId, sour
   })
 }
 
+function normalizeNodeMatchName(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, '')
+    .toUpperCase()
+    .slice(0, 128)
+}
+
+async function createWorkflowInstanceSkeleton(
+  conn,
+  {
+    demandId,
+    operatorUserId = null,
+    forceRebuildTemplateFromDict = false,
+  } = {},
+) {
+  const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
+  const normalizedOperatorUserId = toPositiveInt(operatorUserId)
+  const runtimeTemplate = await resolveDemandWorkflowTemplate(conn, normalizedDemandId, {
+    createdBy: normalizedOperatorUserId,
+    forceRebuild: Boolean(forceRebuildTemplateFromDict),
+  })
+
+  if (!Array.isArray(runtimeTemplate?.nodes) || runtimeTemplate.nodes.length === 0) {
+    const err = new Error('workflow_template_has_no_nodes')
+    err.code = 'WORKFLOW_TEMPLATE_HAS_NO_NODES'
+    throw err
+  }
+
+  const entryNode = runtimeTemplate.nodeMap.get(runtimeTemplate.entry_node_key) || runtimeTemplate.nodes[0]
+  const [instanceResult] = await conn.query(
+    `INSERT INTO wf_process_instances (
+       biz_type,
+       biz_id,
+       template_id,
+       template_version,
+       status,
+       current_node_key,
+       started_at,
+       created_by
+     ) VALUES (?, ?, ?, ?, ?, ?, NOW(), ?)`,
+    [
+      DEMAND_BIZ_TYPE,
+      normalizedDemandId,
+      runtimeTemplate.template_id,
+      runtimeTemplate.source === 'PROJECT_TEMPLATE' ? 0 : Number(runtimeTemplate.schema_version || 1),
+      INSTANCE_STATUS.IN_PROGRESS,
+      entryNode?.node_key || null,
+      normalizedOperatorUserId,
+    ],
+  )
+  const instanceId = Number(instanceResult.insertId)
+
+  let firstInstanceNodeId = null
+  const instanceRows = []
+  for (let i = 0; i < runtimeTemplate.nodes.length; i += 1) {
+    const node = runtimeTemplate.nodes[i]
+
+    const [result] = await conn.query(
+      `INSERT INTO wf_process_instance_nodes (
+         instance_id,
+         node_key,
+         node_name_snapshot,
+         node_type,
+         phase_key,
+         sort_order,
+         status,
+         assignee_user_id,
+         started_at,
+         completed_at,
+         due_at,
+         remark
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+      [
+        instanceId,
+        node.node_key,
+        node.node_name,
+        node.node_type || 'TASK',
+        node.phase_key || null,
+        Number(node.sort_order || (i + 1) * 10),
+        NODE_STATUS.TODO,
+        null,
+        null,
+        buildInstanceNodeRemark(node),
+      ],
+    )
+
+    const insertedNodeId = Number(result.insertId)
+    if (i === 0) firstInstanceNodeId = insertedNodeId
+    instanceRows.push({
+      id: insertedNodeId,
+      instance_id: instanceId,
+      node_key: node.node_key,
+      node_name_snapshot: node.node_name,
+      node_type: node.node_type || 'TASK',
+      phase_key: node.phase_key || null,
+      sort_order: Number(node.sort_order || (i + 1) * 10),
+      status: NODE_STATUS.TODO,
+      assignee_user_id: null,
+      due_at: null,
+      remark: buildInstanceNodeRemark(node),
+    })
+  }
+
+  return {
+    instance: {
+      id: instanceId,
+      biz_id: normalizedDemandId,
+      current_node_key: entryNode?.node_key || null,
+    },
+    instanceId,
+    runtimeTemplate,
+    entryNode,
+    firstInstanceNodeId,
+    instanceRows,
+  }
+}
+
+async function listInstanceNodesForReplace(conn, instanceId) {
+  const [rows] = await conn.query(
+    `SELECT
+       id,
+       instance_id,
+       node_key,
+       node_name_snapshot,
+       node_type,
+       phase_key,
+       sort_order,
+       status,
+       assignee_user_id,
+       owner_estimated_hours,
+       personal_estimated_hours,
+       actual_hours,
+       DATE_FORMAT(started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
+       DATE_FORMAT(completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,
+       DATE_FORMAT(due_at, '%Y-%m-%d') AS due_at,
+       DATE_FORMAT(planned_start_time, '%Y-%m-%d %H:%i:%s') AS planned_start_time,
+       DATE_FORMAT(planned_end_time, '%Y-%m-%d %H:%i:%s') AS planned_end_time,
+       DATE_FORMAT(actual_start_time, '%Y-%m-%d %H:%i:%s') AS actual_start_time,
+       DATE_FORMAT(actual_end_time, '%Y-%m-%d %H:%i:%s') AS actual_end_time,
+       reject_reason
+     FROM wf_process_instance_nodes
+     WHERE instance_id = ?
+     ORDER BY sort_order ASC, id ASC
+     FOR UPDATE`,
+    [instanceId],
+  )
+  return rows || []
+}
+
+function findReplacementTargetNode(sourceNode, targetRows, usedNodeKeys = new Set()) {
+  const candidates = (Array.isArray(targetRows) ? targetRows : []).filter(
+    (item) => item?.node_key && !usedNodeKeys.has(item.node_key) && !isSystemNodeType(item.node_type),
+  )
+  if (candidates.length === 0) return null
+
+  const sourceNodeKey = normalizeTemplateNodeKey(sourceNode?.node_key)
+  if (sourceNodeKey) {
+    const exactMatch = candidates.find((item) => normalizeTemplateNodeKey(item?.node_key) === sourceNodeKey)
+    if (exactMatch) {
+      return { target: exactMatch, matchType: 'NODE_KEY' }
+    }
+  }
+
+  const sourcePhaseKey = normalizeText(sourceNode?.phase_key, 64).toUpperCase()
+  const sourceNodeName = normalizeNodeMatchName(sourceNode?.node_name_snapshot)
+
+  if (sourcePhaseKey && sourceNodeName) {
+    const phaseAndNameMatches = candidates.filter(
+      (item) =>
+        normalizeText(item?.phase_key, 64).toUpperCase() === sourcePhaseKey &&
+        normalizeNodeMatchName(item?.node_name_snapshot) === sourceNodeName,
+    )
+    if (phaseAndNameMatches.length === 1) {
+      return { target: phaseAndNameMatches[0], matchType: 'PHASE_AND_NAME' }
+    }
+  }
+
+  if (sourceNodeName) {
+    const nameOnlyMatches = candidates.filter(
+      (item) => normalizeNodeMatchName(item?.node_name_snapshot) === sourceNodeName,
+    )
+    if (nameOnlyMatches.length === 1) {
+      return { target: nameOnlyMatches[0], matchType: 'NAME_ONLY' }
+    }
+  }
+
+  return null
+}
+
+function canReplayHistoricalDoneNode(nodeKey, graph, completedNodeKeys, visiting = new Set()) {
+  const normalizedNodeKey = normalizeTemplateNodeKey(nodeKey)
+  if (!normalizedNodeKey || !graph?.incomingMap) return false
+  if (visiting.has(normalizedNodeKey)) return false
+
+  const incomingKeys = graph.incomingMap.get(normalizedNodeKey) || []
+  if (incomingKeys.length === 0) return true
+
+  visiting.add(normalizedNodeKey)
+  const ready = incomingKeys.every((incomingKey) => {
+    const incomingNode = graph.nodeMap.get(incomingKey)
+    if (!incomingNode) return true
+    if (isSystemNodeType(incomingNode.node_type)) {
+      return canReplayHistoricalDoneNode(incomingKey, graph, completedNodeKeys, visiting)
+    }
+    return completedNodeKeys.has(incomingKey)
+  })
+  visiting.delete(normalizedNodeKey)
+  return ready
+}
+
+async function applyHistoricalDoneNodeState(conn, targetNode, sourceNode) {
+  const normalizedAssigneeUserId = toPositiveInt(sourceNode?.assignee_user_id)
+  const startedAt = normalizeDateTime(sourceNode?.started_at) || normalizeDateTime(sourceNode?.actual_start_time) || null
+  const completedAt = normalizeDateTime(sourceNode?.completed_at) || normalizeDateTime(sourceNode?.actual_end_time) || startedAt || null
+  const dueAt = normalizeDate(sourceNode?.due_at)
+  const plannedStartTime = normalizeDateTime(sourceNode?.planned_start_time)
+  const plannedEndTime = normalizeDateTime(sourceNode?.planned_end_time)
+  const actualStartTime = normalizeDateTime(sourceNode?.actual_start_time)
+  const actualEndTime = normalizeDateTime(sourceNode?.actual_end_time)
+  const ownerEstimatedHours = normalizeHours(sourceNode?.owner_estimated_hours)
+  const personalEstimatedHours = normalizeHours(sourceNode?.personal_estimated_hours)
+  const actualHours = normalizeHours(sourceNode?.actual_hours)
+  const rejectReason = normalizeText(sourceNode?.reject_reason, 2000) || null
+
+  await conn.query(
+    `UPDATE wf_process_instance_nodes
+     SET status = ?,
+         assignee_user_id = ?,
+         started_at = ?,
+         completed_at = ?,
+         due_at = ?,
+         owner_estimated_hours = ?,
+         personal_estimated_hours = ?,
+         actual_hours = ?,
+         planned_start_time = ?,
+         planned_end_time = ?,
+         actual_start_time = ?,
+         actual_end_time = ?,
+         reject_reason = ?,
+         updated_at = NOW()
+     WHERE id = ?`,
+    [
+      NODE_STATUS.DONE,
+      normalizedAssigneeUserId,
+      startedAt,
+      completedAt || startedAt || null,
+      dueAt,
+      ownerEstimatedHours,
+      personalEstimatedHours,
+      actualHours,
+      plannedStartTime,
+      plannedEndTime,
+      actualStartTime,
+      actualEndTime,
+      rejectReason,
+      targetNode.id,
+    ],
+  )
+
+  targetNode.status = NODE_STATUS.DONE
+  targetNode.assignee_user_id = normalizedAssigneeUserId
+  targetNode.due_at = dueAt
+}
+
+async function activateReadyWorkflowNodes(conn, { instance, instanceRows, graph, demandId, operatorUserId = null, taskSource = 'AUTO_NEXT' }) {
+  const orderedNodes = [...(graph?.nodes || [])].sort(
+    (a, b) => Number(a?.sort_order || 0) - Number(b?.sort_order || 0),
+  )
+  for (const node of orderedNodes) {
+    await activateGraphNode(conn, {
+      instance,
+      instanceRows,
+      graph,
+      nodeKey: node.node_key,
+      demandId,
+      operatorUserId,
+      taskSource,
+    })
+  }
+}
+
 const Workflow = {
   TRACK_ITEM_TYPE_KEYS,
   INSTANCE_STATUS,
@@ -1648,94 +1930,21 @@ const Workflow = {
       const normalizedOwnerUserId = toPositiveInt(ownerUserId)
       const normalizedOperatorUserId = toPositiveInt(operatorUserId)
       const shouldAutoAssignCurrentNode = Boolean(autoAssignCurrentNode) && Boolean(normalizedOwnerUserId)
-      const runtimeTemplate = await resolveDemandWorkflowTemplate(conn, normalizedDemandId, {
-        createdBy: normalizedOperatorUserId,
-        forceRebuild: Boolean(forceRebuildTemplateFromDict),
+      const {
+        instance,
+        instanceId,
+        runtimeTemplate,
+        entryNode,
+        firstInstanceNodeId,
+        instanceRows,
+      } = await createWorkflowInstanceSkeleton(conn, {
+        demandId: normalizedDemandId,
+        operatorUserId: normalizedOperatorUserId,
+        forceRebuildTemplateFromDict,
       })
 
-      if (!Array.isArray(runtimeTemplate?.nodes) || runtimeTemplate.nodes.length === 0) {
-        const err = new Error('workflow_template_has_no_nodes')
-        err.code = 'WORKFLOW_TEMPLATE_HAS_NO_NODES'
-        throw err
-      }
-
-      const entryNode = runtimeTemplate.nodeMap.get(runtimeTemplate.entry_node_key) || runtimeTemplate.nodes[0]
-      const [instanceResult] = await conn.query(
-        `INSERT INTO wf_process_instances (
-           biz_type,
-           biz_id,
-           template_id,
-           template_version,
-           status,
-           current_node_key,
-           started_at,
-           created_by
-         ) VALUES (?, ?, ?, ?, ?, ?, NOW(), ?)`,
-        [
-          DEMAND_BIZ_TYPE,
-          normalizedDemandId,
-          runtimeTemplate.template_id,
-          runtimeTemplate.source === 'PROJECT_TEMPLATE' ? 0 : Number(runtimeTemplate.schema_version || 1),
-          INSTANCE_STATUS.IN_PROGRESS,
-          entryNode?.node_key || null,
-          normalizedOperatorUserId,
-        ],
-      )
-      const instanceId = Number(instanceResult.insertId)
-
-      let firstInstanceNodeId = null
-      const instanceRows = []
-      for (let i = 0; i < runtimeTemplate.nodes.length; i += 1) {
-        const node = runtimeTemplate.nodes[i]
-
-        const [result] = await conn.query(
-          `INSERT INTO wf_process_instance_nodes (
-             instance_id,
-             node_key,
-             node_name_snapshot,
-             node_type,
-             phase_key,
-             sort_order,
-             status,
-             assignee_user_id,
-           started_at,
-           completed_at,
-           due_at,
-           remark
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
-          [
-            instanceId,
-            node.node_key,
-            node.node_name,
-            node.node_type || 'TASK',
-            node.phase_key || null,
-            Number(node.sort_order || (i + 1) * 10),
-            NODE_STATUS.TODO,
-            null,
-            null,
-            buildInstanceNodeRemark(node),
-          ],
-        )
-
-        const insertedNodeId = Number(result.insertId)
-        if (i === 0) firstInstanceNodeId = insertedNodeId
-        instanceRows.push({
-          id: insertedNodeId,
-          instance_id: instanceId,
-          node_key: node.node_key,
-          node_name_snapshot: node.node_name,
-          node_type: node.node_type || 'TASK',
-          phase_key: node.phase_key || null,
-          sort_order: Number(node.sort_order || (i + 1) * 10),
-          status: NODE_STATUS.TODO,
-          assignee_user_id: null,
-          due_at: null,
-          remark: buildInstanceNodeRemark(node),
-        })
-      }
-
       await activateGraphNode(conn, {
-        instance: { id: instanceId },
+        instance,
         instanceRows,
         graph: runtimeTemplate,
         nodeKey: entryNode?.node_key,
@@ -1782,7 +1991,7 @@ const Workflow = {
 
       const progressState = await refreshInstanceProgressState(
         conn,
-        { id: instanceId },
+        instance,
         normalizedDemandId,
         instanceRows,
       )
@@ -1900,22 +2109,10 @@ const Workflow = {
       }
       replacedInstanceId = Number(existing.id)
 
-      const [nodeRows] = await conn.query(
-        `SELECT id, node_key, status
-         FROM wf_process_instance_nodes
-         WHERE instance_id = ?
-         ORDER BY sort_order ASC, id ASC
-         FOR UPDATE`,
-        [replacedInstanceId],
+      const oldNodeRows = await listInstanceNodesForReplace(conn, replacedInstanceId)
+      const historicalDoneNodes = oldNodeRows.filter(
+        (row) => row.status === NODE_STATUS.DONE && !isSystemNodeType(row.node_type),
       )
-
-      const doneNodeCount = (nodeRows || []).filter((row) => row.status === NODE_STATUS.DONE).length
-      if (doneNodeCount > 0) {
-        const err = new Error('workflow_replace_unsafe')
-        err.code = 'WORKFLOW_REPLACE_UNSAFE'
-        err.data = { done_node_count: doneNodeCount }
-        throw err
-      }
 
       await conn.query(
         `UPDATE wf_process_tasks
@@ -1952,25 +2149,140 @@ const Workflow = {
         comment: '强制替换为最新流程模板',
       })
 
+      const {
+        instance: nextInstance,
+        instanceId: nextInstanceId,
+        runtimeTemplate,
+        entryNode,
+        firstInstanceNodeId,
+        instanceRows: nextInstanceRows,
+      } = await createWorkflowInstanceSkeleton(conn, {
+        demandId: normalizedDemandId,
+        operatorUserId: normalizedOperatorUserId,
+        forceRebuildTemplateFromDict: true,
+      })
+
+      const targetRows = nextInstanceRows.filter((row) => !isSystemNodeType(row.node_type))
+      const usedTargetNodeKeys = new Set()
+      const matchedHistoricalDoneNodes = []
+      const unmatchedHistoricalDoneNodes = []
+
+      historicalDoneNodes.forEach((sourceNode) => {
+        const matched = findReplacementTargetNode(sourceNode, targetRows, usedTargetNodeKeys)
+        if (!matched?.target?.node_key) {
+          unmatchedHistoricalDoneNodes.push({
+            source_node_key: normalizeTemplateNodeKey(sourceNode?.node_key) || null,
+            source_node_name: sourceNode?.node_name_snapshot || sourceNode?.phase_key || '未命名节点',
+            phase_key: normalizeText(sourceNode?.phase_key, 64).toUpperCase() || null,
+            reason: 'NO_CONFIDENT_MATCH',
+          })
+          return
+        }
+        usedTargetNodeKeys.add(matched.target.node_key)
+        matchedHistoricalDoneNodes.push({
+          source: sourceNode,
+          target: matched.target,
+          match_type: matched.matchType,
+        })
+      })
+
+      const nextGraph = buildWorkflowGraphFromInstanceRows(nextInstanceRows)
+      const pendingDoneNodes = matchedHistoricalDoneNodes
+        .slice()
+        .sort((a, b) => Number(a?.target?.sort_order || 0) - Number(b?.target?.sort_order || 0))
+      const migratedDoneNodeKeys = new Set()
+      const migratedDoneNodes = []
+
+      let advanced = true
+      while (advanced && pendingDoneNodes.length > 0) {
+        advanced = false
+        for (let index = 0; index < pendingDoneNodes.length; index += 1) {
+          const candidate = pendingDoneNodes[index]
+          if (!candidate?.target?.node_key) continue
+          if (!canReplayHistoricalDoneNode(candidate.target.node_key, nextGraph, migratedDoneNodeKeys)) {
+            continue
+          }
+          await applyHistoricalDoneNodeState(conn, candidate.target, candidate.source)
+          migratedDoneNodeKeys.add(candidate.target.node_key)
+          migratedDoneNodes.push(candidate)
+          pendingDoneNodes.splice(index, 1)
+          index -= 1
+          advanced = true
+        }
+      }
+
+      pendingDoneNodes.forEach((item) => {
+        unmatchedHistoricalDoneNodes.push({
+          source_node_key: normalizeTemplateNodeKey(item?.source?.node_key) || null,
+          source_node_name: item?.source?.node_name_snapshot || item?.source?.phase_key || '未命名节点',
+          target_node_key: item?.target?.node_key || null,
+          target_node_name: item?.target?.node_name_snapshot || item?.target?.phase_key || '未命名节点',
+          phase_key: normalizeText(item?.source?.phase_key, 64).toUpperCase() || null,
+          reason: 'DEPENDENCY_BLOCKED',
+        })
+      })
+
+      await activateReadyWorkflowNodes(conn, {
+        instance: nextInstance,
+        instanceRows: nextInstanceRows,
+        graph: runtimeTemplate,
+        demandId: normalizedDemandId,
+        operatorUserId: normalizedOperatorUserId,
+        taskSource: 'TEMPLATE_REPLACE',
+      })
+
+      const progressState = await refreshInstanceProgressState(
+        conn,
+        nextInstance,
+        normalizedDemandId,
+        nextInstanceRows,
+      )
+
+      if (Boolean(autoAssignCurrentNode)) {
+        // 保持与旧逻辑兼容，当前接口目前默认不自动指派
+      }
+
+      await insertAction(conn, {
+        instanceId: nextInstanceId,
+        instanceNodeId: firstInstanceNodeId,
+        actionType: 'PROCESS_INIT',
+        fromNodeKey: null,
+        toNodeKey: progressState.currentNodeKey || entryNode?.node_key || null,
+        operatorUserId: normalizedOperatorUserId,
+        comment: '需求流程已按最新模板重建',
+      })
+
+      await insertAction(conn, {
+        instanceId: nextInstanceId,
+        instanceNodeId: null,
+        actionType: 'REPLACE_TEMPLATE',
+        fromNodeKey: normalizeText(existing.current_node_key, 64) || null,
+        toNodeKey: progressState.currentNodeKey || null,
+        operatorUserId: normalizedOperatorUserId,
+        comment: `已替换为最新流程模板，继承 ${migratedDoneNodes.length} 个已完成节点`,
+      })
+
       await conn.commit()
+
+      const nextWorkflow = await this.getDemandWorkflowByInstanceId(nextInstanceId)
+      return {
+        replaced_instance_id: replacedInstanceId,
+        workflow: nextWorkflow,
+        migration_summary: {
+          historical_node_count: oldNodeRows.length,
+          new_workflow_node_count: nextInstanceRows.length,
+          historical_done_node_count: historicalDoneNodes.length,
+          matched_done_node_count: matchedHistoricalDoneNodes.length,
+          migrated_done_node_count: migratedDoneNodes.length,
+          unmatched_done_node_count: unmatchedHistoricalDoneNodes.length,
+          unmatched_done_nodes: unmatchedHistoricalDoneNodes.slice(0, 20),
+        },
+      }
     } catch (err) {
       await conn.rollback()
       throw wrapWorkflowError(err)
     } finally {
       conn.release()
-    }
-
-    const nextWorkflow = await this.initDemandWorkflow({
-      demandId: normalizedDemandId,
-      ownerUserId: null,
-      operatorUserId: normalizedOperatorUserId,
-      autoAssignCurrentNode,
-      forceRebuildTemplateFromDict: true,
-    })
-
-    return {
-      replaced_instance_id: replacedInstanceId,
-      workflow: nextWorkflow,
     }
   },
 

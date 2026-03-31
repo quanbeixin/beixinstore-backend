@@ -801,6 +801,10 @@ const listDemands = async (req, res) => {
   const updatedStartDate = normalizeDate(updatedStartDateRaw)
   const updatedEndDate = normalizeDate(updatedEndDateRaw)
   const mine = toBool(req.query.mine, false)
+  const completedOnly = toBool(req.query.completed_only, false)
+  const excludeCompleted = toBool(req.query.exclude_completed, false)
+  const cancelledOnly = toBool(req.query.cancelled_only, false)
+  const excludeCancelled = toBool(req.query.exclude_cancelled, false)
 
   if (businessGroupCode === '') {
     return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
@@ -834,7 +838,7 @@ const listDemands = async (req, res) => {
   }
 
   try {
-    const { rows, total, allTotal, groupCounts } = await Work.listDemands({
+    const { rows, total, allTotal, completedTotal, cancelledTotal, groupCounts } = await Work.listDemands({
       page,
       pageSize,
       keyword,
@@ -846,6 +850,10 @@ const listDemands = async (req, res) => {
       updatedStartDate: updatedStartDate || '',
       updatedEndDate: updatedEndDate || '',
       mineUserId: mine ? req.user.id : null,
+      completedOnly,
+      cancelledOnly,
+      excludeCompleted: completedOnly ? false : excludeCompleted,
+      excludeCancelled: completedOnly || cancelledOnly ? false : excludeCancelled,
     })
 
     return res.json({
@@ -854,6 +862,8 @@ const listDemands = async (req, res) => {
         list: rows,
         total,
         all_total: allTotal,
+        completed_total: Number(completedTotal || 0),
+        cancelled_total: Number(cancelledTotal || 0),
         group_counts: groupCounts || [],
         page,
         pageSize,
@@ -2672,6 +2682,75 @@ const createLogDailyEntry = async (req, res) => {
   }
 }
 
+const updateLogDailyEntry = async (req, res) => {
+  const id = toPositiveInt(req.params.id)
+  const entryId = toPositiveInt(req.params.entryId)
+  if (!id) {
+    return res.status(400).json({ success: false, message: '工作记录 ID 无效' })
+  }
+  if (!entryId) {
+    return res.status(400).json({ success: false, message: '日投入记录 ID 无效' })
+  }
+
+  const entryDateRaw = req.body.entry_date
+  const entryDate = normalizeDate(entryDateRaw) || formatDate(new Date())
+  if (
+    entryDateRaw !== undefined &&
+    entryDateRaw !== null &&
+    String(entryDateRaw).trim() !== '' &&
+    !normalizeDate(entryDateRaw)
+  ) {
+    return res.status(400).json({ success: false, message: 'entry_date 格式错误，需为 YYYY-MM-DD' })
+  }
+
+  const actualHours = normalizeHours(req.body.actual_hours, null)
+  if (actualHours === null || actualHours < 0) {
+    return res.status(400).json({ success: false, message: 'actual_hours 不能小于 0' })
+  }
+  const description = normalizeText(req.body.description, 2000)
+
+  try {
+    const existing = await Work.findLogById(id)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '工作记录不存在' })
+    }
+    if (Number(existing.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可调整自己的事项投入记录' })
+    }
+
+    const savedEntryId = await Work.updateDailyEntryForLog(id, entryId, {
+      userId: req.user.id,
+      entryDate,
+      actualHours,
+      description,
+      createdBy: req.user.id,
+    })
+    const rows = await Work.listDailyEntriesForLog(id, {
+      startDate: entryDate,
+      endDate: entryDate,
+    })
+    await refreshDemandHourSummaryQuietly(existing.demand_id)
+    const updated = rows.find((item) => Number(item.id) === Number(savedEntryId)) || rows[0] || null
+    return res.json({
+      success: true,
+      message: '日投入记录已更新',
+      data: updated,
+    })
+  } catch (err) {
+    if (err?.code === 'WORK_LOG_DAILY_ENTRY_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '日投入记录不存在' })
+    }
+    if (err?.code === 'WORK_LOG_DAILY_ENTRY_FORBIDDEN') {
+      return res.status(403).json({ success: false, message: '仅可调整自己的事项投入记录' })
+    }
+    if (err?.code === 'WORK_LOG_DAILY_ENTRY_DATE_CONFLICT') {
+      return res.status(400).json({ success: false, message: '目标日期已存在投入记录，请直接编辑该日期记录' })
+    }
+    console.error('更新事项日投入失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const updateLogOwnerEstimate = async (req, res) => {
   const id = toPositiveInt(req.params.id)
   if (!id) {
@@ -3977,6 +4056,7 @@ module.exports = {
   upsertLogDailyPlan,
   listLogDailyEntries,
   createLogDailyEntry,
+  updateLogDailyEntry,
   updateLogOwnerEstimate,
   getInsightFilterOptions,
   getDepartmentEfficiencyRanking,

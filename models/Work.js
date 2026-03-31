@@ -1,4 +1,8 @@
 ﻿const pool = require('../utils/db')
+const {
+  normalizeTemplateGraph,
+  filterTemplateGraphByParticipantRoles,
+} = require('../utils/projectTemplateWorkflowGraph')
 
 const DEMAND_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED']
 const DEMAND_PRIORITIES = ['P0', 'P1', 'P2', 'P3']
@@ -195,6 +199,50 @@ function parseProjectTemplateNodeConfig(raw) {
     return parsed && typeof parsed === 'object' ? parsed : []
   } catch (err) {
     return []
+  }
+}
+
+function buildPhaseNameMap(rows) {
+  const map = new Map()
+  ;(Array.isArray(rows) ? rows : []).forEach((row) => {
+    const key = String(row?.item_code || '').trim().toUpperCase()
+    if (!key) return
+    map.set(key, String(row?.item_name || '').trim() || key)
+  })
+  return map
+}
+
+function resolveDemandCurrentPhaseFromTemplate(row, phaseNameMap) {
+  const currentNodeKey = String(row?.current_node_key || '').trim().toUpperCase()
+  if (!currentNodeKey) {
+    return {
+      current_phase_key: '',
+      current_phase_name: '-',
+    }
+  }
+
+  const hasConfiguredParticipantRoles =
+    row?.participant_roles_json !== null &&
+    row?.participant_roles_json !== undefined &&
+    String(row?.participant_roles_json || '').trim() !== ''
+
+  const templateGraph = hasConfiguredParticipantRoles
+    ? filterTemplateGraphByParticipantRoles(row?.template_node_config, normalizeParticipantRoles(row?.participant_roles_json))
+    : normalizeTemplateGraph(row?.template_node_config)
+
+  const templateNodes = Array.isArray(templateGraph?.nodes) ? templateGraph.nodes : []
+  const matchedNode = templateNodes.find((item) => String(item?.node_key || '').trim().toUpperCase() === currentNodeKey)
+  const phaseKey = String(matchedNode?.phase_key || '').trim().toUpperCase()
+  if (!phaseKey) {
+    return {
+      current_phase_key: '',
+      current_phase_name: '-',
+    }
+  }
+
+  return {
+    current_phase_key: phaseKey,
+    current_phase_name: phaseNameMap.get(phaseKey) || '-',
   }
 }
 
@@ -490,6 +538,21 @@ function isWeekendDate(dateText) {
   if (Number.isNaN(date.getTime())) return false
   const weekDay = date.getDay()
   return weekDay === 0 || weekDay === 6
+}
+
+function getPreviousWorkdayDate(dateText) {
+  const normalized = normalizeDateOnly(dateText)
+  if (!normalized) return ''
+  const date = new Date(`${normalized}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return ''
+
+  let guard = 0
+  do {
+    date.setDate(date.getDate() - 1)
+    guard += 1
+  } while (guard < 7 && isWeekendDate(formatLocalDateOnly(date)))
+
+  return formatLocalDateOnly(date)
 }
 
 function buildWorkDateRange(startDate, endDate, { fallbackToStart = true } = {}) {
@@ -1455,6 +1518,10 @@ const Work = {
     updatedStartDate = '',
     updatedEndDate = '',
     mineUserId = null,
+    completedOnly = false,
+    excludeCompleted = false,
+    cancelledOnly = false,
+    excludeCancelled = false,
   } = {}) {
     const offset = (page - 1) * pageSize
     const baseConditions = ['1 = 1']
@@ -1501,14 +1568,40 @@ const Work = {
 
     const conditions = [...baseConditions]
     const params = [...baseParams]
+
+    if (completedOnly) {
+      conditions.push("d.status = 'DONE'")
+    } else if (cancelledOnly) {
+      conditions.push("d.status = 'CANCELLED'")
+    } else {
+      if (excludeCompleted) {
+        conditions.push("d.status <> 'DONE'")
+      }
+      if (excludeCancelled) {
+        conditions.push("d.status <> 'CANCELLED'")
+      }
+    }
+
     if (businessGroupCode) {
       conditions.push('d.business_group_code = ?')
       params.push(businessGroupCode)
     }
 
-    const baseWhereSql = baseConditions.join(' AND ')
+    const activeConditions = [...baseConditions, "d.status <> 'DONE'", "d.status <> 'CANCELLED'"]
+    const activeWhereSql = activeConditions.join(' AND ')
     const whereSql = conditions.join(' AND ')
     const normalizedPriorityOrder = String(priorityOrder || '').trim().toLowerCase() === 'desc' ? 'DESC' : 'ASC'
+    const orderSql = priorityOrder
+      ? `ORDER BY
+        CASE d.priority
+          WHEN 'P0' THEN 0
+          WHEN 'P1' THEN 1
+          WHEN 'P2' THEN 2
+          ELSE 3
+        END ${normalizedPriorityOrder},
+        d.created_at DESC,
+        d.id DESC`
+      : `ORDER BY d.created_at DESC, d.id DESC`
     const listSql = `
       SELECT
         d.id,
@@ -1519,6 +1612,7 @@ const Work = {
         d.template_id,
         d.participant_roles_json,
         pt.name AS template_name,
+        pt.node_config AS template_node_config,
         d.project_manager,
         COALESCE(NULLIF(pm.real_name, ''), pm.username) AS project_manager_name,
         d.health_status,
@@ -1530,6 +1624,7 @@ const Work = {
         d.business_group_code,
         bg.item_name AS business_group_name,
         DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
+        ci.current_node_key,
         ci.current_phase_key,
         ci.current_phase_name,
         d.status,
@@ -1555,8 +1650,9 @@ const Work = {
       LEFT JOIN (
         SELECT
           x.biz_id AS demand_id,
-          x.current_node_key AS current_phase_key,
-          COALESCE(NULLIF(n.node_name_snapshot, ''), pdi_phase.item_name, pdi_node.item_name, x.current_node_key) AS current_phase_name
+          x.current_node_key,
+          COALESCE(NULLIF(n.phase_key, ''), '') AS current_phase_key,
+          COALESCE(pdi_phase.item_name, NULLIF(pdi_node.item_name, ''), '-') AS current_phase_name
         FROM wf_process_instances x
         LEFT JOIN wf_process_instance_nodes n
           ON n.instance_id = x.id
@@ -1601,14 +1697,7 @@ const Work = {
         ) l2 ON l1.id = l2.max_id
       ) lr ON lr.demand_id = d.id
       WHERE ${whereSql}
-      ORDER BY
-        CASE d.priority
-          WHEN 'P0' THEN 0
-          WHEN 'P1' THEN 1
-          WHEN 'P2' THEN 2
-          ELSE 3
-        END ${normalizedPriorityOrder},
-        d.updated_at DESC
+      ${orderSql}
       LIMIT ? OFFSET ?`
 
     const [rows] = await pool.query(listSql, [...params, pageSize, offset])
@@ -1621,7 +1710,21 @@ const Work = {
     const [[{ all_total: allTotal }]] = await pool.query(
       `SELECT COUNT(*) AS all_total
        FROM work_demands d
-       WHERE ${baseWhereSql}`,
+       WHERE ${activeWhereSql}`,
+      baseParams,
+    )
+    const [[{ completed_total: completedTotal }]] = await pool.query(
+      `SELECT COUNT(*) AS completed_total
+       FROM work_demands d
+       WHERE ${baseConditions.join(' AND ')}
+         AND d.status = 'DONE'`,
+      baseParams,
+    )
+    const [[{ cancelled_total: cancelledTotal }]] = await pool.query(
+      `SELECT COUNT(*) AS cancelled_total
+       FROM work_demands d
+       WHERE ${baseConditions.join(' AND ')}
+         AND d.status = 'CANCELLED'`,
       baseParams,
     )
     const [groupCountRows] = await pool.query(
@@ -1633,18 +1736,28 @@ const Work = {
        LEFT JOIN config_dict_items bg
          ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
         AND bg.item_code = d.business_group_code
-       WHERE ${baseWhereSql}
+       WHERE ${activeWhereSql}
        GROUP BY d.business_group_code, bg.item_name
        ORDER BY total DESC, business_group_code ASC`,
       baseParams,
     )
+    const [templatePhaseRows] = await pool.query(
+      `SELECT item_code, item_name
+       FROM config_dict_items
+       WHERE type_key = ?
+         AND enabled = 1`,
+      [PROJECT_TEMPLATE_PHASE_DICT_KEY],
+    )
 
     const todayDate = getBeijingTodayDateString()
+    const templatePhaseNameMap = buildPhaseNameMap(templatePhaseRows)
     const normalizedRows = (rows || []).map((row) => {
-      const { participant_roles_json: _participantRolesJson, ...rest } = row || {}
+      const { participant_roles_json: _participantRolesJson, template_node_config: _templateNodeConfig, ...rest } = row || {}
+      const resolvedCurrentPhase = resolveDemandCurrentPhaseFromTemplate(row, templatePhaseNameMap)
       return withUnifiedWorkStatus(
         {
           ...rest,
+          ...resolvedCurrentPhase,
           participant_roles: normalizeParticipantRoles(row?.participant_roles_json),
         },
         { todayDate },
@@ -1654,6 +1767,8 @@ const Work = {
       rows: normalizedRows,
       total,
       allTotal: Number(allTotal || 0),
+      completedTotal: Number(completedTotal || 0),
+      cancelledTotal: Number(cancelledTotal || 0),
       groupCounts: (groupCountRows || []).map((item) => ({
         business_group_code: item.business_group_code || '',
         business_group_name: item.business_group_name || item.business_group_code || '',
@@ -3167,6 +3282,94 @@ const Work = {
     return entryId
   },
 
+  async updateDailyEntryForLog(
+    logId,
+    entryId,
+    {
+      userId,
+      entryDate,
+      actualHours,
+      description = '',
+      createdBy = null,
+    } = {},
+  ) {
+    const normalizedLogId = toPositiveInt(logId)
+    const normalizedEntryId = toPositiveInt(entryId)
+    const normalizedUserId = toPositiveInt(userId)
+    const normalizedEntryDate = normalizeDateOnly(entryDate)
+    const normalizedActualHours = normalizeDecimal(actualHours, null)
+    if (!normalizedLogId || !normalizedEntryId || !normalizedUserId || !normalizedEntryDate) return null
+    if (normalizedActualHours === null || normalizedActualHours < 0) return null
+
+    const normalizedDescription = String(description || '').trim().slice(0, 2000) || null
+    const normalizedCreatedBy = toPositiveInt(createdBy)
+
+    await ensureDailyTables()
+
+    const [entryRows] = await pool.query(
+      `SELECT id, user_id, DATE_FORMAT(entry_date, '%Y-%m-%d') AS entry_date
+       FROM work_log_daily_entries
+       WHERE id = ?
+         AND log_id = ?
+       LIMIT 1`,
+      [normalizedEntryId, normalizedLogId],
+    )
+    const existingEntry = entryRows?.[0] || null
+    if (!existingEntry) {
+      const err = new Error('WORK_LOG_DAILY_ENTRY_NOT_FOUND')
+      err.code = 'WORK_LOG_DAILY_ENTRY_NOT_FOUND'
+      throw err
+    }
+
+    if (Number(existingEntry.user_id) !== normalizedUserId) {
+      const err = new Error('WORK_LOG_DAILY_ENTRY_FORBIDDEN')
+      err.code = 'WORK_LOG_DAILY_ENTRY_FORBIDDEN'
+      throw err
+    }
+
+    const [conflictRows] = await pool.query(
+      `SELECT id
+       FROM work_log_daily_entries
+       WHERE log_id = ?
+         AND user_id = ?
+         AND entry_date = ?
+         AND id <> ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [normalizedLogId, normalizedUserId, normalizedEntryDate, normalizedEntryId],
+    )
+    if (Array.isArray(conflictRows) && conflictRows.length > 0) {
+      const err = new Error('WORK_LOG_DAILY_ENTRY_DATE_CONFLICT')
+      err.code = 'WORK_LOG_DAILY_ENTRY_DATE_CONFLICT'
+      throw err
+    }
+
+    await pool.query(
+      `UPDATE work_log_daily_entries
+       SET entry_date = ?,
+           actual_hours = ?,
+           description = ?,
+           created_by = ?,
+           created_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [normalizedEntryDate, normalizedActualHours, normalizedDescription, normalizedCreatedBy, normalizedEntryId],
+    )
+
+    await pool.query(
+      `DELETE e_old
+       FROM work_log_daily_entries e_old
+       INNER JOIN work_log_daily_entries e_new
+         ON e_old.log_id = e_new.log_id
+        AND e_old.entry_date = e_new.entry_date
+        AND e_old.id < e_new.id
+       WHERE e_old.log_id = ?`,
+      [normalizedLogId],
+    )
+
+    await this.syncLogActualHoursByDailyEntries(normalizedLogId)
+    return normalizedEntryId
+  },
+
   async listDailyEntriesForLog(logId, { startDate = '', endDate = '' } = {}) {
     const normalizedLogId = toPositiveInt(logId)
     if (!normalizedLogId) return []
@@ -4105,6 +4308,7 @@ const Work = {
         yesterday_due_total: 0,
         yesterday_due_not_done_count: 0,
         yesterday_due_late_done_count: 0,
+        yesterday_due_completed_count: 0,
         in_progress_count: 0,
         done_today_count: 0,
         todo_pending_count: 0,
@@ -4150,6 +4354,11 @@ const Work = {
     await ensureDailyTables()
     const todayPlannedHoursSql = getTodayPlannedHoursSql('CURDATE()')
     const todayActualHoursSql = getTodayActualHoursSql()
+    const [[todayRow]] = await pool.query(
+      `SELECT DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today_date`,
+    )
+    const todayDate = String(todayRow?.today_date || '')
+    const previousWorkdayDate = getPreviousWorkdayDate(todayDate)
 
     const [activeItemRows] = await pool.query(
       `SELECT
@@ -4241,10 +4450,16 @@ const Work = {
          GROUP BY log_id
        ) tt ON tt.log_id = l.id
        WHERE l.user_id IN (?)
-         AND l.expected_completion_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+         AND (
+           l.expected_completion_date = ?
+           OR (
+             COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'
+             AND DATE(COALESCE(l.log_completed_at, l.updated_at)) = ?
+           )
+         )
        ORDER BY l.updated_at DESC, l.id DESC
        LIMIT 2000`,
-      [userIds],
+      [userIds, previousWorkdayDate, previousWorkdayDate],
     )
 
     const [doneTodayRows] = await pool.query(
@@ -4402,18 +4617,11 @@ const Work = {
       .filter((row) => Number(row.today_actual_hours || 0) > 0)
       .map(mapTodayDetailItem)
 
-    const [[todayRow]] = await pool.query(
-      `SELECT
-         DATE_FORMAT(CURDATE(), '%Y-%m-%d') AS today_date,
-         DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 DAY), '%Y-%m-%d') AS yesterday_date`,
-    )
-    const todayDate = String(todayRow?.today_date || '')
-    const yesterdayDate = String(todayRow?.yesterday_date || '')
     const isInProgressAlignmentItem = (item) => {
       const status = String(item?.log_status || '').trim().toUpperCase()
       const expectedStartDate = String(item?.expected_start_date || item?.log_date || '').trim()
       const expectedDate = String(item?.expected_completion_date || '').trim()
-      if (expectedDate && expectedDate === yesterdayDate) return false
+      if (expectedDate && expectedDate === previousWorkdayDate) return false
       const startedTodayOrBefore = Boolean(expectedStartDate) && expectedStartDate <= todayDate
       return (status === 'IN_PROGRESS' || status === 'TODO') && startedTodayOrBefore
     }
@@ -4567,14 +4775,20 @@ const Work = {
       NOT_DONE: 0,
       LATE_DONE: 1,
       ON_TIME: 2,
+      PREV_WORKDAY_DONE: 3,
     }
     const yesterdayDueItems = (yesterdayDueRows || [])
       .map((item) => {
         const mapped = buildFocusItem(item)
         const completedDate = mapped.log_completed_at ? String(mapped.log_completed_at).slice(0, 10) : ''
+        const expectedDate = String(mapped.expected_completion_date || '').trim()
         let checkResult = 'NOT_DONE'
-        if (mapped.log_status === 'DONE') {
-          checkResult = completedDate && completedDate <= yesterdayDate ? 'ON_TIME' : 'LATE_DONE'
+        if (expectedDate === previousWorkdayDate) {
+          if (mapped.log_status === 'DONE') {
+            checkResult = completedDate && completedDate <= previousWorkdayDate ? 'ON_TIME' : 'LATE_DONE'
+          }
+        } else if (mapped.log_status === 'DONE' && completedDate === previousWorkdayDate) {
+          checkResult = 'PREV_WORKDAY_DONE'
         }
         return {
           ...mapped,
@@ -4647,7 +4861,7 @@ const Work = {
         const status = String(item.log_status || '').trim().toUpperCase()
         const expectedStartDate = String(item.expected_start_date || '').trim()
         const expectedDate = String(item.expected_completion_date || '').trim()
-        if (expectedDate && expectedDate === yesterdayDate) return false
+        if (expectedDate && expectedDate === previousWorkdayDate) return false
         if (status !== 'TODO') return false
         return Boolean(expectedStartDate) && expectedStartDate > todayDate
       })
@@ -4673,6 +4887,7 @@ const Work = {
     const focusItems = [...yesterdayDueItems, ...inProgressItems, ...todoPendingItems].slice(0, 200)
     const yesterdayDueNotDoneCount = yesterdayDueItems.filter((item) => item.check_result === 'NOT_DONE').length
     const yesterdayDueLateDoneCount = yesterdayDueItems.filter((item) => item.check_result === 'LATE_DONE').length
+    const yesterdayDueCompletedCount = yesterdayDueItems.filter((item) => item.check_result === 'PREV_WORKDAY_DONE').length
 
     return {
       tabs,
@@ -4707,6 +4922,7 @@ const Work = {
         yesterday_due_total: yesterdayDueItems.length,
         yesterday_due_not_done_count: yesterdayDueNotDoneCount,
         yesterday_due_late_done_count: yesterdayDueLateDoneCount,
+        yesterday_due_completed_count: yesterdayDueCompletedCount,
         in_progress_count: inProgressItems.length,
         done_today_count: doneTodayItems.length,
         todo_pending_count: todoPendingItems.length,
