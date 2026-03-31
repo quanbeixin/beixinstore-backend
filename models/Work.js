@@ -200,6 +200,15 @@ function normalizeDecimal(value, fallback = null) {
   return Number(num.toFixed(1))
 }
 
+function normalizeNullableBooleanAsNumber(value) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value === 'boolean') return value ? 1 : 0
+  const normalized = String(value).trim().toLowerCase()
+  if (TRUE_LIKE_VALUES.has(normalized)) return 1
+  if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') return 0
+  return null
+}
+
 function normalizeTaskSource(value, fallback = 'SELF') {
   const source = String(value || fallback).trim().toUpperCase()
   return WORK_LOG_TASK_SOURCES.includes(source) ? source : fallback
@@ -733,11 +742,12 @@ function isOwnerEstimateTargetRow(
   } = {},
 ) {
   const teamSet = new Set((teamMemberIds || []).map((id) => Number(id)))
-
+  const ownerEstimateRequired = normalizeNullableBooleanAsNumber(row?.owner_estimate_required)
   const issueTypeOwnerEstimateRule = normalizeOwnerEstimateRule(row?.owner_estimate_rule, 'NONE')
+  const effectiveRequired = ownerEstimateRequired === null ? (issueTypeOwnerEstimateRule === 'NONE' ? 0 : 1) : ownerEstimateRequired
   const rowUserId = toPositiveInt(row?.user_id)
 
-  if (issueTypeOwnerEstimateRule === 'NONE') return false
+  if (effectiveRequired !== 1) return false
   if (isSuperAdmin) return true
   if (!rowUserId) return false
   return teamSet.has(rowUserId)
@@ -3041,35 +3051,65 @@ const Work = {
     expectedStartDate = null,
     expectedCompletionDate = null,
     logCompletedAt = null,
+    ownerEstimateRequired = null,
   }) {
-    const [result] = await pool.query(
-      `INSERT INTO work_logs (
-         user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, task_source, demand_id, phase_key, assigned_by_user_id, expected_start_date, expected_completion_date, log_completed_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END)`,
-      [
-        userId,
-        logDate,
-        itemTypeId,
-        description,
-        normalizeDecimal(personalEstimateHours, 0),
-        normalizeDecimal(actualHours, 0),
-        normalizeDecimal(remainingHours, 0),
-        WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
-          ? String(logStatus).toUpperCase()
-          : 'IN_PROGRESS',
-        normalizeTaskSource(taskSource, 'SELF'),
-        demandId,
-        phaseKey,
-        toPositiveInt(assignedByUserId),
-        expectedStartDate,
-        expectedCompletionDate,
-        WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
-          ? String(logStatus).toUpperCase()
-          : 'IN_PROGRESS',
-        logCompletedAt,
-      ],
-    )
-    return result.insertId
+    const normalizedStatus = WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
+      ? String(logStatus).toUpperCase()
+      : 'IN_PROGRESS'
+    const normalizedOwnerEstimateRequired = normalizeNullableBooleanAsNumber(ownerEstimateRequired)
+    try {
+      const [result] = await pool.query(
+        `INSERT INTO work_logs (
+           user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, task_source, demand_id, phase_key, assigned_by_user_id, expected_start_date, expected_completion_date, log_completed_at, owner_estimate_required
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END, ?)`,
+        [
+          userId,
+          logDate,
+          itemTypeId,
+          description,
+          normalizeDecimal(personalEstimateHours, 0),
+          normalizeDecimal(actualHours, 0),
+          normalizeDecimal(remainingHours, 0),
+          normalizedStatus,
+          normalizeTaskSource(taskSource, 'SELF'),
+          demandId,
+          phaseKey,
+          toPositiveInt(assignedByUserId),
+          expectedStartDate,
+          expectedCompletionDate,
+          normalizedStatus,
+          logCompletedAt,
+          normalizedOwnerEstimateRequired,
+        ],
+      )
+      return result.insertId
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+      const [result] = await pool.query(
+        `INSERT INTO work_logs (
+           user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, task_source, demand_id, phase_key, assigned_by_user_id, expected_start_date, expected_completion_date, log_completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END)`,
+        [
+          userId,
+          logDate,
+          itemTypeId,
+          description,
+          normalizeDecimal(personalEstimateHours, 0),
+          normalizeDecimal(actualHours, 0),
+          normalizeDecimal(remainingHours, 0),
+          normalizedStatus,
+          normalizeTaskSource(taskSource, 'SELF'),
+          demandId,
+          phaseKey,
+          toPositiveInt(assignedByUserId),
+          expectedStartDate,
+          expectedCompletionDate,
+          normalizedStatus,
+          logCompletedAt,
+        ],
+      )
+      return result.insertId
+    }
   },
 
   async updateLog(
@@ -3089,54 +3129,103 @@ const Work = {
       expectedStartDate = null,
       expectedCompletionDate = null,
       logCompletedAt = null,
+      ownerEstimateRequired = null,
     },
   ) {
-    const [result] = await pool.query(
-      `UPDATE work_logs
-       SET
-         log_date = ?,
-         item_type_id = ?,
-         description = ?,
-         personal_estimate_hours = ?,
-         actual_hours = ?,
-         remaining_hours = ?,
-         log_status = ?,
-         task_source = ?,
-         demand_id = ?,
-         phase_key = ?,
-         assigned_by_user_id = ?,
-         expected_start_date = ?,
-         expected_completion_date = ?,
-         log_completed_at = CASE
-           WHEN ? = 'DONE' THEN COALESCE(?, log_completed_at, NOW())
-           ELSE ?
-         END
-       WHERE id = ?`,
-      [
-        logDate,
-        itemTypeId,
-        description,
-        normalizeDecimal(personalEstimateHours, 0),
-        normalizeDecimal(actualHours, 0),
-        normalizeDecimal(remainingHours, 0),
-        WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
-          ? String(logStatus).toUpperCase()
-          : 'IN_PROGRESS',
-        normalizeTaskSource(taskSource, 'SELF'),
-        demandId,
-        phaseKey,
-        toPositiveInt(assignedByUserId),
-        expectedStartDate,
-        expectedCompletionDate,
-        WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
-          ? String(logStatus).toUpperCase()
-          : 'IN_PROGRESS',
-        logCompletedAt,
-        logCompletedAt,
-        id,
-      ],
-    )
-    return result.affectedRows
+    const normalizedStatus = WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
+      ? String(logStatus).toUpperCase()
+      : 'IN_PROGRESS'
+    const normalizedOwnerEstimateRequired = normalizeNullableBooleanAsNumber(ownerEstimateRequired)
+    try {
+      const [result] = await pool.query(
+        `UPDATE work_logs
+         SET
+           log_date = ?,
+           item_type_id = ?,
+           description = ?,
+           personal_estimate_hours = ?,
+           actual_hours = ?,
+           remaining_hours = ?,
+           log_status = ?,
+           task_source = ?,
+           demand_id = ?,
+           phase_key = ?,
+           assigned_by_user_id = ?,
+           expected_start_date = ?,
+           expected_completion_date = ?,
+           owner_estimate_required = ?,
+           log_completed_at = CASE
+             WHEN ? = 'DONE' THEN COALESCE(?, log_completed_at, NOW())
+             ELSE ?
+           END
+         WHERE id = ?`,
+        [
+          logDate,
+          itemTypeId,
+          description,
+          normalizeDecimal(personalEstimateHours, 0),
+          normalizeDecimal(actualHours, 0),
+          normalizeDecimal(remainingHours, 0),
+          normalizedStatus,
+          normalizeTaskSource(taskSource, 'SELF'),
+          demandId,
+          phaseKey,
+          toPositiveInt(assignedByUserId),
+          expectedStartDate,
+          expectedCompletionDate,
+          normalizedOwnerEstimateRequired,
+          normalizedStatus,
+          logCompletedAt,
+          logCompletedAt,
+          id,
+        ],
+      )
+      return result.affectedRows
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+      const [result] = await pool.query(
+        `UPDATE work_logs
+         SET
+           log_date = ?,
+           item_type_id = ?,
+           description = ?,
+           personal_estimate_hours = ?,
+           actual_hours = ?,
+           remaining_hours = ?,
+           log_status = ?,
+           task_source = ?,
+           demand_id = ?,
+           phase_key = ?,
+           assigned_by_user_id = ?,
+           expected_start_date = ?,
+           expected_completion_date = ?,
+           log_completed_at = CASE
+             WHEN ? = 'DONE' THEN COALESCE(?, log_completed_at, NOW())
+             ELSE ?
+           END
+         WHERE id = ?`,
+        [
+          logDate,
+          itemTypeId,
+          description,
+          normalizeDecimal(personalEstimateHours, 0),
+          normalizeDecimal(actualHours, 0),
+          normalizeDecimal(remainingHours, 0),
+          normalizedStatus,
+          normalizeTaskSource(taskSource, 'SELF'),
+          demandId,
+          phaseKey,
+          toPositiveInt(assignedByUserId),
+          expectedStartDate,
+          expectedCompletionDate,
+          normalizedStatus,
+          logCompletedAt,
+          logCompletedAt,
+          id,
+        ],
+      )
+      return result.affectedRows
+    }
   },
 
   async seedDailyPlansForLog(
@@ -3654,20 +3743,41 @@ const Work = {
     const teamMemberIds = Array.isArray(scope.team_member_ids) ? scope.team_member_ids : []
     if (teamMemberIds.length === 0) return false
 
-    const [rows] = await pool.query(
-      `SELECT
-         l.id,
-         l.user_id,
-         l.demand_id,
-         l.phase_key,
-         COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule
-       FROM work_logs l
-       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
-       WHERE l.id = ?
-         AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
-       LIMIT 1`,
-      [logId],
-    )
+    let rows = []
+    try {
+      ;[rows] = await pool.query(
+        `SELECT
+           l.id,
+           l.user_id,
+           l.demand_id,
+           l.phase_key,
+           l.owner_estimate_required,
+           COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule
+         FROM work_logs l
+         LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+         WHERE l.id = ?
+           AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
+         LIMIT 1`,
+        [logId],
+      )
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+      ;[rows] = await pool.query(
+        `SELECT
+           l.id,
+           l.user_id,
+           l.demand_id,
+           l.phase_key,
+           NULL AS owner_estimate_required,
+           COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule
+         FROM work_logs l
+         LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+         WHERE l.id = ?
+           AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
+         LIMIT 1`,
+        [logId],
+      )
+    }
     if (rows.length === 0) return false
 
     return isOwnerEstimateTargetRow(rows[0], {
@@ -5346,6 +5456,7 @@ const Work = {
        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+       l.owner_estimate_required,
        COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule
      FROM work_logs l
      INNER JOIN users u ON u.id = l.user_id
@@ -5390,6 +5501,7 @@ const Work = {
        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+       NULL AS owner_estimate_required,
        COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule
      FROM work_logs l
      INNER JOIN users u ON u.id = l.user_id
@@ -5428,6 +5540,7 @@ const Work = {
        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
        DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+       NULL AS owner_estimate_required,
        COALESCE(t.owner_estimate_rule, 'NONE') AS owner_estimate_rule
      FROM work_logs l
      INNER JOIN users u ON u.id = l.user_id

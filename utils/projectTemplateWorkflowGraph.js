@@ -2,6 +2,7 @@ const SYSTEM_NODE_TYPES = {
   PARALLEL_SPLIT: 'PARALLEL_SPLIT',
   PARALLEL_JOIN: 'PARALLEL_JOIN',
 }
+const TRUE_LIKE_VALUES = new Set(['1', 'true', 'yes', 'y', 'on'])
 
 function normalizeText(value, maxLen = 255) {
   return String(value || '').trim().slice(0, maxLen)
@@ -49,6 +50,15 @@ function normalizeSortOrder(value, fallback = 0) {
   return Number.isFinite(num) ? num : fallback
 }
 
+function normalizeOwnerEstimateRequired(value, fallback = true) {
+  if (value === undefined || value === null || value === '') return Boolean(fallback)
+  if (typeof value === 'boolean') return value
+  const normalized = String(value).trim().toLowerCase()
+  if (TRUE_LIKE_VALUES.has(normalized)) return true
+  if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') return false
+  return Boolean(fallback)
+}
+
 function parseConfig(raw) {
   if (!raw) return null
   if (typeof raw === 'object') return raw
@@ -86,6 +96,10 @@ function normalizeLegacyNodes(rows) {
         description: normalizeText(row?.description || row?.meta?.description || '', 1000) || '',
         participant_roles: normalizeParticipantRoles(
           row?.participant_roles || row?.participantRoles || row?.meta?.participant_roles || row?.meta?.participantRoles,
+        ),
+        owner_estimate_required: normalizeOwnerEstimateRequired(
+          row?.owner_estimate_required ?? row?.ownerEstimateRequired ?? row?.meta?.owner_estimate_required ?? row?.meta?.ownerEstimateRequired,
+          true,
         ),
       }
     })
@@ -128,6 +142,10 @@ function normalizeV2Nodes(rows) {
         description: normalizeText(row?.description || row?.meta?.description || '', 1000) || '',
         participant_roles: normalizeParticipantRoles(
           row?.participant_roles || row?.participantRoles || row?.meta?.participant_roles || row?.meta?.participantRoles,
+        ),
+        owner_estimate_required: normalizeOwnerEstimateRequired(
+          row?.owner_estimate_required ?? row?.ownerEstimateRequired ?? row?.meta?.owner_estimate_required ?? row?.meta?.ownerEstimateRequired,
+          true,
         ),
       }
     })

@@ -42,6 +42,7 @@ const TRACK_ITEM_TYPE_KEYS = new Set(
     .filter(Boolean),
 )
 const AUTO_WORKLOG_PREFIX = '[流程待办]'
+const TRUE_LIKE_VALUES = new Set(['1', 'true', 'yes', 'y', 'on'])
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -86,6 +87,24 @@ function normalizeHours(value) {
 function normalizeStatus(status, fallback = '') {
   const value = String(status || '').trim().toUpperCase()
   return value || fallback
+}
+
+function normalizeOwnerEstimateRequired(value, fallback = true) {
+  if (value === undefined || value === null || value === '') return Boolean(fallback)
+  if (typeof value === 'boolean') return value
+  const normalized = String(value).trim().toLowerCase()
+  if (TRUE_LIKE_VALUES.has(normalized)) return true
+  if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') return false
+  return Boolean(fallback)
+}
+
+function normalizeNullableOwnerEstimateRequired(value) {
+  if (value === undefined || value === null || value === '') return null
+  return normalizeOwnerEstimateRequired(value, true) ? 1 : 0
+}
+
+function isMissingColumnError(err) {
+  return err?.code === 'ER_BAD_FIELD_ERROR'
 }
 
 function parseJsonArray(raw, fallback = []) {
@@ -302,6 +321,10 @@ function buildWorkflowGraphFromInstanceRows(rows) {
       parallel_group_key: normalizeText(meta?.parallel_group_key, 64) || null,
       join_rule: normalizeText(meta?.join_rule, 32).toUpperCase() || 'ALL',
       description: normalizeText(meta?.description, 1000) || '',
+      owner_estimate_required: normalizeOwnerEstimateRequired(
+        meta?.owner_estimate_required ?? meta?.ownerEstimateRequired ?? row?.owner_estimate_required,
+        true,
+      ),
       outgoing_keys: Array.isArray(meta?.outgoing_keys)
         ? meta.outgoing_keys.map((item) => normalizeTemplateNodeKey(item)).filter(Boolean)
         : [],
@@ -423,6 +446,10 @@ function normalizeSelectableNode(row, fallbackOrder = 0) {
     phase_key: normalizeText(row?.phase_key, 64).toUpperCase() || null,
     sort_order: Number.isFinite(Number(row?.sort_order)) ? Number(row.sort_order) : fallbackOrder,
     status: normalizeStatus(row?.status, ''),
+    owner_estimate_required: normalizeOwnerEstimateRequired(
+      row?.owner_estimate_required ?? row?.ownerEstimateRequired,
+      true,
+    ),
   }
 }
 
@@ -476,6 +503,7 @@ function buildInstanceNodeRemark(graphNode) {
     join_rule: normalizeText(graphNode?.join_rule, 32).toUpperCase() || 'ALL',
     description: normalizeText(graphNode?.description, 1000) || '',
     participant_roles: normalizeParticipantRoles(graphNode?.participant_roles),
+    owner_estimate_required: normalizeOwnerEstimateRequired(graphNode?.owner_estimate_required, true),
     outgoing_keys: Array.isArray(graphNode?.outgoing_keys) ? graphNode.outgoing_keys : [],
     incoming_keys: Array.isArray(graphNode?.incoming_keys) ? graphNode.incoming_keys : [],
   })
@@ -950,6 +978,7 @@ async function createTaskForNode(
     dueAt = null,
     expectedStartDate = null,
     assignedByUserId = null,
+    ownerEstimateRequired = null,
     createdBy = null,
     sourceType = 'SYSTEM',
     sourceId = null,
@@ -998,6 +1027,7 @@ async function createTaskForNode(
     dueAt: normalizedDueAt,
     expectedStartDate,
     assignedByUserId,
+    ownerEstimateRequired,
   })
 
   return taskId
@@ -1015,6 +1045,7 @@ async function syncActiveNodeTasksForAssignees(
     dueAt = null,
     expectedStartDate = null,
     assignedByUserId = null,
+    ownerEstimateRequired = null,
     createdBy = null,
     sourceType = 'ASSIGN',
     sourceId = null,
@@ -1099,6 +1130,7 @@ async function syncActiveNodeTasksForAssignees(
         dueAt,
         expectedStartDate,
         assignedByUserId,
+        ownerEstimateRequired,
       })
       continue
     }
@@ -1113,6 +1145,7 @@ async function syncActiveNodeTasksForAssignees(
       dueAt,
       expectedStartDate,
       assignedByUserId,
+      ownerEstimateRequired,
       createdBy,
       sourceType,
       sourceId,
@@ -1196,6 +1229,7 @@ async function ensureAutoWorkLogForTask(
     dueAt = null,
     expectedStartDate = null,
     assignedByUserId = null,
+    ownerEstimateRequired = null,
   } = {},
 ) {
   const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
@@ -1204,6 +1238,7 @@ async function ensureAutoWorkLogForTask(
   const normalizedAssignee = toPositiveInt(assigneeUserId)
   const normalizedExpectedStartDate = normalizeDate(expectedStartDate)
   const normalizedAssignedByUserId = toPositiveInt(assignedByUserId)
+  const normalizedOwnerEstimateRequired = normalizeNullableOwnerEstimateRequired(ownerEstimateRequired)
   if (!normalizedDemandId || !normalizedPhaseKey || !normalizedAssignee) return null
 
   const trackType = await resolveTrackItemType(conn)
@@ -1280,6 +1315,7 @@ async function ensureAutoWorkLogForTask(
             existing.id,
           ],
         )
+        await tryUpdateWorkLogOwnerEstimateRequired(conn, existing.id, normalizedOwnerEstimateRequired)
         return Number(existing.id)
       } catch (err) {
         if (err?.code !== 'ER_BAD_FIELD_ERROR') throw err
@@ -1306,6 +1342,7 @@ async function ensureAutoWorkLogForTask(
         existing.id,
       ],
     )
+    await tryUpdateWorkLogOwnerEstimateRequired(conn, existing.id, normalizedOwnerEstimateRequired)
     return Number(existing.id)
   }
 
@@ -1342,6 +1379,11 @@ async function ensureAutoWorkLogForTask(
           dueAt,
         ],
       )
+      await tryUpdateWorkLogOwnerEstimateRequired(
+        conn,
+        insertWithTaskResult.insertId,
+        normalizedOwnerEstimateRequired,
+      )
       return Number(insertWithTaskResult.insertId)
     } catch (err) {
       if (err?.code !== 'ER_BAD_FIELD_ERROR') throw err
@@ -1377,8 +1419,26 @@ async function ensureAutoWorkLogForTask(
       dueAt,
     ],
   )
+  await tryUpdateWorkLogOwnerEstimateRequired(conn, insertResult.insertId, normalizedOwnerEstimateRequired)
 
   return Number(insertResult.insertId)
+}
+
+async function tryUpdateWorkLogOwnerEstimateRequired(conn, logId, ownerEstimateRequired) {
+  const normalizedLogId = toPositiveInt(logId)
+  if (!normalizedLogId) return
+  if (ownerEstimateRequired !== 0 && ownerEstimateRequired !== 1) return
+  try {
+    await conn.query(
+      `UPDATE work_logs
+       SET owner_estimate_required = ?
+       WHERE id = ?`,
+      [ownerEstimateRequired, normalizedLogId],
+    )
+  } catch (err) {
+    if (isMissingColumnError(err)) return
+    throw err
+  }
 }
 
 async function closeAutoWorkLogsForNodeAssignee(
@@ -1590,6 +1650,7 @@ async function findPreviousNodeForUpdate(conn, instanceId, currentSortOrder) {
 
 async function ensureNextNodeTask(conn, nextNode, demandId, operatorUserId, sourceType = 'WORKFLOW') {
   if (!nextNode || !toPositiveInt(nextNode.assignee_user_id)) return null
+  const nextNodeMeta = parseWorkflowGraphMeta(nextNode?.remark)
 
   const [[countRow]] = await conn.query(
     `SELECT COUNT(*) AS total
@@ -1610,6 +1671,10 @@ async function ensureNextNodeTask(conn, nextNode, demandId, operatorUserId, sour
     nodeName: nextNode.node_name_snapshot,
     assigneeUserId: nextNode.assignee_user_id,
     dueAt: nextNode.due_at || null,
+    ownerEstimateRequired: normalizeOwnerEstimateRequired(
+      nextNodeMeta?.owner_estimate_required ?? nextNodeMeta?.ownerEstimateRequired,
+      true,
+    ),
     createdBy: operatorUserId,
     sourceType,
   })
@@ -1971,6 +2036,10 @@ const Workflow = {
             phaseKey: activeRow.phase_key,
             nodeName: activeRow.node_name_snapshot,
             assigneeUserId: normalizedOwnerUserId,
+            ownerEstimateRequired: normalizeOwnerEstimateRequired(
+              parseWorkflowGraphMeta(activeRow?.remark)?.owner_estimate_required,
+              true,
+            ),
             createdBy: normalizedOperatorUserId,
             sourceType: 'SYSTEM_INIT',
             sourceId: activeRow.id,
@@ -2521,6 +2590,7 @@ const Workflow = {
           branch_key: graphNode?.branch_key || null,
           parallel_group_key: graphNode?.parallel_group_key || null,
           join_rule: graphNode?.join_rule || null,
+          owner_estimate_required: normalizeOwnerEstimateRequired(graphNode?.owner_estimate_required, true),
           outgoing_keys: graphNode?.outgoing_keys || [],
           incoming_keys: graphNode?.incoming_keys || [],
         }
@@ -2683,7 +2753,8 @@ const Workflow = {
            DATE_FORMAT(t.due_at, '%Y-%m-%d') AS due_at,
            n.node_key,
            n.phase_key,
-           n.node_name_snapshot
+           n.node_name_snapshot,
+           n.remark AS node_remark
          FROM wf_process_tasks t
          LEFT JOIN wf_process_instance_nodes n ON n.id = t.instance_node_id
          WHERE t.id = ?
@@ -2733,6 +2804,10 @@ const Workflow = {
         dueAt: task.due_at || null,
         expectedStartDate: normalizedExpectedStartDate,
         assignedByUserId: normalizedOperatorUserId,
+        ownerEstimateRequired: normalizeOwnerEstimateRequired(
+          parseWorkflowGraphMeta(task?.node_remark)?.owner_estimate_required,
+          true,
+        ),
       })
 
       await insertAction(conn, {

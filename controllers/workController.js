@@ -57,6 +57,19 @@ function toBool(value, fallback = false) {
   return value === true || value === 'true' || value === 1 || value === '1'
 }
 
+function normalizeOwnerEstimateRequired(value, fallback = true) {
+  if (value === undefined || value === null || value === '') return Boolean(fallback)
+  if (typeof value === 'boolean') return value
+  const normalized = String(value).trim().toLowerCase()
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'y' || normalized === 'on') {
+    return true
+  }
+  if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') {
+    return false
+  }
+  return Boolean(fallback)
+}
+
 function normalizeText(value, maxLen = 500) {
   const text = typeof value === 'string' ? value.trim() : ''
   return text.slice(0, maxLen)
@@ -113,6 +126,7 @@ async function resolveDemandTaskSelection(demandId, phaseKey) {
     return {
       key: normalizePhaseKey(demandNode.node_key),
       source: 'WORKFLOW_NODE',
+      owner_estimate_required: normalizeOwnerEstimateRequired(demandNode.owner_estimate_required, true),
       node: demandNode,
     }
   }
@@ -122,6 +136,7 @@ async function resolveDemandTaskSelection(demandId, phaseKey) {
     return {
       key: normalizePhaseKey(legacyPhase.phase_key),
       source: 'LEGACY_PHASE_DICT',
+      owner_estimate_required: true,
       node: null,
     }
   }
@@ -560,6 +575,7 @@ const listDemandWorkflowNodeOptions = async (req, res) => {
         phase_key: item.phase_key,
         sort_order: item.sort_order,
         status: item.status || '',
+        owner_estimate_required: normalizeOwnerEstimateRequired(item.owner_estimate_required, true),
       })),
     })
   } catch (err) {
@@ -2097,6 +2113,7 @@ const createLog = async (req, res) => {
       return res.status(400).json({ success: false, message: '当前事项类型必须关联需求' })
     }
 
+    let ownerEstimateRequired = null
     if (demandId) {
       const demand = await Work.findDemandById(demandId)
       if (!demand) {
@@ -2104,17 +2121,19 @@ const createLog = async (req, res) => {
       }
 
       if (!phaseKey) {
-        return res.status(400).json({ success: false, message: '关联需求时必须选择阶段' })
+        return res.status(400).json({ success: false, message: '关联需求时必须选择关联节点' })
       }
 
       const resolvedSelection = await resolveDemandTaskSelection(demandId, phaseKey)
       if (!resolvedSelection?.key) {
-        return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
+        return res.status(400).json({ success: false, message: '所选关联节点不存在或已停用' })
       }
       phaseKey = resolvedSelection.key
+      ownerEstimateRequired = normalizeOwnerEstimateRequired(resolvedSelection.owner_estimate_required, true) ? 1 : 0
 
     } else {
       phaseKey = null
+      ownerEstimateRequired = null
     }
 
     const id = await Work.createLog({
@@ -2133,6 +2152,7 @@ const createLog = async (req, res) => {
       taskSource: 'SELF',
       assignedByUserId: null,
       logCompletedAt: logCompletedAt || null,
+      ownerEstimateRequired,
     })
 
     try {
@@ -2341,19 +2361,22 @@ const createOwnerAssignedLog = async (req, res) => {
       return res.status(400).json({ success: false, message: '当前事项类型必须关联需求' })
     }
 
+    let ownerEstimateRequired = null
     if (demandId) {
       if (!phaseKey) {
-        return res.status(400).json({ success: false, message: '关联需求时必须选择阶段' })
+        return res.status(400).json({ success: false, message: '关联需求时必须选择关联节点' })
       }
 
       const resolvedSelection = await resolveDemandTaskSelection(demandId, phaseKey)
       if (!resolvedSelection?.key) {
-        return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
+        return res.status(400).json({ success: false, message: '所选关联节点不存在或已停用' })
       }
       phaseKey = resolvedSelection.key
+      ownerEstimateRequired = normalizeOwnerEstimateRequired(resolvedSelection.owner_estimate_required, true) ? 1 : 0
 
     } else {
       phaseKey = null
+      ownerEstimateRequired = null
     }
 
     const id = await Work.createLog({
@@ -2372,6 +2395,7 @@ const createOwnerAssignedLog = async (req, res) => {
       expectedStartDate,
       expectedCompletionDate: expectedCompletionDate || null,
       logCompletedAt: logCompletedAt || null,
+      ownerEstimateRequired,
     })
 
     try {
@@ -2542,6 +2566,7 @@ const updateLog = async (req, res) => {
       return res.status(400).json({ success: false, message: '当前事项类型必须关联需求' })
     }
 
+    let ownerEstimateRequired = null
     if (demandId) {
       const demand = await Work.findDemandById(demandId)
       if (!demand) {
@@ -2549,17 +2574,19 @@ const updateLog = async (req, res) => {
       }
 
       if (!phaseKey) {
-        return res.status(400).json({ success: false, message: '关联需求时必须选择阶段' })
+        return res.status(400).json({ success: false, message: '关联需求时必须选择关联节点' })
       }
 
       const resolvedSelection = await resolveDemandTaskSelection(demandId, phaseKey)
       if (!resolvedSelection?.key) {
-        return res.status(400).json({ success: false, message: '所选阶段不存在或已停用' })
+        return res.status(400).json({ success: false, message: '所选关联节点不存在或已停用' })
       }
       phaseKey = resolvedSelection.key
+      ownerEstimateRequired = normalizeOwnerEstimateRequired(resolvedSelection.owner_estimate_required, true) ? 1 : 0
 
     } else {
       phaseKey = null
+      ownerEstimateRequired = null
     }
 
     await Work.updateLog(id, {
@@ -2577,6 +2604,7 @@ const updateLog = async (req, res) => {
       taskSource: existing.task_source || 'SELF',
       assignedByUserId: existing.assigned_by_user_id || null,
       logCompletedAt,
+      ownerEstimateRequired,
     })
 
     try {

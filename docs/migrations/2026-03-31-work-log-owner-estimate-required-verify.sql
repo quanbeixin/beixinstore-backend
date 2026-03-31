@@ -1,0 +1,21 @@
+-- Verify owner_estimate_required snapshot on work_logs
+
+SET NAMES utf8mb4;
+
+SELECT
+  COLUMN_NAME,
+  COLUMN_TYPE,
+  IS_NULLABLE,
+  COLUMN_COMMENT
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = 'work_logs'
+  AND COLUMN_NAME = 'owner_estimate_required';
+
+SELECT
+  INDEX_NAME,
+  COLUMN_NAME
+FROM INFORMATION_SCHEMA.STATISTICS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = 'work_logs'
+  AND INDEX_NAME = 'idx_owner_estimate_required';
