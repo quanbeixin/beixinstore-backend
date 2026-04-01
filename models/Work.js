@@ -2973,8 +2973,8 @@ const Work = {
        l.actual_hours,
        l.remaining_hours,
        l.owner_estimate_hours,
-       NULL AS task_difficulty_code,
-       NULL AS task_difficulty_name,
+       l.task_difficulty_code,
+       COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
        COALESCE(l.task_source, 'SELF') AS task_source,
        l.relate_task_id,
@@ -2990,6 +2990,9 @@ const Work = {
        DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
      FROM work_logs l
      LEFT JOIN users au ON au.id = l.assigned_by_user_id
+     LEFT JOIN config_dict_items td
+       ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+      AND td.item_code = l.task_difficulty_code
      WHERE l.id = ?`
     const legacySql = `SELECT
        l.id,
@@ -5485,8 +5488,8 @@ const Work = {
        l.personal_estimate_hours,
        l.actual_hours,
        l.owner_estimate_hours,
-       NULL AS task_difficulty_code,
-       NULL AS task_difficulty_name,
+       l.task_difficulty_code,
+       COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
        l.owner_estimated_by,
        DATE_FORMAT(l.owner_estimated_at, '%Y-%m-%d %H:%i:%s') AS owner_estimated_at,
        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
@@ -5507,6 +5510,9 @@ const Work = {
      LEFT JOIN users au ON au.id = l.assigned_by_user_id
      LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
      LEFT JOIN work_demands d ON d.id = l.demand_id
+     LEFT JOIN config_dict_items td
+       ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+      AND td.item_code = l.task_difficulty_code
      LEFT JOIN config_dict_items pdi
        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
       AND pdi.item_code = l.phase_key
