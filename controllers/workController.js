@@ -24,6 +24,8 @@ const NOTIFICATION_SCENES = new Set([
 const DEMAND_NODE_QUICK_ADD_SCENE = 'DEMAND_NODE_QUICK_ADD'
 const JOB_LEVEL_DICT_KEY = 'job_level'
 const TASK_DIFFICULTY_DICT_KEY = 'task_difficulty'
+const DEFAULT_TASK_DIFFICULTY_CODE = 'N1'
+const DEFAULT_SELF_TASK_DIFFICULTY_CODE = 'N1'
 const EFFICIENCY_FACTOR_TYPES = Work.EFFICIENCY_FACTOR_TYPES || {
   JOB_LEVEL_WEIGHT: 'JOB_LEVEL_WEIGHT',
   TASK_DIFFICULTY_WEIGHT: 'TASK_DIFFICULTY_WEIGHT',
@@ -2038,6 +2040,9 @@ const createLog = async (req, res) => {
   let logStatus = hasManualLogStatus ? normalizeLogStatus(req.body.log_status) : ''
   const logCompletedAtRaw = req.body.log_completed_at
   const logCompletedAt = normalizeDateTime(logCompletedAtRaw)
+  const hasSelfTaskDifficultyField = Object.prototype.hasOwnProperty.call(req.body || {}, 'self_task_difficulty_code')
+  const selfTaskDifficultyCodeRaw = req.body.self_task_difficulty_code
+  let selfTaskDifficultyCode = normalizeDictCode(selfTaskDifficultyCodeRaw)
 
   if (!logDate) {
     return res.status(400).json({ success: false, message: 'log_date 格式错误，需为 YYYY-MM-DD' })
@@ -2065,6 +2070,19 @@ const createLog = async (req, res) => {
 
   if (remainingHours === null || remainingHours < 0) {
     return res.status(400).json({ success: false, message: 'remaining_hours 不能小于 0' })
+  }
+
+  if (
+    hasSelfTaskDifficultyField &&
+    selfTaskDifficultyCodeRaw !== undefined &&
+    selfTaskDifficultyCodeRaw !== null &&
+    String(selfTaskDifficultyCodeRaw).trim() !== '' &&
+    !selfTaskDifficultyCode
+  ) {
+    return res.status(400).json({ success: false, message: 'self_task_difficulty_code 格式不正确' })
+  }
+  if (!selfTaskDifficultyCode) {
+    selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
   }
 
   if (
@@ -2113,6 +2131,11 @@ const createLog = async (req, res) => {
       return res.status(400).json({ success: false, message: '当前事项类型必须关联需求' })
     }
 
+    const selfTaskDifficultyDictItem = await ConfigDict.getItemByCode(TASK_DIFFICULTY_DICT_KEY, selfTaskDifficultyCode)
+    if (!selfTaskDifficultyDictItem || Number(selfTaskDifficultyDictItem.enabled) !== 1) {
+      return res.status(400).json({ success: false, message: '个人评估难度配置不存在或已停用' })
+    }
+
     let ownerEstimateRequired = null
     if (demandId) {
       const demand = await Work.findDemandById(demandId)
@@ -2152,6 +2175,7 @@ const createLog = async (req, res) => {
       taskSource: 'SELF',
       assignedByUserId: null,
       logCompletedAt: logCompletedAt || null,
+      selfTaskDifficultyCode,
       ownerEstimateRequired,
     })
 
@@ -2530,6 +2554,11 @@ const updateLog = async (req, res) => {
       }
       expectedCompletionDate = normalized || null
     }
+    const hasSelfTaskDifficultyField = Object.prototype.hasOwnProperty.call(req.body || {}, 'self_task_difficulty_code')
+    const selfTaskDifficultyCodeRaw = req.body.self_task_difficulty_code
+    let selfTaskDifficultyCode = hasSelfTaskDifficultyField
+      ? normalizeDictCode(selfTaskDifficultyCodeRaw)
+      : normalizeDictCode(existing.self_task_difficulty_code)
 
     // 仅通过“状态切换”接口把事项改为非 DONE 且未显式传入完成日期时，默认清空完成日期。
     // 若前端显式传入 log_completed_at（例如在“修改记录”弹窗中维护），则以用户输入为准。
@@ -2557,6 +2586,19 @@ const updateLog = async (req, res) => {
       return res.status(400).json({ success: false, message: 'remaining_hours 不能小于 0' })
     }
 
+    if (
+      hasSelfTaskDifficultyField &&
+      selfTaskDifficultyCodeRaw !== undefined &&
+      selfTaskDifficultyCodeRaw !== null &&
+      String(selfTaskDifficultyCodeRaw).trim() !== '' &&
+      !selfTaskDifficultyCode
+    ) {
+      return res.status(400).json({ success: false, message: 'self_task_difficulty_code 格式不正确' })
+    }
+    if (hasSelfTaskDifficultyField && !selfTaskDifficultyCode) {
+      selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
+    }
+
     const itemType = await Work.findItemTypeById(itemTypeId)
     if (!itemType || Number(itemType.enabled) === 0) {
       return res.status(400).json({ success: false, message: '事项类型不存在或已停用' })
@@ -2564,6 +2606,13 @@ const updateLog = async (req, res) => {
 
     if (Number(itemType.require_demand) === 1 && !demandId) {
       return res.status(400).json({ success: false, message: '当前事项类型必须关联需求' })
+    }
+
+    if (selfTaskDifficultyCode) {
+      const selfTaskDifficultyDictItem = await ConfigDict.getItemByCode(TASK_DIFFICULTY_DICT_KEY, selfTaskDifficultyCode)
+      if (!selfTaskDifficultyDictItem || Number(selfTaskDifficultyDictItem.enabled) !== 1) {
+        return res.status(400).json({ success: false, message: '个人评估难度配置不存在或已停用' })
+      }
     }
 
     let ownerEstimateRequired = null
@@ -2604,6 +2653,7 @@ const updateLog = async (req, res) => {
       taskSource: existing.task_source || 'SELF',
       assignedByUserId: existing.assigned_by_user_id || null,
       logCompletedAt,
+      selfTaskDifficultyCode: selfTaskDifficultyCode || null,
       ownerEstimateRequired,
     })
 
@@ -3002,7 +3052,7 @@ const updateLogOwnerEstimate = async (req, res) => {
   }
   const hasTaskDifficultyField = Object.prototype.hasOwnProperty.call(req.body || {}, 'task_difficulty_code')
   const taskDifficultyCodeRaw = req.body.task_difficulty_code
-  const taskDifficultyCode = normalizeDictCode(taskDifficultyCodeRaw)
+  let taskDifficultyCode = normalizeDictCode(taskDifficultyCodeRaw)
   if (
     hasTaskDifficultyField &&
     taskDifficultyCodeRaw !== undefined &&
@@ -3012,17 +3062,24 @@ const updateLogOwnerEstimate = async (req, res) => {
   ) {
     return res.status(400).json({ success: false, message: 'task_difficulty_code 格式不正确' })
   }
-  if (taskDifficultyCode) {
-    const dictItem = await ConfigDict.getItemByCode(TASK_DIFFICULTY_DICT_KEY, taskDifficultyCode)
-    if (!dictItem || Number(dictItem.enabled) !== 1) {
-      return res.status(400).json({ success: false, message: '任务难度配置不存在或已停用' })
-    }
-  }
-
   try {
     const existing = await Work.findLogById(id)
     if (!existing) {
       return res.status(404).json({ success: false, message: '工作记录不存在' })
+    }
+
+    if (
+      !hasTaskDifficultyField &&
+      (existing.task_difficulty_code === null || existing.task_difficulty_code === undefined || existing.task_difficulty_code === '')
+    ) {
+      taskDifficultyCode = DEFAULT_TASK_DIFFICULTY_CODE
+    }
+
+    if (taskDifficultyCode) {
+      const dictItem = await ConfigDict.getItemByCode(TASK_DIFFICULTY_DICT_KEY, taskDifficultyCode)
+      if (!dictItem || Number(dictItem.enabled) !== 1) {
+        return res.status(400).json({ success: false, message: '任务难度配置不存在或已停用' })
+      }
     }
 
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
@@ -3041,7 +3098,9 @@ const updateLogOwnerEstimate = async (req, res) => {
     await Work.updateLogOwnerEstimate(id, {
       ownerEstimateHours,
       ownerEstimatedBy: req.user.id,
-      ...(hasTaskDifficultyField ? { taskDifficultyCode: taskDifficultyCode || null } : {}),
+      ...((hasTaskDifficultyField || taskDifficultyCode === DEFAULT_TASK_DIFFICULTY_CODE)
+        ? { taskDifficultyCode: taskDifficultyCode || null }
+        : {}),
     })
 
     const updated = await Work.findLogById(id)

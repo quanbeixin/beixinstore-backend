@@ -2875,6 +2875,8 @@ const Work = {
         COALESCE(t.require_demand, 0) AS require_demand,
         l.description,
         l.personal_estimate_hours,
+        l.self_task_difficulty_code,
+        COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
         l.actual_hours,
         l.remaining_hours,
         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
@@ -2895,6 +2897,9 @@ const Work = {
       LEFT JOIN users au ON au.id = l.assigned_by_user_id
       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN config_dict_items std
+        ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+       AND std.item_code = l.self_task_difficulty_code
       LEFT JOIN config_dict_items pdi
         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
        AND pdi.item_code = l.phase_key
@@ -2941,6 +2946,8 @@ const Work = {
        l.personal_estimate_hours,
        l.actual_hours,
        l.remaining_hours,
+       l.self_task_difficulty_code,
+       COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
        l.owner_estimate_hours,
        l.task_difficulty_code,
        COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
@@ -2959,6 +2966,9 @@ const Work = {
        DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
      FROM work_logs l
      LEFT JOIN users au ON au.id = l.assigned_by_user_id
+     LEFT JOIN config_dict_items std
+       ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+      AND std.item_code = l.self_task_difficulty_code
      LEFT JOIN config_dict_items td
        ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
       AND td.item_code = l.task_difficulty_code
@@ -2972,6 +2982,8 @@ const Work = {
        l.personal_estimate_hours,
        l.actual_hours,
        l.remaining_hours,
+       l.self_task_difficulty_code,
+       COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
        l.owner_estimate_hours,
        l.task_difficulty_code,
        COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
@@ -2990,6 +3002,9 @@ const Work = {
        DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
      FROM work_logs l
      LEFT JOIN users au ON au.id = l.assigned_by_user_id
+     LEFT JOIN config_dict_items std
+       ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+      AND std.item_code = l.self_task_difficulty_code
      LEFT JOIN config_dict_items td
        ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
       AND td.item_code = l.task_difficulty_code
@@ -3003,6 +3018,8 @@ const Work = {
        l.personal_estimate_hours,
        l.actual_hours,
        l.remaining_hours,
+       NULL AS self_task_difficulty_code,
+       NULL AS self_task_difficulty_name,
        NULL AS owner_estimate_hours,
        NULL AS task_difficulty_code,
        NULL AS task_difficulty_name,
@@ -3054,6 +3071,7 @@ const Work = {
     expectedStartDate = null,
     expectedCompletionDate = null,
     logCompletedAt = null,
+    selfTaskDifficultyCode = null,
     ownerEstimateRequired = null,
   }) {
     const normalizedStatus = WORK_LOG_STATUSES.includes(String(logStatus || '').toUpperCase())
@@ -3063,8 +3081,8 @@ const Work = {
     try {
       const [result] = await pool.query(
         `INSERT INTO work_logs (
-           user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, task_source, demand_id, phase_key, assigned_by_user_id, expected_start_date, expected_completion_date, log_completed_at, owner_estimate_required
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END, ?)`,
+           user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, task_source, demand_id, phase_key, assigned_by_user_id, expected_start_date, expected_completion_date, log_completed_at, self_task_difficulty_code, owner_estimate_required
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END, ?, ?)`,
         [
           userId,
           logDate,
@@ -3082,6 +3100,7 @@ const Work = {
           expectedCompletionDate,
           normalizedStatus,
           logCompletedAt,
+          selfTaskDifficultyCode || null,
           normalizedOwnerEstimateRequired,
         ],
       )
@@ -3132,6 +3151,7 @@ const Work = {
       expectedStartDate = null,
       expectedCompletionDate = null,
       logCompletedAt = null,
+      selfTaskDifficultyCode = null,
       ownerEstimateRequired = null,
     },
   ) {
@@ -3156,6 +3176,7 @@ const Work = {
            assigned_by_user_id = ?,
            expected_start_date = ?,
            expected_completion_date = ?,
+           self_task_difficulty_code = ?,
            owner_estimate_required = ?,
            log_completed_at = CASE
              WHEN ? = 'DONE' THEN COALESCE(?, log_completed_at, NOW())
@@ -3176,6 +3197,7 @@ const Work = {
           toPositiveInt(assignedByUserId),
           expectedStartDate,
           expectedCompletionDate,
+          selfTaskDifficultyCode || null,
           normalizedOwnerEstimateRequired,
           normalizedStatus,
           logCompletedAt,
@@ -3861,6 +3883,8 @@ const Work = {
          COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
          l.description,
          l.personal_estimate_hours,
+         l.self_task_difficulty_code,
+         COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
          COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS actual_hours,
          l.remaining_hours,
          COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
@@ -3881,6 +3905,9 @@ const Work = {
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
        LEFT JOIN users au ON au.id = l.assigned_by_user_id
        LEFT JOIN work_demands d ON d.id = l.demand_id
+       LEFT JOIN config_dict_items std
+         ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+        AND std.item_code = l.self_task_difficulty_code
        LEFT JOIN config_dict_items pdi
          ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
         AND pdi.item_code = l.phase_key
@@ -4062,6 +4089,8 @@ const Work = {
          COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
          l.description,
          l.personal_estimate_hours,
+         l.self_task_difficulty_code,
+         COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
          COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS actual_hours,
          l.remaining_hours,
          COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
@@ -4082,6 +4111,9 @@ const Work = {
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
        LEFT JOIN users au ON au.id = l.assigned_by_user_id
        LEFT JOIN work_demands d ON d.id = l.demand_id
+       LEFT JOIN config_dict_items std
+         ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+        AND std.item_code = l.self_task_difficulty_code
        LEFT JOIN config_dict_items pdi
          ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
         AND pdi.item_code = l.phase_key
@@ -5340,13 +5372,17 @@ const Work = {
            GROUP BY log_id
          ) pt ON pt.log_id = l.id
          LEFT JOIN (
-           SELECT log_id, ROUND(COALESCE(SUM(actual_hours), 0), 1) AS today_actual_hours
-           FROM work_log_daily_entries
-           WHERE entry_date = CURDATE()
-           GROUP BY log_id
+           SELECT e.log_id, ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS today_actual_hours
+           FROM work_log_daily_entries e
+           INNER JOIN (
+             SELECT log_id, entry_date, MAX(id) AS latest_id
+             FROM work_log_daily_entries
+             GROUP BY log_id, entry_date
+           ) le ON le.latest_id = e.id
+           WHERE e.entry_date = CURDATE()
+           GROUP BY e.log_id
          ) et ON et.log_id = l.id
          WHERE l.user_id IN (?)
-           AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
          GROUP BY l.user_id`,
         [teamMemberIds],
       )
