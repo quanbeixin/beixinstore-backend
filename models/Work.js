@@ -6175,8 +6175,10 @@ const Work = {
       }
     }
 
-    const logConditions = ['l.user_id IN (?)', 'l.log_date >= ?', 'l.log_date <= ?']
-    const logParams = [scopedUserIds, startDate, endDate]
+    await ensureDailyTables()
+
+    const logConditions = ['l.user_id IN (?)']
+    const logParams = [scopedUserIds]
     if (businessGroupCode) {
       logConditions.push('d.business_group_code = ?')
       logParams.push(businessGroupCode)
@@ -6191,67 +6193,39 @@ const Work = {
       )
       logParams.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
     }
+    logConditions.push(
+      `(
+        l.log_date BETWEEN ? AND ?
+        OR EXISTS (
+          SELECT 1
+          FROM work_log_daily_entries e
+          WHERE e.log_id = l.id
+            AND e.user_id = l.user_id
+            AND e.entry_date BETWEEN ? AND ?
+        )
+      )`,
+    )
+    logParams.push(startDate, endDate, startDate, endDate)
 
     const logWhereSql = logConditions.join(' AND ')
 
-    const memberSql = `
+    const logSql = `
       SELECT
-        l.user_id,
-        COUNT(DISTINCT l.log_date) AS filled_days,
-        ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS total_owner_estimate_hours,
-        ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
-        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
-        COUNT(DISTINCT COALESCE(l.demand_id, CONCAT('NO_DEMAND#', l.id))) AS item_scope_count,
-        COUNT(DISTINCT l.demand_id) AS demand_count,
-        SUM(CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND l.owner_estimate_hours IS NULL THEN 1 ELSE 0 END) AS unestimated_item_count,
-        DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
-      FROM work_logs l
-      INNER JOIN users u ON u.id = l.user_id
-      LEFT JOIN work_demands d ON d.id = l.demand_id
-      LEFT JOIN config_dict_items pdi
-        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
-       AND pdi.item_code = l.phase_key
-      LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
-      WHERE ${logWhereSql}
-      GROUP BY l.user_id
-      ORDER BY total_actual_hours DESC, l.user_id ASC
-      LIMIT 4000`
-
-    const dailySql = `
-      SELECT
+        l.id,
         l.user_id,
         DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
-        ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS owner_estimate_hours,
-        ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS personal_estimate_hours,
-        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS actual_hours,
-        COUNT(*) AS log_count,
-        COUNT(DISTINCT l.demand_id) AS demand_count
-      FROM work_logs l
-      INNER JOIN users u ON u.id = l.user_id
-      LEFT JOIN work_demands d ON d.id = l.demand_id
-      LEFT JOIN config_dict_items pdi
-        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
-       AND pdi.item_code = l.phase_key
-      LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
-      WHERE ${logWhereSql}
-      GROUP BY l.user_id, DATE_FORMAT(l.log_date, '%Y-%m-%d')
-      ORDER BY l.user_id ASC, log_date ASC
-      LIMIT 20000`
-
-    const dailyItemSql = `
-      SELECT
-        l.user_id,
-        DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
-        l.id AS log_id,
         l.demand_id,
         COALESCE(d.name, '无需求') AS demand_name,
         l.description,
         l.phase_key,
-        COALESCE(pdi.item_name, l.phase_key) AS phase_name,
+        COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
         COALESCE(t.name, '其他') AS item_type_name,
         ROUND(COALESCE(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}, 0), 1) AS owner_estimate_hours,
         ROUND(COALESCE(l.personal_estimate_hours, 0), 1) AS personal_estimate_hours,
-        ROUND(COALESCE(l.actual_hours, 0), 1) AS actual_hours
+        ROUND(COALESCE(l.actual_hours, 0), 1) AS actual_hours,
+        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+        DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND l.owner_estimate_hours IS NULL THEN 1 ELSE 0 END AS owner_pending
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
@@ -6260,65 +6234,213 @@ const Work = {
        AND pdi.item_code = l.phase_key
       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
       WHERE ${logWhereSql}
-      ORDER BY l.user_id ASC, log_date ASC, l.id ASC
+      ORDER BY l.user_id ASC, l.updated_at DESC, l.id DESC
       LIMIT 50000`
 
-    const [memberRows, dailyRows, dailyItemRows] = await Promise.all([
-      pool.query(memberSql, logParams).then((r) => r[0] || []),
-      pool.query(dailySql, logParams).then((r) => r[0] || []),
-      pool.query(dailyItemSql, logParams).then((r) => r[0] || []),
+    const entrySql = `
+      SELECT
+        l.user_id,
+        e.log_id,
+        DATE_FORMAT(e.entry_date, '%Y-%m-%d') AS entry_date,
+        ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS actual_hours,
+        COUNT(*) AS entry_count
+      FROM work_log_daily_entries e
+      INNER JOIN (
+        SELECT log_id, entry_date, MAX(id) AS latest_id
+        FROM work_log_daily_entries
+        GROUP BY log_id, entry_date
+      ) le ON le.latest_id = e.id
+      INNER JOIN work_logs l ON l.id = e.log_id
+      INNER JOIN users u ON u.id = l.user_id
+      LEFT JOIN work_demands d ON d.id = l.demand_id
+      WHERE l.user_id IN (?)
+        AND e.entry_date BETWEEN ? AND ?
+        ${businessGroupCode ? 'AND d.business_group_code = ?' : ''}
+        ${ownerUserId ? 'AND d.owner_user_id = ?' : ''}
+        ${keyword ? "AND (COALESCE(NULLIF(u.real_name, ''), u.username) LIKE ? OR COALESCE(d.name, '') LIKE ? OR COALESCE(l.demand_id, '') LIKE ? OR COALESCE(l.description, '') LIKE ?)" : ''}
+      GROUP BY l.user_id, e.log_id, e.entry_date
+      ORDER BY l.user_id ASC, e.entry_date ASC, e.log_id ASC
+      LIMIT 50000`
+
+    const entryParams = [scopedUserIds, startDate, endDate]
+    if (businessGroupCode) entryParams.push(businessGroupCode)
+    if (ownerUserId) entryParams.push(ownerUserId)
+    if (keyword) entryParams.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
+
+    const [logRows, entryRows] = await Promise.all([
+      pool.query(logSql, logParams).then((r) => r[0] || []),
+      pool.query(entrySql, entryParams).then((r) => r[0] || []),
     ])
 
     const memberAggByUser = new Map()
-    ;(memberRows || []).forEach((row) => {
-      memberAggByUser.set(Number(row.user_id), row)
-    })
-
     const dailyItemsByUserDate = new Map()
-    ;(dailyItemRows || []).forEach((row) => {
-      const userId = Number(row.user_id)
-      const logDate = String(row.log_date || '')
-      const key = `${userId}_${logDate}`
+    const explicitEntryByLogDate = new Map()
+    const explicitEntryCountByLog = new Map()
+
+    function ensureMemberAgg(userId) {
+      if (!memberAggByUser.has(userId)) {
+        memberAggByUser.set(userId, {
+          filled_days_set: new Set(),
+          demand_ids: new Set(),
+          item_scope_keys: new Set(),
+          total_owner_estimate_hours: 0,
+          total_personal_estimate_hours: 0,
+          total_actual_hours: 0,
+          unestimated_item_count: 0,
+          last_log_date: '',
+        })
+      }
+      return memberAggByUser.get(userId)
+    }
+
+    function ensureDailyItem(userId, date, row) {
+      const key = `${userId}_${date}`
       if (!dailyItemsByUserDate.has(key)) {
         dailyItemsByUserDate.set(key, [])
       }
-      dailyItemsByUserDate.get(key).push({
-        log_id: Number(row.log_id),
-        demand_id: row.demand_id || null,
-        demand_name: row.demand_name || '无需求',
-        description: row.description || '',
-        phase_key: row.phase_key || '',
-        phase_name: row.phase_name || '',
-        item_type_name: row.item_type_name || '其他',
-        owner_estimate_hours: toDecimal1(Number(row.owner_estimate_hours || 0)),
-        personal_estimate_hours: toDecimal1(Number(row.personal_estimate_hours || 0)),
-        actual_hours: toDecimal1(Number(row.actual_hours || 0)),
+      const list = dailyItemsByUserDate.get(key)
+      const logId = Number(row.log_id || row.id || 0)
+      let target = list.find((item) => Number(item.log_id) === logId)
+      if (!target) {
+        target = {
+          log_id: logId,
+          demand_id: row.demand_id || null,
+          demand_name: row.demand_name || '无需求',
+          description: row.description || '',
+          phase_key: row.phase_key || '',
+          phase_name: row.phase_name || '',
+          item_type_name: row.item_type_name || '其他',
+          owner_estimate_hours: 0,
+          personal_estimate_hours: 0,
+          actual_hours: 0,
+        }
+        list.push(target)
+      }
+      return target
+    }
+
+    ;(entryRows || []).forEach((row) => {
+      const userId = Number(row.user_id)
+      const logId = Number(row.log_id)
+      const entryDate = normalizeDateOnly(row.entry_date)
+      if (!userId || !logId || !entryDate) return
+      explicitEntryByLogDate.set(`${logId}|${entryDate}`, {
+        actual_hours: toDecimal1(row.actual_hours),
+        entry_count: Number(row.entry_count || 0),
       })
+      explicitEntryCountByLog.set(logId, Number(explicitEntryCountByLog.get(logId) || 0) + Number(row.entry_count || 0))
+    })
+
+    ;(logRows || []).forEach((row) => {
+      const userId = Number(row.user_id)
+      const logId = Number(row.id)
+      const logDate = normalizeDateOnly(row.log_date)
+      if (!userId || !logId) return
+      const memberAgg = ensureMemberAgg(userId)
+
+      if (logDate && logDate >= startDate && logDate <= endDate) {
+        memberAgg.total_owner_estimate_hours = toDecimal1(
+          Number(memberAgg.total_owner_estimate_hours || 0) + Number(row.owner_estimate_hours || 0),
+        )
+        memberAgg.total_personal_estimate_hours = toDecimal1(
+          Number(memberAgg.total_personal_estimate_hours || 0) + Number(row.personal_estimate_hours || 0),
+        )
+        memberAgg.filled_days_set.add(logDate)
+        memberAgg.last_log_date = memberAgg.last_log_date && memberAgg.last_log_date > logDate ? memberAgg.last_log_date : logDate
+
+        const estimateItem = ensureDailyItem(userId, logDate, row)
+        estimateItem.owner_estimate_hours = toDecimal1(
+          Number(estimateItem.owner_estimate_hours || 0) + Number(row.owner_estimate_hours || 0),
+        )
+        estimateItem.personal_estimate_hours = toDecimal1(
+          Number(estimateItem.personal_estimate_hours || 0) + Number(row.personal_estimate_hours || 0),
+        )
+      }
+
+      if (row.demand_id) memberAgg.demand_ids.add(String(row.demand_id))
+      memberAgg.item_scope_keys.add(row.demand_id ? `DEMAND:${row.demand_id}` : `NO_DEMAND#${logId}`)
+      memberAgg.unestimated_item_count += Number(row.owner_pending || 0)
+    })
+
+    ;(entryRows || []).forEach((row) => {
+      const userId = Number(row.user_id)
+      const logId = Number(row.log_id)
+      const entryDate = normalizeDateOnly(row.entry_date)
+      if (!userId || !logId || !entryDate) return
+
+      const sourceLog = (logRows || []).find((item) => Number(item.id) === logId)
+      if (!sourceLog) return
+
+      const memberAgg = ensureMemberAgg(userId)
+      const actualHours = Number(row.actual_hours || 0)
+      memberAgg.total_actual_hours = toDecimal1(Number(memberAgg.total_actual_hours || 0) + actualHours)
+      memberAgg.filled_days_set.add(entryDate)
+      memberAgg.last_log_date =
+        memberAgg.last_log_date && memberAgg.last_log_date > entryDate ? memberAgg.last_log_date : entryDate
+
+      const actualItem = ensureDailyItem(userId, entryDate, sourceLog)
+      actualItem.actual_hours = toDecimal1(Number(actualItem.actual_hours || 0) + actualHours)
+    })
+
+    ;(logRows || []).forEach((row) => {
+      const userId = Number(row.user_id)
+      const logId = Number(row.id)
+      const logDate = normalizeDateOnly(row.log_date)
+      const hasExplicitEntry = Number(explicitEntryCountByLog.get(logId) || 0) > 0
+      const fallbackActualHours = Number(row.actual_hours || 0)
+      if (!userId || !logId || hasExplicitEntry || !logDate || logDate < startDate || logDate > endDate || fallbackActualHours <= 0) return
+
+      const memberAgg = ensureMemberAgg(userId)
+      memberAgg.total_actual_hours = toDecimal1(Number(memberAgg.total_actual_hours || 0) + fallbackActualHours)
+      memberAgg.filled_days_set.add(logDate)
+      memberAgg.last_log_date =
+        memberAgg.last_log_date && memberAgg.last_log_date > logDate ? memberAgg.last_log_date : logDate
+
+      const actualItem = ensureDailyItem(userId, logDate, row)
+      actualItem.actual_hours = toDecimal1(Number(actualItem.actual_hours || 0) + fallbackActualHours)
     })
 
     const dailyByUser = new Map()
-    ;(dailyRows || []).forEach((row) => {
-      const userId = Number(row.user_id)
-      const logDate = String(row.log_date || '')
+    dailyItemsByUserDate.forEach((items, key) => {
+      const [userIdText, logDate] = String(key).split('_')
+      const userId = Number(userIdText)
+      if (!userId || !logDate) return
       if (!dailyByUser.has(userId)) {
         dailyByUser.set(userId, [])
       }
-      const actualHours = Number(row.actual_hours || 0)
-      const ownerEstimateHours = Number(row.owner_estimate_hours || 0)
-      const personalEstimateHours = Number(row.personal_estimate_hours || 0)
-      const key = `${userId}_${logDate}`
-      const items = dailyItemsByUserDate.get(key) || []
+      const normalizedItems = (items || []).map((item) => ({
+        ...item,
+        owner_estimate_hours: toDecimal1(item.owner_estimate_hours),
+        personal_estimate_hours: toDecimal1(item.personal_estimate_hours),
+        actual_hours: toDecimal1(item.actual_hours),
+      }))
+      const ownerEstimateHours = toDecimal1(
+        normalizedItems.reduce((sum, item) => sum + Number(item.owner_estimate_hours || 0), 0),
+      )
+      const personalEstimateHours = toDecimal1(
+        normalizedItems.reduce((sum, item) => sum + Number(item.personal_estimate_hours || 0), 0),
+      )
+      const actualHours = toDecimal1(
+        normalizedItems.reduce((sum, item) => sum + Number(item.actual_hours || 0), 0),
+      )
+      const demandCount = new Set(
+        normalizedItems.map((item) => String(item.demand_id || '').trim()).filter(Boolean),
+      ).size
+      const logCount = new Set(
+        normalizedItems.map((item) => Number(item.log_id)).filter((item) => Number.isInteger(item) && item > 0),
+      ).size
+
       dailyByUser.get(userId).push({
         log_date: logDate,
-        owner_estimate_hours: toDecimal1(ownerEstimateHours),
-        personal_estimate_hours: toDecimal1(personalEstimateHours),
-        actual_hours: toDecimal1(actualHours),
-        log_count: Number(row.log_count || 0),
-        demand_count: Number(row.demand_count || 0),
+        owner_estimate_hours: ownerEstimateHours,
+        personal_estimate_hours: personalEstimateHours,
+        actual_hours: actualHours,
+        log_count: logCount,
+        demand_count: demandCount,
         variance_owner_hours: toDecimal1(actualHours - ownerEstimateHours),
         variance_personal_hours: toDecimal1(actualHours - personalEstimateHours),
         saturation_rate: toPercent2((actualHours / 8) * 100),
-        items: items,
+        items: normalizedItems.sort((a, b) => Number(a.log_id || 0) - Number(b.log_id || 0)),
       })
     })
 
@@ -6328,7 +6450,7 @@ const Work = {
     const memberListBase = scopedUserRows.map((userRow) => {
       const userId = Number(userRow.user_id)
       const aggRow = memberAggByUser.get(userId) || {}
-      const filledDays = Number(aggRow.filled_days || 0)
+      const filledDays = Number((aggRow.filled_days_set && aggRow.filled_days_set.size) || 0)
       const totalOwner = Number(aggRow.total_owner_estimate_hours || 0)
       const totalPersonal = Number(aggRow.total_personal_estimate_hours || 0)
       const totalActual = Number(aggRow.total_actual_hours || 0)
@@ -6345,8 +6467,8 @@ const Work = {
         department_id: toPositiveInt(userRow.department_id),
         department_name: userRow.department_name || '-',
         filled_days: filledDays,
-        demand_count: Number(aggRow.demand_count || 0),
-        item_scope_count: Number(aggRow.item_scope_count || 0),
+        demand_count: Number((aggRow.demand_ids && aggRow.demand_ids.size) || 0),
+        item_scope_count: Number((aggRow.item_scope_keys && aggRow.item_scope_keys.size) || 0),
         total_owner_estimate_hours: toDecimal1(totalOwner),
         total_personal_estimate_hours: toDecimal1(totalPersonal),
         total_actual_hours: toDecimal1(totalActual),
