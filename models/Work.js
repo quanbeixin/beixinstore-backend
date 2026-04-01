@@ -17,10 +17,44 @@ const ISSUE_TYPE_DICT_KEY = 'issue_type'
 const BUSINESS_GROUP_DICT_KEY = 'business_group'
 const JOB_LEVEL_DICT_KEY = 'job_level'
 const TASK_DIFFICULTY_DICT_KEY = 'task_difficulty'
+const DEFAULT_TASK_DIFFICULTY_CODE = 'N1'
 const EFFICIENCY_FACTOR_TYPES = {
   JOB_LEVEL_WEIGHT: 'JOB_LEVEL_WEIGHT',
   TASK_DIFFICULTY_WEIGHT: 'TASK_DIFFICULTY_WEIGHT',
+  NET_EFFICIENCY_FORMULA: 'NET_EFFICIENCY_FORMULA',
 }
+const NET_EFFICIENCY_FORMULA_ITEM_CODE = 'DEFAULT'
+const NET_EFFICIENCY_FORMULA_VARIABLES = Object.freeze({
+  OWNER_HOURS: 'OWNER_HOURS',
+  PERSONAL_HOURS: 'PERSONAL_HOURS',
+  ACTUAL_HOURS: 'ACTUAL_HOURS',
+  TASK_DIFFICULTY_COEFF: 'TASK_DIFFICULTY_COEFF',
+  JOB_LEVEL_COEFF: 'JOB_LEVEL_COEFF',
+})
+const NET_EFFICIENCY_FORMULA_OPERATORS = Object.freeze({
+  ADD: 'ADD',
+  SUB: 'SUB',
+  MUL: 'MUL',
+  DIV: 'DIV',
+})
+const DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS = Object.freeze([
+  NET_EFFICIENCY_FORMULA_VARIABLES.ACTUAL_HOURS,
+  NET_EFFICIENCY_FORMULA_OPERATORS.MUL,
+  NET_EFFICIENCY_FORMULA_VARIABLES.TASK_DIFFICULTY_COEFF,
+  NET_EFFICIENCY_FORMULA_OPERATORS.DIV,
+  NET_EFFICIENCY_FORMULA_VARIABLES.JOB_LEVEL_COEFF,
+])
+const NET_EFFICIENCY_FORMULA_TOKEN_LABELS = Object.freeze({
+  [NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_HOURS]: 'Owner预估总工时',
+  [NET_EFFICIENCY_FORMULA_VARIABLES.PERSONAL_HOURS]: '个人预估总工时',
+  [NET_EFFICIENCY_FORMULA_VARIABLES.ACTUAL_HOURS]: '实际总工时',
+  [NET_EFFICIENCY_FORMULA_VARIABLES.TASK_DIFFICULTY_COEFF]: '任务难度系数',
+  [NET_EFFICIENCY_FORMULA_VARIABLES.JOB_LEVEL_COEFF]: '职级权重系数',
+  [NET_EFFICIENCY_FORMULA_OPERATORS.ADD]: '+',
+  [NET_EFFICIENCY_FORMULA_OPERATORS.SUB]: '-',
+  [NET_EFFICIENCY_FORMULA_OPERATORS.MUL]: '×',
+  [NET_EFFICIENCY_FORMULA_OPERATORS.DIV]: '÷',
+})
 const OWNER_ESTIMATE_RULES = ['NONE', 'OPTIONAL', 'REQUIRED']
 const DEFAULT_NOTIFICATION_SCENES = [
   'node_assign',
@@ -759,10 +793,165 @@ function toDecimal1(value) {
   return Number(num.toFixed(1))
 }
 
+function toDecimal2(value) {
+  const num = Number(value || 0)
+  if (!Number.isFinite(num)) return 0
+  return Number(num.toFixed(2))
+}
+
+function toDecimal4(value) {
+  const num = Number(value || 0)
+  if (!Number.isFinite(num)) return 0
+  return Number(num.toFixed(4))
+}
+
 function toPercent2(value) {
   const num = Number(value || 0)
   if (!Number.isFinite(num)) return 0
   return Number(num.toFixed(2))
+}
+
+function isNetEfficiencyVariableToken(token) {
+  return Object.values(NET_EFFICIENCY_FORMULA_VARIABLES).includes(String(token || '').trim().toUpperCase())
+}
+
+function isNetEfficiencyOperatorToken(token) {
+  return Object.values(NET_EFFICIENCY_FORMULA_OPERATORS).includes(String(token || '').trim().toUpperCase())
+}
+
+function getDefaultNetEfficiencyFormulaTokens() {
+  return [...DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS]
+}
+
+function parseNetEfficiencyFormulaExpression(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim().toUpperCase()).filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return value
+      .split('|')
+      .map((item) => String(item || '').trim().toUpperCase())
+      .filter(Boolean)
+  }
+  return []
+}
+
+function normalizeNetEfficiencyFormulaTokens(value, { allowSingleOperand = true } = {}) {
+  const tokens = parseNetEfficiencyFormulaExpression(value)
+  if (tokens.length === 0) return getDefaultNetEfficiencyFormulaTokens()
+  if (tokens.length % 2 === 0) {
+    throw new Error('净效率公式格式不正确，运算项与运算符数量不匹配')
+  }
+  if (!allowSingleOperand && tokens.length < 3) {
+    throw new Error('净效率公式至少需要两个字段和一个运算符')
+  }
+  if (tokens.length > 7) {
+    throw new Error('净效率公式最多支持 4 个字段拼装')
+  }
+
+  tokens.forEach((token, index) => {
+    if (index % 2 === 0 && !isNetEfficiencyVariableToken(token)) {
+      throw new Error(`净效率公式存在不支持的字段：${token}`)
+    }
+    if (index % 2 === 1 && !isNetEfficiencyOperatorToken(token)) {
+      throw new Error(`净效率公式存在不支持的运算符：${token}`)
+    }
+  })
+
+  return tokens
+}
+
+function serializeNetEfficiencyFormulaTokens(value) {
+  return normalizeNetEfficiencyFormulaTokens(value).join('|')
+}
+
+function formatNetEfficiencyFormulaTokens(value) {
+  const tokens = normalizeNetEfficiencyFormulaTokens(value)
+  return tokens.map((token) => NET_EFFICIENCY_FORMULA_TOKEN_LABELS[token] || token).join(' ')
+}
+
+function buildNetEfficiencyFormulaConfig(storedRows = []) {
+  const formulaRow = (storedRows || []).find(
+    (item) =>
+      String(item?.factor_type || '').trim().toUpperCase() === EFFICIENCY_FACTOR_TYPES.NET_EFFICIENCY_FORMULA &&
+      String(item?.item_code || '').trim().toUpperCase() === NET_EFFICIENCY_FORMULA_ITEM_CODE,
+  )
+  const expression = normalizeNetEfficiencyFormulaTokens(formulaRow?.remark || getDefaultNetEfficiencyFormulaTokens())
+  return {
+    factor_type: EFFICIENCY_FACTOR_TYPES.NET_EFFICIENCY_FORMULA,
+    item_code: NET_EFFICIENCY_FORMULA_ITEM_CODE,
+    item_name: '净效率公式',
+    enabled: Number(formulaRow?.enabled) === 1 ? 1 : 0,
+    expression,
+    expression_text: formatNetEfficiencyFormulaTokens(expression),
+    updated_at: formulaRow?.updated_at || null,
+    updated_by_name: formulaRow?.updated_by_name || null,
+    last_adjustment_record: formulaRow?.updated_at
+      ? `${formulaRow.updated_at}${formulaRow.updated_by_name ? ` · ${formulaRow.updated_by_name}` : ''}`
+      : '未调整',
+  }
+}
+
+function evaluateNetEfficiencyByFormula(expression, context = {}) {
+  const tokens = normalizeNetEfficiencyFormulaTokens(expression)
+  const resolvedValue = (token) => {
+    const value = Number(context[token] || 0)
+    return Number.isFinite(value) ? value : 0
+  }
+
+  let result = resolvedValue(tokens[0])
+  for (let index = 1; index < tokens.length; index += 2) {
+    const operator = tokens[index]
+    const rightValue = resolvedValue(tokens[index + 1])
+    if (operator === NET_EFFICIENCY_FORMULA_OPERATORS.ADD) result += rightValue
+    if (operator === NET_EFFICIENCY_FORMULA_OPERATORS.SUB) result -= rightValue
+    if (operator === NET_EFFICIENCY_FORMULA_OPERATORS.MUL) result *= rightValue
+    if (operator === NET_EFFICIENCY_FORMULA_OPERATORS.DIV) {
+      if (rightValue === 0) return null
+      result /= rightValue
+    }
+  }
+  return toDecimal2(result)
+}
+
+function buildNetEfficiencyContext({
+  totalOwnerEstimateHours = 0,
+  totalPersonalEstimateHours = 0,
+  totalActualHours = 0,
+  taskDifficultyCoefficient = 1,
+  jobLevelWeightCoefficient = 1,
+} = {}) {
+  return {
+    [NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_HOURS]: Number(totalOwnerEstimateHours || 0),
+    [NET_EFFICIENCY_FORMULA_VARIABLES.PERSONAL_HOURS]: Number(totalPersonalEstimateHours || 0),
+    [NET_EFFICIENCY_FORMULA_VARIABLES.ACTUAL_HOURS]: Number(totalActualHours || 0),
+    [NET_EFFICIENCY_FORMULA_VARIABLES.TASK_DIFFICULTY_COEFF]: Number(taskDifficultyCoefficient || 1) || 1,
+    [NET_EFFICIENCY_FORMULA_VARIABLES.JOB_LEVEL_COEFF]: Number(jobLevelWeightCoefficient || 1) || 1,
+  }
+}
+
+function calcActualWeightedCoefficient(rows = [], coefficientKey, hoursKey = 'total_actual_hours') {
+  const weighted = (rows || []).reduce(
+    (acc, item) => {
+      const hours = Number(item?.[hoursKey] || 0)
+      const coefficient = Number(item?.[coefficientKey] || 0)
+      if (!Number.isFinite(hours) || hours <= 0 || !Number.isFinite(coefficient) || coefficient <= 0) return acc
+      acc.totalHours += hours
+      acc.totalValue += hours * coefficient
+      return acc
+    },
+    { totalHours: 0, totalValue: 0 },
+  )
+
+  if (weighted.totalHours > 0) {
+    return toDecimal4(weighted.totalValue / weighted.totalHours)
+  }
+
+  const fallbackList = (rows || [])
+    .map((item) => Number(item?.[coefficientKey] || 0))
+    .filter((value) => Number.isFinite(value) && value > 0)
+  if (fallbackList.length === 0) return 1
+  return toDecimal4(fallbackList.reduce((sum, value) => sum + value, 0) / fallbackList.length)
 }
 
 function calcAssignableHours(todayPlannedHours, todayActualHours) {
@@ -975,6 +1164,7 @@ function buildDemandInsightWhere({
   ownerUserId = null,
   memberUserId = null,
   keyword = '',
+  completedOnly = false,
 } = {}) {
   const conditions = [
     'l.demand_id IS NOT NULL',
@@ -1010,6 +1200,10 @@ function buildDemandInsightWhere({
       `(l.demand_id LIKE ? OR COALESCE(d.name, '') LIKE ? OR COALESCE(pdi.item_name, l.phase_key, '') LIKE ? OR COALESCE(NULLIF(u.real_name, ''), u.username) LIKE ?)`,
     )
     params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
+  }
+
+  if (completedOnly) {
+    conditions.push("COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'")
   }
 
   return {
@@ -1077,6 +1271,15 @@ const Work = {
   WORK_UNIFIED_STATUSES: WORK_UNIFIED_STATUS_VALUES,
   WORK_LOG_TASK_SOURCES,
   EFFICIENCY_FACTOR_TYPES,
+  NET_EFFICIENCY_FORMULA_VARIABLES,
+  NET_EFFICIENCY_FORMULA_OPERATORS,
+  NET_EFFICIENCY_FORMULA_ITEM_CODE,
+  DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS,
+  normalizeNetEfficiencyFormulaTokens,
+  serializeNetEfficiencyFormulaTokens,
+  formatNetEfficiencyFormulaTokens,
+  buildNetEfficiencyFormulaConfig,
+  evaluateNetEfficiencyByFormula,
 
   async isDepartmentManager(userId) {
     const rows = await listManagedDepartmentRows(userId)
@@ -5724,7 +5927,9 @@ const Work = {
     endDate,
     sortOrder = 'desc',
     keyword = '',
+    completedOnly = false,
   } = {}) {
+    await ensureEfficiencyFactorSettingsTable()
     const normalizedDepartmentId = toPositiveInt(departmentId)
     if (!normalizedDepartmentId) {
       return {
@@ -5745,6 +5950,7 @@ const Work = {
           total_owner_estimate_hours: 0,
           total_personal_estimate_hours: 0,
           total_actual_hours: 0,
+          net_efficiency_value: null,
         },
         rows: [],
       }
@@ -5752,9 +5958,11 @@ const Work = {
 
     const normalizedSortOrder = String(sortOrder || '').trim().toLowerCase() === 'asc' ? 'ASC' : 'DESC'
     const normalizedKeyword = String(keyword || '').trim().toLowerCase()
+    const normalizedCompletedOnly = Boolean(completedOnly)
     const previousRange = buildPreviousPeriodRange(startDate, endDate)
 
-    const [departmentRows, currentRows, previousRows] = await Promise.all([
+    const storedRowsPromise = this.listEfficiencyFactorSettings()
+    const [departmentRows, currentRows, previousRows, storedRows] = await Promise.all([
       pool.query(
         `SELECT id, name
          FROM departments
@@ -5774,16 +5982,36 @@ const Work = {
            ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS total_owner_estimate_hours,
            ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
            ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
+           COALESCE(
+             ROUND(
+               COALESCE(SUM(COALESCE(l.actual_hours, 0) * COALESCE(tdw.coefficient, 1)), 0)
+               / NULLIF(SUM(COALESCE(l.actual_hours, 0)), 0),
+               4
+             ),
+             1
+           ) AS task_difficulty_coefficient,
+           MAX(COALESCE(jw.coefficient, 1)) AS job_level_weight_coefficient,
            DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
          FROM users u
          LEFT JOIN departments dep ON dep.id = u.department_id
          LEFT JOIN config_dict_items jl
            ON jl.type_key = '${JOB_LEVEL_DICT_KEY}'
           AND jl.item_code = u.job_level
+         LEFT JOIN efficiency_factor_settings jw
+           ON jw.factor_type = '${EFFICIENCY_FACTOR_TYPES.JOB_LEVEL_WEIGHT}'
+          AND CONVERT(jw.item_code USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+              CONVERT(COALESCE(NULLIF(u.job_level, ''), '__NO_JOB_LEVEL__') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+          AND jw.enabled = 1
          LEFT JOIN work_logs l
            ON l.user_id = u.id
           AND l.log_date >= ?
           AND l.log_date <= ?
+          ${normalizedCompletedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
+         LEFT JOIN efficiency_factor_settings tdw
+           ON tdw.factor_type = '${EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT}'
+          AND CONVERT(tdw.item_code USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+              CONVERT(COALESCE(NULLIF(l.task_difficulty_code, ''), '${DEFAULT_TASK_DIFFICULTY_CODE}') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+          AND tdw.enabled = 1
          LEFT JOIN work_demands d ON d.id = l.demand_id
          LEFT JOIN config_dict_items pdi
            ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
@@ -5814,14 +6042,17 @@ const Work = {
                AND COALESCE(u.include_in_metrics, 1) = 1
                AND l.log_date >= ?
                AND l.log_date <= ?
+               ${normalizedCompletedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
              GROUP BY l.user_id`,
             [normalizedDepartmentId, previousRange.startDate, previousRange.endDate],
           ).then((result) => result[0] || [])
         : Promise.resolve([]),
+      storedRowsPromise,
     ])
 
     const departmentName =
       departmentRows?.[0]?.name || `部门#${normalizedDepartmentId}`
+    const netEfficiencyFormula = buildNetEfficiencyFormulaConfig(storedRows)
     const previousActualByUserId = new Map(
       (previousRows || []).map((row) => [Number(row.user_id), Number(row.previous_actual_hours || 0)]),
     )
@@ -5847,7 +6078,18 @@ const Work = {
         total_owner_estimate_hours: toDecimal1(row.total_owner_estimate_hours),
         total_personal_estimate_hours: toDecimal1(row.total_personal_estimate_hours),
         total_actual_hours: toDecimal1(totalActualHours),
-        net_efficiency_value: null,
+        task_difficulty_coefficient: toDecimal4(row.task_difficulty_coefficient || 1),
+        job_level_weight_coefficient: toDecimal4(row.job_level_weight_coefficient || 1),
+        net_efficiency_value: evaluateNetEfficiencyByFormula(
+          netEfficiencyFormula.expression,
+          buildNetEfficiencyContext({
+            totalOwnerEstimateHours: row.total_owner_estimate_hours,
+            totalPersonalEstimateHours: row.total_personal_estimate_hours,
+            totalActualHours,
+            taskDifficultyCoefficient: row.task_difficulty_coefficient || 1,
+            jobLevelWeightCoefficient: row.job_level_weight_coefficient || 1,
+          }),
+        ),
         previous_actual_hours: toDecimal1(previousActualHours),
         trend_direction: trendDirection,
         trend_delta_actual_hours: trendDeltaActualHours,
@@ -5863,6 +6105,34 @@ const Work = {
       })
     }
 
+    if (normalizedCompletedOnly) {
+      rows = rows.filter(
+        (row) =>
+          Number(row.filled_days || 0) > 0 ||
+          Number(row.total_owner_estimate_hours || 0) > 0 ||
+          Number(row.total_personal_estimate_hours || 0) > 0 ||
+          Number(row.total_actual_hours || 0) > 0,
+      )
+    }
+
+    rows = [...rows].sort((left, right) => {
+      const leftValue = Number(left?.net_efficiency_value)
+      const rightValue = Number(right?.net_efficiency_value)
+      const normalizedLeft = Number.isFinite(leftValue) ? leftValue : (normalizedSortOrder === 'ASC' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY)
+      const normalizedRight = Number.isFinite(rightValue) ? rightValue : (normalizedSortOrder === 'ASC' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY)
+      if (normalizedLeft !== normalizedRight) {
+        return normalizedSortOrder === 'ASC' ? normalizedLeft - normalizedRight : normalizedRight - normalizedLeft
+      }
+
+      const leftActualHours = Number(left?.total_actual_hours || 0)
+      const rightActualHours = Number(right?.total_actual_hours || 0)
+      if (leftActualHours !== rightActualHours) {
+        return normalizedSortOrder === 'ASC' ? leftActualHours - rightActualHours : rightActualHours - leftActualHours
+      }
+
+      return Number(left?.user_id || 0) - Number(right?.user_id || 0)
+    })
+
     rows = rows.map((row, index) => ({
       ...row,
       rank: index + 1,
@@ -5877,6 +6147,8 @@ const Work = {
     const totalActualHours = toDecimal1(
       rows.reduce((sum, row) => sum + Number(row.total_actual_hours || 0), 0),
     )
+    const avgTaskDifficultyCoefficient = calcActualWeightedCoefficient(rows, 'task_difficulty_coefficient')
+    const avgJobLevelWeightCoefficient = calcActualWeightedCoefficient(rows, 'job_level_weight_coefficient')
 
     return {
       filters: {
@@ -5885,6 +6157,7 @@ const Work = {
         end_date: endDate,
         keyword: keyword || '',
         sort_order: normalizedSortOrder.toLowerCase(),
+        completed_only: normalizedCompletedOnly,
         previous_start_date: previousRange.startDate,
         previous_end_date: previousRange.endDate,
       },
@@ -5896,6 +6169,19 @@ const Work = {
         total_owner_estimate_hours: totalOwnerEstimateHours,
         total_personal_estimate_hours: totalPersonalEstimateHours,
         total_actual_hours: totalActualHours,
+        task_difficulty_coefficient: avgTaskDifficultyCoefficient,
+        job_level_weight_coefficient: avgJobLevelWeightCoefficient,
+        net_efficiency_formula_text: netEfficiencyFormula.expression_text || formatNetEfficiencyFormulaTokens(netEfficiencyFormula.expression),
+        net_efficiency_value: evaluateNetEfficiencyByFormula(
+          netEfficiencyFormula.expression,
+          buildNetEfficiencyContext({
+            totalOwnerEstimateHours,
+            totalPersonalEstimateHours,
+            totalActualHours,
+            taskDifficultyCoefficient: avgTaskDifficultyCoefficient,
+            jobLevelWeightCoefficient: avgJobLevelWeightCoefficient,
+          }),
+        ),
       },
       rows,
     }
@@ -5909,6 +6195,7 @@ const Work = {
     ownerUserId = null,
     memberUserId = null,
     keyword = '',
+    completedOnly = false,
   } = {}) {
     const { whereSql, params } = buildDemandInsightWhere({
       startDate,
@@ -5918,6 +6205,7 @@ const Work = {
       ownerUserId,
       memberUserId,
       keyword,
+      completedOnly,
     })
 
     const demandSql = `
@@ -6125,6 +6413,7 @@ const Work = {
         owner_user_id: ownerUserId,
         member_user_id: memberUserId,
         keyword: keyword || '',
+        completed_only: Boolean(completedOnly),
       },
       summary: {
         demand_count: demandList.length,
@@ -6151,6 +6440,7 @@ const Work = {
     ownerUserId = null,
     memberUserId = null,
     keyword = '',
+    completedOnly = false,
   } = {}) {
     const userConditions = [
       `COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'`,
@@ -6194,6 +6484,7 @@ const Work = {
           owner_user_id: ownerUserId,
           member_user_id: memberUserId,
           keyword: keyword || '',
+          completed_only: Boolean(completedOnly),
         },
         summary: {
           member_count: 0,
@@ -6247,6 +6538,9 @@ const Work = {
       )`,
     )
     logParams.push(startDate, endDate, startDate, endDate)
+    if (completedOnly) {
+      logConditions.push("COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'")
+    }
 
     const logWhereSql = logConditions.join(' AND ')
 
@@ -6296,6 +6590,7 @@ const Work = {
       LEFT JOIN work_demands d ON d.id = l.demand_id
       WHERE l.user_id IN (?)
         AND e.entry_date BETWEEN ? AND ?
+        ${completedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
         ${businessGroupCode ? 'AND d.business_group_code = ?' : ''}
         ${ownerUserId ? 'AND d.owner_user_id = ?' : ''}
         ${keyword ? "AND (COALESCE(NULLIF(u.real_name, ''), u.username) LIKE ? OR COALESCE(d.name, '') LIKE ? OR COALESCE(l.demand_id, '') LIKE ? OR COALESCE(l.description, '') LIKE ?)" : ''}
@@ -6480,7 +6775,7 @@ const Work = {
         demand_count: demandCount,
         variance_owner_hours: toDecimal1(actualHours - ownerEstimateHours),
         variance_personal_hours: toDecimal1(actualHours - personalEstimateHours),
-        saturation_rate: toPercent2((actualHours / 8) * 100),
+        saturation_rate: toPercent2((actualHours / DEFAULT_DAILY_CAPACITY_HOURS) * 100),
         items: normalizedItems.sort((a, b) => Number(a.log_id || 0) - Number(b.log_id || 0)),
       })
     })
@@ -6495,7 +6790,7 @@ const Work = {
       const totalOwner = Number(aggRow.total_owner_estimate_hours || 0)
       const totalPersonal = Number(aggRow.total_personal_estimate_hours || 0)
       const totalActual = Number(aggRow.total_actual_hours || 0)
-      const capacityHours = filledDays * 8
+      const capacityHours = filledDays * DEFAULT_DAILY_CAPACITY_HOURS
       const avgActualPerDay = filledDays > 0 ? totalActual / filledDays : 0
       const avgSaturationRate = filledDays > 0 ? (totalActual / capacityHours) * 100 : 0
       const dailyStats = dailyByUser.get(userId) || []
@@ -6564,6 +6859,7 @@ const Work = {
         owner_user_id: ownerUserId,
         member_user_id: memberUserId,
         keyword: keyword || '',
+        completed_only: Boolean(completedOnly),
       },
       summary: {
         member_count: memberList.length,
@@ -6609,6 +6905,8 @@ const Work = {
           total_personal_estimate_hours: 0,
           total_actual_hours: 0,
           net_efficiency_value: null,
+          task_difficulty_coefficient: 1,
+          job_level_weight_coefficient: 1,
           avg_actual_hours: 0,
           avg_actual_hours_per_member: 0,
           variance_owner_hours: 0,
@@ -6765,7 +7063,12 @@ const Work = {
         total_owner_estimate_hours: toDecimal1(summary.total_owner_estimate_hours),
         total_personal_estimate_hours: toDecimal1(summary.total_personal_estimate_hours),
         total_actual_hours: toDecimal1(summary.total_actual_hours),
-        net_efficiency_value: null,
+        net_efficiency_value:
+          summary.net_efficiency_value === null || summary.net_efficiency_value === undefined
+            ? null
+            : toDecimal2(summary.net_efficiency_value),
+        task_difficulty_coefficient: toDecimal4(summary.task_difficulty_coefficient || 1),
+        job_level_weight_coefficient: toDecimal4(summary.job_level_weight_coefficient || 1),
         avg_actual_hours: toDecimal1(summary.avg_actual_hours),
         avg_actual_hours_per_member:
           Number(summary.member_count || 0) > 0
@@ -6801,7 +7104,9 @@ const Work = {
     userId,
     startDate,
     endDate,
+    completedOnly = false,
   } = {}) {
+    await ensureEfficiencyFactorSettingsTable()
     const normalizedUserId = toPositiveInt(userId)
     if (!normalizedUserId) {
       return {
@@ -6809,6 +7114,7 @@ const Work = {
           user_id: null,
           start_date: startDate,
           end_date: endDate,
+          completed_only: Boolean(completedOnly),
         },
         summary: {
           user_id: null,
@@ -6822,6 +7128,8 @@ const Work = {
           total_personal_estimate_hours: 0,
           total_actual_hours: 0,
           net_efficiency_value: null,
+          task_difficulty_coefficient: 1,
+          job_level_weight_coefficient: 1,
           avg_actual_hours_per_day: 0,
         },
         work_type_distribution: [],
@@ -6832,7 +7140,8 @@ const Work = {
       }
     }
 
-    const [userRows, memberInsight, demandInsight, workTypeRows, workItemRows, trendRows, phaseRows] =
+    const storedRowsPromise = this.listEfficiencyFactorSettings()
+    const [userRows, memberInsight, demandInsight, workTypeRows, workItemRows, trendRows, phaseRows, factorRows, storedRows] =
       await Promise.all([
         pool.query(
           `SELECT
@@ -6855,11 +7164,13 @@ const Work = {
           startDate,
           endDate,
           memberUserId: normalizedUserId,
+          completedOnly,
         }),
         this.getDemandInsight({
           startDate,
           endDate,
           memberUserId: normalizedUserId,
+          completedOnly,
         }),
         pool.query(
           `SELECT
@@ -6875,6 +7186,7 @@ const Work = {
            WHERE l.user_id = ?
              AND l.log_date >= ?
              AND l.log_date <= ?
+             ${completedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
            GROUP BY COALESCE(t.id, l.item_type_id), COALESCE(t.name, CONCAT('类型#', l.item_type_id))
            ORDER BY actual_hours DESC, task_count DESC, item_type_id ASC`,
           [normalizedUserId, startDate, endDate],
@@ -6890,6 +7202,11 @@ const Work = {
              l.phase_key,
              COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
              l.description,
+             l.task_difficulty_code,
+             COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
+             l.self_task_difficulty_code,
+             COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
+             COALESCE(tdf.coefficient, 1) AS task_difficulty_coefficient,
              ROUND(COALESCE(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}, 0), 1) AS owner_estimate_hours,
              ROUND(COALESCE(l.personal_estimate_hours, 0), 1) AS personal_estimate_hours,
              ROUND(COALESCE(l.actual_hours, 0), 1) AS actual_hours,
@@ -6901,10 +7218,22 @@ const Work = {
            LEFT JOIN config_dict_items pdi
              ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
             AND pdi.item_code = l.phase_key
+           LEFT JOIN config_dict_items td
+             ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+            AND td.item_code = l.task_difficulty_code
+           LEFT JOIN config_dict_items std
+             ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+            AND std.item_code = l.self_task_difficulty_code
+           LEFT JOIN efficiency_factor_settings tdf
+             ON tdf.factor_type = '${EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT}'
+            AND CONVERT(tdf.item_code USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                CONVERT(COALESCE(NULLIF(l.task_difficulty_code, ''), '${DEFAULT_TASK_DIFFICULTY_CODE}') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+            AND tdf.enabled = 1
            LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
            WHERE l.user_id = ?
              AND l.log_date >= ?
              AND l.log_date <= ?
+             ${completedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
            ORDER BY l.log_date DESC, l.id DESC
            LIMIT 500`,
           [normalizedUserId, startDate, endDate],
@@ -6920,6 +7249,7 @@ const Work = {
            WHERE l.user_id = ?
              AND l.log_date >= ?
              AND l.log_date <= ?
+             ${completedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
            GROUP BY DATE_FORMAT(l.log_date, '%Y-%m-%d')
            ORDER BY log_date ASC`,
           [normalizedUserId, startDate, endDate],
@@ -6943,16 +7273,52 @@ const Work = {
            WHERE l.user_id = ?
              AND l.log_date >= ?
              AND l.log_date <= ?
+             ${completedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
            GROUP BY COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__')
-           ORDER BY actual_hours DESC, task_count DESC`,
+          ORDER BY actual_hours DESC, task_count DESC`,
           [normalizedUserId, startDate, endDate],
         ).then((r) => r[0] || []),
+        pool.query(
+          `SELECT
+             COALESCE(
+               ROUND(
+                 COALESCE(SUM(COALESCE(l.actual_hours, 0) * COALESCE(tdw.coefficient, 1)), 0)
+                 / NULLIF(SUM(COALESCE(l.actual_hours, 0)), 0),
+                 4
+               ),
+               1
+             ) AS task_difficulty_coefficient,
+             MAX(COALESCE(jw.coefficient, 1)) AS job_level_weight_coefficient
+           FROM users u
+           LEFT JOIN efficiency_factor_settings jw
+             ON jw.factor_type = '${EFFICIENCY_FACTOR_TYPES.JOB_LEVEL_WEIGHT}'
+            AND CONVERT(jw.item_code USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                CONVERT(COALESCE(NULLIF(u.job_level, ''), '__NO_JOB_LEVEL__') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+            AND jw.enabled = 1
+           LEFT JOIN work_logs l
+             ON l.user_id = u.id
+            AND l.log_date >= ?
+            AND l.log_date <= ?
+            ${completedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
+           LEFT JOIN efficiency_factor_settings tdw
+             ON tdw.factor_type = '${EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT}'
+            AND CONVERT(tdw.item_code USING utf8mb4) COLLATE utf8mb4_unicode_ci =
+                CONVERT(COALESCE(NULLIF(l.task_difficulty_code, ''), '${DEFAULT_TASK_DIFFICULTY_CODE}') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+            AND tdw.enabled = 1
+           WHERE u.id = ?
+           GROUP BY u.id
+           LIMIT 1`,
+          [startDate, endDate, normalizedUserId],
+        ).then((r) => r[0] || []),
+        storedRowsPromise,
       ])
 
     const userInfo = userRows?.[0] || {}
     const memberSummary = Array.isArray(memberInsight?.member_list)
       ? memberInsight.member_list.find((item) => Number(item.user_id) === normalizedUserId) || {}
       : {}
+    const memberFactor = factorRows?.[0] || {}
+    const netEfficiencyFormula = buildNetEfficiencyFormulaConfig(storedRows)
 
     const trendMap = new Map(
       (trendRows || []).map((row) => [
@@ -6982,6 +7348,7 @@ const Work = {
         user_id: normalizedUserId,
         start_date: startDate,
         end_date: endDate,
+        completed_only: Boolean(completedOnly),
       },
       summary: {
         user_id: normalizedUserId,
@@ -6994,7 +7361,18 @@ const Work = {
         total_owner_estimate_hours: toDecimal1(memberSummary.total_owner_estimate_hours),
         total_personal_estimate_hours: toDecimal1(memberSummary.total_personal_estimate_hours),
         total_actual_hours: toDecimal1(memberSummary.total_actual_hours),
-        net_efficiency_value: null,
+        task_difficulty_coefficient: toDecimal4(memberFactor.task_difficulty_coefficient || 1),
+        job_level_weight_coefficient: toDecimal4(memberFactor.job_level_weight_coefficient || 1),
+        net_efficiency_value: evaluateNetEfficiencyByFormula(
+          netEfficiencyFormula.expression,
+          buildNetEfficiencyContext({
+            totalOwnerEstimateHours: memberSummary.total_owner_estimate_hours,
+            totalPersonalEstimateHours: memberSummary.total_personal_estimate_hours,
+            totalActualHours: memberSummary.total_actual_hours,
+            taskDifficultyCoefficient: memberFactor.task_difficulty_coefficient || 1,
+            jobLevelWeightCoefficient: memberFactor.job_level_weight_coefficient || 1,
+          }),
+        ),
         avg_actual_hours_per_day: toDecimal1(memberSummary.avg_actual_hours_per_day),
       },
       work_type_distribution: (workTypeRows || []).map((row) => ({
@@ -7025,6 +7403,11 @@ const Work = {
         log_date: row.log_date || null,
         item_type_name: row.item_type_name || '-',
         log_status: row.log_status || 'IN_PROGRESS',
+        task_difficulty_code: row.task_difficulty_code || null,
+        task_difficulty_name: row.task_difficulty_name || row.task_difficulty_code || null,
+        self_task_difficulty_code: row.self_task_difficulty_code || null,
+        self_task_difficulty_name: row.self_task_difficulty_name || row.self_task_difficulty_code || null,
+        task_difficulty_coefficient: toDecimal4(row.task_difficulty_coefficient || 1),
         demand_id: row.demand_id || null,
         demand_name: row.demand_name || null,
         phase_key: row.phase_key || '',
@@ -7033,6 +7416,16 @@ const Work = {
         owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
         personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
         actual_hours: toDecimal1(row.actual_hours),
+        net_efficiency_value: evaluateNetEfficiencyByFormula(
+          netEfficiencyFormula.expression,
+          buildNetEfficiencyContext({
+            totalOwnerEstimateHours: row.owner_estimate_hours,
+            totalPersonalEstimateHours: row.personal_estimate_hours,
+            totalActualHours: row.actual_hours,
+            taskDifficultyCoefficient: row.task_difficulty_coefficient || 1,
+            jobLevelWeightCoefficient: memberFactor.job_level_weight_coefficient || 1,
+          }),
+        ),
         expected_start_date: row.expected_start_date || null,
         expected_completion_date: row.expected_completion_date || null,
         last_log_date: row.last_log_date || null,
@@ -7140,7 +7533,6 @@ const Work = {
         l.phase_key,
         l.personal_estimate_hours,
         l.actual_hours,
-        l.owner_estimate_hours,
         l.expected_start_date,
         l.expected_completion_date,
         l.log_status,

@@ -29,7 +29,35 @@ const DEFAULT_SELF_TASK_DIFFICULTY_CODE = 'N1'
 const EFFICIENCY_FACTOR_TYPES = Work.EFFICIENCY_FACTOR_TYPES || {
   JOB_LEVEL_WEIGHT: 'JOB_LEVEL_WEIGHT',
   TASK_DIFFICULTY_WEIGHT: 'TASK_DIFFICULTY_WEIGHT',
+  NET_EFFICIENCY_FORMULA: 'NET_EFFICIENCY_FORMULA',
 }
+const NET_EFFICIENCY_FORMULA_ITEM_CODE = Work.NET_EFFICIENCY_FORMULA_ITEM_CODE || 'DEFAULT'
+const NET_EFFICIENCY_FORMULA_VARIABLES = Work.NET_EFFICIENCY_FORMULA_VARIABLES || {
+  OWNER_HOURS: 'OWNER_HOURS',
+  PERSONAL_HOURS: 'PERSONAL_HOURS',
+  ACTUAL_HOURS: 'ACTUAL_HOURS',
+  TASK_DIFFICULTY_COEFF: 'TASK_DIFFICULTY_COEFF',
+  JOB_LEVEL_COEFF: 'JOB_LEVEL_COEFF',
+}
+const NET_EFFICIENCY_FORMULA_OPERATORS = Work.NET_EFFICIENCY_FORMULA_OPERATORS || {
+  ADD: 'ADD',
+  SUB: 'SUB',
+  MUL: 'MUL',
+  DIV: 'DIV',
+}
+const NET_EFFICIENCY_VARIABLE_OPTIONS = [
+  { code: NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_HOURS, label: 'Owner预估总工时' },
+  { code: NET_EFFICIENCY_FORMULA_VARIABLES.PERSONAL_HOURS, label: '个人预估总工时' },
+  { code: NET_EFFICIENCY_FORMULA_VARIABLES.ACTUAL_HOURS, label: '实际总工时' },
+  { code: NET_EFFICIENCY_FORMULA_VARIABLES.TASK_DIFFICULTY_COEFF, label: '任务难度系数' },
+  { code: NET_EFFICIENCY_FORMULA_VARIABLES.JOB_LEVEL_COEFF, label: '职级权重系数' },
+]
+const NET_EFFICIENCY_OPERATOR_OPTIONS = [
+  { code: NET_EFFICIENCY_FORMULA_OPERATORS.ADD, label: '+' },
+  { code: NET_EFFICIENCY_FORMULA_OPERATORS.SUB, label: '-' },
+  { code: NET_EFFICIENCY_FORMULA_OPERATORS.MUL, label: '×' },
+  { code: NET_EFFICIENCY_FORMULA_OPERATORS.DIV, label: '÷' },
+]
 const QUICK_ADD_DEFAULT_ITEM_TYPE_KEYS = Array.from(
   new Set(
     String(process.env.WORKFLOW_TRACK_ITEM_TYPE_KEYS || 'DEMAND_DEV')
@@ -497,6 +525,23 @@ function buildEfficiencyFactorSection(dictItems, storedRows, factorType) {
   })
 }
 
+function buildNetEfficiencyFormulaSection(storedRows) {
+  const formulaConfig = Work.buildNetEfficiencyFormulaConfig(storedRows)
+  return {
+    factor_type: EFFICIENCY_FACTOR_TYPES.NET_EFFICIENCY_FORMULA,
+    item_code: NET_EFFICIENCY_FORMULA_ITEM_CODE,
+    item_name: '净效率公式',
+    enabled: 1,
+    expression: Array.isArray(formulaConfig?.expression) ? formulaConfig.expression : [],
+    expression_text: formulaConfig?.expression_text || '',
+    variable_options: NET_EFFICIENCY_VARIABLE_OPTIONS,
+    operator_options: NET_EFFICIENCY_OPERATOR_OPTIONS,
+    updated_at: formulaConfig?.updated_at || null,
+    updated_by_name: formulaConfig?.updated_by_name || null,
+    last_adjustment_record: formulaConfig?.last_adjustment_record || '未调整',
+  }
+}
+
 function canAccessDepartmentInsight(req, departmentId) {
   if (!departmentId) return false
   if (req.userAccess?.is_super_admin) return true
@@ -893,6 +938,7 @@ const getEfficiencyFactorSettings = async (req, res) => {
           storedRows,
           EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT,
         ),
+        net_efficiency_formula: buildNetEfficiencyFormulaSection(storedRows),
       },
     })
   } catch (err) {
@@ -906,8 +952,9 @@ const updateEfficiencyFactorSettings = async (req, res) => {
 
   const hasJobLevelWeights = Object.prototype.hasOwnProperty.call(req.body || {}, 'job_level_weights')
   const hasTaskDifficultyWeights = Object.prototype.hasOwnProperty.call(req.body || {}, 'task_difficulty_weights')
-  if (!hasJobLevelWeights && !hasTaskDifficultyWeights) {
-    return res.status(400).json({ success: false, message: '至少需要提交一组系数配置' })
+  const hasNetEfficiencyFormula = Object.prototype.hasOwnProperty.call(req.body || {}, 'net_efficiency_formula')
+  if (!hasJobLevelWeights && !hasTaskDifficultyWeights && !hasNetEfficiencyFormula) {
+    return res.status(400).json({ success: false, message: '至少需要提交一组效能配置' })
   }
 
   if (hasJobLevelWeights && !Array.isArray(req.body.job_level_weights)) {
@@ -915,6 +962,9 @@ const updateEfficiencyFactorSettings = async (req, res) => {
   }
   if (hasTaskDifficultyWeights && !Array.isArray(req.body.task_difficulty_weights)) {
     return res.status(400).json({ success: false, message: 'task_difficulty_weights 必须是数组' })
+  }
+  if (hasNetEfficiencyFormula && (!req.body.net_efficiency_formula || typeof req.body.net_efficiency_formula !== 'object')) {
+    return res.status(400).json({ success: false, message: 'net_efficiency_formula 必须是对象' })
   }
 
   try {
@@ -973,6 +1023,20 @@ const updateEfficiencyFactorSettings = async (req, res) => {
         'task_difficulty_weights',
       )
     }
+    if (hasNetEfficiencyFormula) {
+      const normalizedExpression = Work.normalizeNetEfficiencyFormulaTokens(
+        req.body.net_efficiency_formula?.expression,
+        { allowSingleOperand: true },
+      )
+      normalizedRows.push({
+        factor_type: EFFICIENCY_FACTOR_TYPES.NET_EFFICIENCY_FORMULA,
+        item_code: NET_EFFICIENCY_FORMULA_ITEM_CODE,
+        item_name_snapshot: '净效率公式',
+        coefficient: 1,
+        enabled: 1,
+        remark: Work.serializeNetEfficiencyFormulaTokens(normalizedExpression),
+      })
+    }
 
     await Work.upsertEfficiencyFactorSettings(normalizedRows, {
       updatedBy: req.user.id,
@@ -993,6 +1057,7 @@ const updateEfficiencyFactorSettings = async (req, res) => {
           storedRows,
           EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT,
         ),
+        net_efficiency_formula: buildNetEfficiencyFormulaSection(storedRows),
       },
     })
   } catch (err) {
@@ -3156,6 +3221,7 @@ const getDepartmentEfficiencyRanking = async (req, res) => {
 
   const keyword = normalizeText(req.query.keyword, 100)
   const sortOrder = String(req.query.sort_order || 'desc').trim().toLowerCase()
+  const completedOnly = toBool(req.query.completed_only, false)
   if (sortOrder && sortOrder !== 'asc' && sortOrder !== 'desc') {
     return res.status(400).json({ success: false, message: 'sort_order 仅支持 asc / desc' })
   }
@@ -3167,6 +3233,7 @@ const getDepartmentEfficiencyRanking = async (req, res) => {
       endDate,
       sortOrder,
       keyword,
+      completedOnly,
     })
     return res.json({ success: true, data })
   } catch (err) {
@@ -4341,10 +4408,12 @@ const getMemberEfficiencyDetail = async (req, res) => {
   }
 
   try {
+    const completedOnly = toBool(req.query.completed_only, false)
     const data = await Work.getMemberEfficiencyDetail({
       userId,
       startDate,
       endDate,
+      completedOnly,
     })
     return res.json({ success: true, data })
   } catch (err) {
@@ -4495,8 +4564,6 @@ async function updateAssignedLog(req, res) {
       return res.status(404).json({ success: false, message: '工作记录不存在' })
     }
 
-    console.log('existing log:', JSON.stringify(existing, null, 2))
-
     if (Number(existing.assigned_by_user_id) !== Number(req.user.id)) {
       return res.status(403).json({ success: false, message: '仅可修改自己指派的工作记录' })
     }
@@ -4508,10 +4575,6 @@ async function updateAssignedLog(req, res) {
     if (!description) {
       return res.status(400).json({ success: false, message: '工作描述不能为空' })
     }
-
-    const ownerEstimateHours = req.body.owner_estimate_hours === undefined
-      ? existing.owner_estimate_hours
-      : normalizeHours(req.body.owner_estimate_hours, null)
 
     const logStatus = req.body.log_status === undefined
       ? normalizeLogStatus(existing.log_status)
