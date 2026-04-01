@@ -4405,4 +4405,90 @@ module.exports = {
   getOwnerWorkbench,
   getMorningStandupBoard,
   sendNoFillReminders,
+  getMyAssignedItems,
+  updateAssignedLog,
+}
+
+async function getMyAssignedItems(req, res) {
+  try {
+    const userId = req.user?.id
+    if (!userId) {
+      return res.status(401).json({ success: false, message: '未登录' })
+    }
+
+    const rows = await Work.getMyAssignedItems(userId)
+    return res.json({ success: true, data: rows })
+  } catch (error) {
+    console.error('getMyAssignedItems error:', error)
+    return res.status(500).json({ success: false, message: error.message || '获取我的指派事项失败' })
+  }
+}
+
+async function updateAssignedLog(req, res) {
+  const id = toPositiveInt(req.params.id)
+  if (!id) {
+    return res.status(400).json({ success: false, message: '工作记录 ID 无效' })
+  }
+
+  try {
+    const existing = await Work.findLogById(id)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '工作记录不存在' })
+    }
+
+    console.log('existing log:', JSON.stringify(existing, null, 2))
+
+    if (Number(existing.assigned_by_user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可修改自己指派的工作记录' })
+    }
+
+    const description = req.body.description === undefined
+      ? existing.description
+      : normalizeText(req.body.description, 2000)
+
+    if (!description) {
+      return res.status(400).json({ success: false, message: '工作描述不能为空' })
+    }
+
+    const ownerEstimateHours = req.body.owner_estimate_hours === undefined
+      ? existing.owner_estimate_hours
+      : normalizeHours(req.body.owner_estimate_hours, null)
+
+    const logStatus = req.body.log_status === undefined
+      ? normalizeLogStatus(existing.log_status)
+      : normalizeLogStatus(req.body.log_status)
+
+    let expectedStartDate = existing.expected_start_date || null
+    if (req.body.expected_start_date !== undefined) {
+      expectedStartDate = normalizeDate(req.body.expected_start_date) || null
+    }
+
+    let expectedCompletionDate = existing.expected_completion_date || null
+    if (req.body.expected_completion_date !== undefined) {
+      expectedCompletionDate = normalizeDate(req.body.expected_completion_date) || null
+    }
+
+    await Work.updateLog(id, {
+      logDate: existing.log_date,
+      itemTypeId: existing.item_type_id,
+      description,
+      personalEstimateHours: existing.personal_estimate_hours || 0,
+      actualHours: existing.actual_hours || 0,
+      remainingHours: existing.remaining_hours || 0,
+      logStatus: logStatus,
+      taskSource: existing.task_source || 'SELF',
+      demandId: existing.demand_id,
+      phaseKey: existing.phase_key,
+      assignedByUserId: existing.assigned_by_user_id,
+      expectedStartDate: expectedStartDate,
+      expectedCompletionDate: expectedCompletionDate,
+      logCompletedAt: existing.log_completed_at,
+      ownerEstimateRequired: null,
+    })
+
+    return res.json({ success: true })
+  } catch (error) {
+    console.error('updateAssignedLog error:', error)
+    return res.status(500).json({ success: false, message: error.message || '更新指派事项失败' })
+  }
 }

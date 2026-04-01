@@ -5178,10 +5178,9 @@ const Work = {
       .filter((item) => {
         const status = String(item.log_status || '').trim().toUpperCase()
         const expectedStartDate = String(item.expected_start_date || '').trim()
-        const expectedDate = String(item.expected_completion_date || '').trim()
-        if (expectedDate && expectedDate === previousWorkdayDate) return false
         if (status !== 'TODO') return false
-        return Boolean(expectedStartDate) && expectedStartDate > todayDate
+        if (expectedStartDate && expectedStartDate <= todayDate) return false
+        return true
       })
       .map((item) => {
         const mapped = buildFocusItem(item)
@@ -7084,6 +7083,36 @@ const Work = {
       }
     }
   },
+
+  async getMyAssignedItems(assignedByUserId) {
+    const sql = `
+      SELECT
+        l.id,
+        l.user_id,
+        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+        l.item_type_id,
+        it.name AS item_type_name,
+        l.description,
+        l.demand_id,
+        d.name AS demand_name,
+        l.phase_key,
+        l.personal_estimate_hours,
+        l.actual_hours,
+        l.owner_estimate_hours,
+        l.expected_start_date,
+        l.expected_completion_date,
+        l.log_status,
+        l.log_completed_at
+      FROM work_logs l
+      LEFT JOIN users u ON u.id = l.user_id
+      LEFT JOIN work_item_types it ON it.id = l.item_type_id
+      LEFT JOIN work_demands d ON d.id = l.demand_id
+      WHERE l.assigned_by_user_id = ?
+      ORDER BY l.id DESC
+    `
+    const [rows] = await pool.query(sql, [assignedByUserId])
+    return rows
+  }
 }
 
 module.exports = Work

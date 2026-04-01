@@ -84,6 +84,8 @@ const {
   replaceDemandWorkflowLatestTemplate,
   getMyWorkbench,
   getMyWeeklyReport,
+  getMyAssignedItems,
+  updateAssignedLog,
   getOwnerWorkbench,
   getMorningStandupBoard,
   sendNoFillReminders,
@@ -283,6 +285,8 @@ router.get('/insight/member-detail', getMemberEfficiencyDetail)
 
 router.get('/workbench/me', authMiddleware.requirePermission('workbench.view.self'), getMyWorkbench)
 router.get('/workbench/me/weekly-report', authMiddleware.requirePermission('workbench.view.self'), getMyWeeklyReport)
+router.get('/my-assigned-items', authMiddleware.requirePermission('worklog.view.self'), getMyAssignedItems)
+router.put('/my-assigned-items/:id', authMiddleware.requirePermission('worklog.view.self'), updateAssignedLog)
 router.get('/workbench/morning', getMorningStandupBoard)
 router.get(
   '/workbench/owner',
