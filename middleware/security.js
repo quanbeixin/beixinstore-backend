@@ -15,7 +15,7 @@ function parseBoolean(rawValue, fallbackValue = false) {
 }
 
 const apiWindowMs = parsePositiveInt(process.env.API_RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000)
-const apiMax = parsePositiveInt(process.env.API_RATE_LIMIT_MAX, 1000)
+const apiMax = parsePositiveInt(process.env.API_RATE_LIMIT_MAX, 5000)
 const apiSkipOptions = parseBoolean(process.env.API_RATE_LIMIT_SKIP_OPTIONS, true)
 const apiSkipLogin = parseBoolean(process.env.API_RATE_LIMIT_SKIP_LOGIN, true)
 
