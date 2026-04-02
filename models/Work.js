@@ -1964,8 +1964,11 @@ const Work = {
         bg.item_name AS business_group_name,
         DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
         ci.current_node_key,
+        ci.current_node_name,
         ci.current_phase_key,
         ci.current_phase_name,
+        ci.current_node_planned_start_date,
+        ci.current_node_planned_end_date,
         d.status,
         d.priority,
         d.description,
@@ -1990,8 +1993,11 @@ const Work = {
         SELECT
           x.biz_id AS demand_id,
           x.current_node_key,
+          COALESCE(NULLIF(n.node_name_snapshot, ''), NULLIF(pdi_node.item_name, ''), NULLIF(pdi_phase.item_name, ''), '-') AS current_node_name,
           COALESCE(NULLIF(n.phase_key, ''), '') AS current_phase_key,
-          COALESCE(pdi_phase.item_name, NULLIF(pdi_node.item_name, ''), '-') AS current_phase_name
+          COALESCE(pdi_phase.item_name, NULLIF(pdi_node.item_name, ''), '-') AS current_phase_name,
+          DATE_FORMAT(n.planned_start_time, '%Y-%m-%d') AS current_node_planned_start_date,
+          DATE_FORMAT(n.planned_end_time, '%Y-%m-%d') AS current_node_planned_end_date
         FROM wf_process_instances x
         LEFT JOIN wf_process_instance_nodes n
           ON n.instance_id = x.id
