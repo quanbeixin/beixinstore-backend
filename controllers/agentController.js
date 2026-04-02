@@ -27,9 +27,29 @@ function hasAdminRole(req) {
   return roleKeys.includes('ADMIN')
 }
 
+const SUPER_ADMIN_ONLY_AGENT_SCENES = new Set([
+  AGENT_SCENES.MORNING_STANDUP_ANALYSIS?.code || 'MORNING_STANDUP_ANALYSIS',
+  AGENT_SCENES.DEMAND_POOL_ANALYSIS?.code || 'DEMAND_POOL_ANALYSIS',
+])
+
+function isSuperAdmin(req) {
+  return Boolean(req.userAccess?.is_super_admin)
+}
+
 function ensureAdmin(req, res) {
   if (hasAdminRole(req)) return true
   res.status(403).json({ success: false, message: '仅管理员可维护 Agent 配置' })
+  return false
+}
+
+function ensureSceneAccess(req, res, sceneCode) {
+  if (!sceneCode) return true
+  if (!SUPER_ADMIN_ONLY_AGENT_SCENES.has(sceneCode)) return true
+  if (isSuperAdmin(req)) return true
+  res.status(403).json({
+    success: false,
+    message: '仅超级管理员可使用该 Agent 场景',
+  })
   return false
 }
 
@@ -182,6 +202,7 @@ async function getAgentOptions(req, res) {
     if (!sceneCode) {
       return res.status(400).json({ success: false, message: 'scene_code 无效' })
     }
+    if (!ensureSceneAccess(req, res, sceneCode)) return
     const rows = await Agent.listAgentOptions(sceneCode)
     return res.json({
       success: true,
@@ -209,6 +230,7 @@ async function executeAgent(req, res) {
     if (!sceneCode) {
       return res.status(400).json({ success: false, message: 'scene_code 无效' })
     }
+    if (!ensureSceneAccess(req, res, sceneCode)) return
     if (!agentId) {
       return res.status(400).json({ success: false, message: 'agent_id 无效' })
     }
