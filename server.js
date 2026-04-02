@@ -16,6 +16,8 @@ const configRoutes = require('./routes/configRoutes')
 const orgRoutes = require('./routes/orgRoutes')
 const rbacRoutes = require('./routes/rbacRoutes')
 const workRoutes = require('./routes/workRoutes')
+const notificationRuleRoutes = require('./routes/notificationRuleRoutes')
+const notificationEventRoutes = require('./routes/notificationEventRoutes')
 const { apiLimiter, loginLimiter } = require('./middleware/security')
 
 const app = express()
@@ -103,6 +105,8 @@ app.use('/api/config', configRoutes)
 app.use('/api/org', orgRoutes)
 app.use('/api/rbac', rbacRoutes)
 app.use('/api/work', workRoutes)
+app.use('/api/notification/rules', notificationRuleRoutes)
+app.use('/api/notification', notificationEventRoutes)
 app.use('/api', testRoutes)
 
 app.get('/', (req, res) => {
