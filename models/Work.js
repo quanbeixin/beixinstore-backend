@@ -1856,6 +1856,8 @@ const Work = {
     ownerUserId = null,
     updatedStartDate = '',
     updatedEndDate = '',
+    relationScope = '',
+    currentUserId = null,
     mineUserId = null,
     completedOnly = false,
     excludeCompleted = false,
@@ -1894,6 +1896,31 @@ const Work = {
     if (updatedEndDate) {
       baseConditions.push('d.updated_at < DATE_ADD(?, INTERVAL 1 DAY)')
       baseParams.push(updatedEndDate)
+    }
+
+    if (relationScope === 'OWNED' && currentUserId) {
+      baseConditions.push('d.owner_user_id = ?')
+      baseParams.push(currentUserId)
+    }
+
+    if (relationScope === 'PARTICIPATED' && currentUserId) {
+      baseConditions.push(
+        `(d.owner_user_id <> ? AND (
+          EXISTS (
+            SELECT 1
+            FROM work_logs relation_logs
+            WHERE relation_logs.demand_id = d.id
+              AND relation_logs.user_id = ?
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM project_members relation_members
+            WHERE relation_members.demand_id = d.id
+              AND relation_members.user_id = ?
+          )
+        ))`,
+      )
+      baseParams.push(currentUserId, currentUserId, currentUserId)
     }
 
     if (mineUserId) {

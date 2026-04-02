@@ -388,6 +388,14 @@ function normalizePriorityOrder(value) {
   return ''
 }
 
+function normalizeDemandRelationScope(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return ''
+  if (normalized === 'owned') return 'OWNED'
+  if (normalized === 'participated') return 'PARTICIPATED'
+  return ''
+}
+
 function normalizeLogStatus(value) {
   const status = String(value || 'IN_PROGRESS').trim().toUpperCase()
   return Work.WORK_LOG_STATUSES.includes(status) ? status : 'IN_PROGRESS'
@@ -1083,6 +1091,8 @@ const listDemands = async (req, res) => {
   const updatedEndDateRaw = req.query.updated_end_date
   const updatedStartDate = normalizeDate(updatedStartDateRaw)
   const updatedEndDate = normalizeDate(updatedEndDateRaw)
+  const relationScopeRaw = req.query.relation_scope
+  const relationScope = normalizeDemandRelationScope(relationScopeRaw)
   const mine = toBool(req.query.mine, false)
   const completedOnly = toBool(req.query.completed_only, false)
   const excludeCompleted = toBool(req.query.exclude_completed, false)
@@ -1119,6 +1129,14 @@ const listDemands = async (req, res) => {
   if (updatedStartDate && updatedEndDate && updatedStartDate > updatedEndDate) {
     return res.status(400).json({ success: false, message: '更新时间范围不合法：开始日期不能大于结束日期' })
   }
+  if (
+    relationScopeRaw !== undefined &&
+    relationScopeRaw !== null &&
+    String(relationScopeRaw).trim() !== '' &&
+    !relationScope
+  ) {
+    return res.status(400).json({ success: false, message: 'relation_scope 仅支持 owned 或 participated' })
+  }
 
   try {
     const { rows, total, allTotal, completedTotal, cancelledTotal, groupCounts } = await Work.listDemands({
@@ -1132,6 +1150,8 @@ const listDemands = async (req, res) => {
       ownerUserId,
       updatedStartDate: updatedStartDate || '',
       updatedEndDate: updatedEndDate || '',
+      relationScope,
+      currentUserId: req.user?.id ? Number(req.user.id) : null,
       mineUserId: mine ? req.user.id : null,
       completedOnly,
       cancelledOnly,
