@@ -2039,8 +2039,11 @@ const listLogs = async (req, res) => {
       ? ''
       : String(unifiedStatusRaw).trim().toUpperCase()
   const requestedUserId = toPositiveInt(req.query.user_id)
-  const teamScope = String(req.query.scope || '').trim().toLowerCase() === 'team'
+  const requestedScope = String(req.query.scope || '').trim().toLowerCase()
+  const teamScope = requestedScope === 'team'
+  const demandScope = requestedScope === 'demand'
   const canViewTeam = hasPermission(req, 'worklog.view.team')
+  const canManageDemandWorkflow = hasPermission(req, 'demand.workflow.manage') || hasPermission(req, 'demand.manage')
 
   if (logStatus && !Work.WORK_LOG_STATUSES.includes(logStatus)) {
     return res.status(400).json({ success: false, message: 'log_status 无效' })
@@ -2049,7 +2052,7 @@ const listLogs = async (req, res) => {
     return res.status(400).json({ success: false, message: 'unified_status 无效' })
   }
 
-  if (requestedUserId && requestedUserId !== req.user.id && !canViewTeam) {
+  if (requestedUserId && requestedUserId !== req.user.id && !canViewTeam && !demandScope) {
     return res.status(403).json({ success: false, message: '无权限查看其他成员工作记录' })
   }
 
@@ -2057,7 +2060,21 @@ const listLogs = async (req, res) => {
     return res.status(403).json({ success: false, message: '无权限查看团队工作记录' })
   }
 
-  const userId = teamScope ? null : requestedUserId || req.user.id
+  if (demandScope) {
+    if (!demandId) {
+      return res.status(400).json({ success: false, message: '需求维度查询必须提供 demand_id' })
+    }
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '关联需求不存在' })
+    }
+    const canViewDemandScope = canViewTeam || canManageDemandWorkflow || canEditDemand(req, demand)
+    if (!canViewDemandScope) {
+      return res.status(403).json({ success: false, message: '无权限查看当前需求下的全部事项' })
+    }
+  }
+
+  const userId = teamScope || demandScope ? null : requestedUserId || req.user.id
   const teamScopeUserId = teamScope ? req.user.id : null
 
   try {
@@ -3228,14 +3245,27 @@ const getDepartmentEfficiencyRanking = async (req, res) => {
     return res.status(400).json({ success: false, message: error })
   }
 
-  const departmentId = toPositiveInt(req.query.department_id)
-  if (req.query.department_id !== undefined && req.query.department_id !== '' && !departmentId) {
+  const departmentIdRaw = req.query.department_id
+  const departmentId = toPositiveInt(departmentIdRaw)
+  if (
+    departmentIdRaw !== undefined &&
+    departmentIdRaw !== null &&
+    String(departmentIdRaw).trim() !== '' &&
+    !departmentId
+  ) {
     return res.status(400).json({ success: false, message: 'department_id 无效' })
   }
-  if (!departmentId) {
-    return res.status(400).json({ success: false, message: 'department_id 必填' })
+  if (departmentId && !canAccessDepartmentInsight(req, departmentId)) {
+    return res.status(403).json({ success: false, message: '仅可查看本人负责部门的数据' })
   }
-  if (!canAccessDepartmentInsight(req, departmentId)) {
+  const isPrivilegedViewer = Boolean(req.userAccess?.is_super_admin) || hasRole(req, 'ADMIN')
+  const managedDepartmentIds = Array.isArray(req.userAccess?.managed_department_ids)
+    ? req.userAccess.managed_department_ids
+        .map((item) => Number(item))
+        .filter((item) => Number.isInteger(item) && item > 0)
+    : []
+  const departmentIds = departmentId ? [] : (isPrivilegedViewer ? [] : managedDepartmentIds)
+  if (!departmentId && !isPrivilegedViewer && departmentIds.length === 0) {
     return res.status(403).json({ success: false, message: '仅可查看本人负责部门的数据' })
   }
 
@@ -3248,7 +3278,8 @@ const getDepartmentEfficiencyRanking = async (req, res) => {
 
   try {
     const data = await Work.getDepartmentEfficiencyRanking({
-      departmentId,
+      departmentId: departmentId || null,
+      departmentIds,
       startDate,
       endDate,
       sortOrder,

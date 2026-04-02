@@ -4136,6 +4136,7 @@ const Work = {
          COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
          ${todayPlannedHoursSql} AS today_planned_hours,
          ${todayActualHoursSql} AS today_actual_hours,
+         COALESCE(ted.today_entry_description, '') AS today_entry_description,
          COALESCE(l.actual_hours, tt.total_actual_hours, 0) AS cumulative_actual_hours
        FROM work_logs l
        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
@@ -4174,6 +4175,16 @@ const Work = {
          ) le ON le.latest_id = e.id
          GROUP BY log_id
        ) tt ON tt.log_id = l.id
+       LEFT JOIN (
+         SELECT e.log_id, e.description AS today_entry_description
+         FROM work_log_daily_entries e
+         INNER JOIN (
+           SELECT log_id, MAX(id) AS latest_id
+           FROM work_log_daily_entries
+           WHERE entry_date = CURDATE()
+           GROUP BY log_id
+         ) le ON le.latest_id = e.id
+       ) ted ON ted.log_id = l.id
        WHERE l.user_id = ?
          AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
        ORDER BY
@@ -5956,6 +5967,7 @@ const Work = {
 
   async getDepartmentEfficiencyRanking({
     departmentId,
+    departmentIds = [],
     startDate,
     endDate,
     sortOrder = 'desc',
@@ -5964,45 +5976,33 @@ const Work = {
   } = {}) {
     await ensureEfficiencyFactorSettingsTable()
     const normalizedDepartmentId = toPositiveInt(departmentId)
-    if (!normalizedDepartmentId) {
-      return {
-        filters: {
-          department_id: null,
-          start_date: startDate,
-          end_date: endDate,
-          keyword: keyword || '',
-          sort_order: 'desc',
-          previous_start_date: '',
-          previous_end_date: '',
-        },
-        summary: {
-          department_id: null,
-          department_name: '-',
-          member_count: 0,
-          avg_actual_hours: 0,
-          total_owner_estimate_hours: 0,
-          total_personal_estimate_hours: 0,
-          total_actual_hours: 0,
-          net_efficiency_value: null,
-        },
-        rows: [],
-      }
-    }
+    const normalizedDepartmentIds = Array.isArray(departmentIds)
+      ? [...new Set(departmentIds.map((item) => toPositiveInt(item)).filter((item) => Number.isInteger(item) && item > 0))]
+      : []
+    const hasDepartmentScope = normalizedDepartmentId || normalizedDepartmentIds.length > 0
 
     const normalizedSortOrder = String(sortOrder || '').trim().toLowerCase() === 'asc' ? 'ASC' : 'DESC'
     const normalizedKeyword = String(keyword || '').trim().toLowerCase()
     const normalizedCompletedOnly = Boolean(completedOnly)
     const previousRange = buildPreviousPeriodRange(startDate, endDate)
+    const departmentScopeConditionSql = hasDepartmentScope
+      ? (normalizedDepartmentId ? 'AND u.department_id = ?' : 'AND u.department_id IN (?)')
+      : ''
+    const departmentScopeParams = hasDepartmentScope
+      ? (normalizedDepartmentId ? [normalizedDepartmentId] : [normalizedDepartmentIds])
+      : []
 
     const storedRowsPromise = this.listEfficiencyFactorSettings()
     const [departmentRows, currentRows, previousRows, storedRows] = await Promise.all([
-      pool.query(
-        `SELECT id, name
-         FROM departments
-         WHERE id = ?
-         LIMIT 1`,
-        [normalizedDepartmentId],
-      ).then((result) => result[0] || []),
+      normalizedDepartmentId
+        ? pool.query(
+            `SELECT id, name
+             FROM departments
+             WHERE id = ?
+             LIMIT 1`,
+            [normalizedDepartmentId],
+          ).then((result) => result[0] || [])
+        : Promise.resolve([]),
       pool.query(
         `SELECT
            u.id AS user_id,
@@ -6050,9 +6050,9 @@ const Work = {
            ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
           AND pdi.item_code = l.phase_key
          LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
-         WHERE u.department_id = ?
-           AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+         WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
            AND COALESCE(u.include_in_metrics, 1) = 1
+           ${departmentScopeConditionSql}
          GROUP BY
            u.id,
            COALESCE(NULLIF(u.real_name, ''), u.username),
@@ -6061,7 +6061,7 @@ const Work = {
            COALESCE(u.job_level, ''),
            jl.item_name
          ORDER BY total_actual_hours ${normalizedSortOrder}, u.id ASC`,
-        [startDate, endDate, normalizedDepartmentId],
+        [startDate, endDate, ...departmentScopeParams],
       ).then((result) => result[0] || []),
       previousRange.startDate && previousRange.endDate
         ? pool.query(
@@ -6070,21 +6070,22 @@ const Work = {
                ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS previous_actual_hours
              FROM work_logs l
              INNER JOIN users u ON u.id = l.user_id
-             WHERE u.department_id = ?
-               AND COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+             WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
                AND COALESCE(u.include_in_metrics, 1) = 1
+               ${departmentScopeConditionSql}
                AND l.log_date >= ?
                AND l.log_date <= ?
                ${normalizedCompletedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
              GROUP BY l.user_id`,
-            [normalizedDepartmentId, previousRange.startDate, previousRange.endDate],
+            [...departmentScopeParams, previousRange.startDate, previousRange.endDate],
           ).then((result) => result[0] || [])
         : Promise.resolve([]),
       storedRowsPromise,
     ])
 
-    const departmentName =
-      departmentRows?.[0]?.name || `部门#${normalizedDepartmentId}`
+    const departmentName = normalizedDepartmentId
+      ? (departmentRows?.[0]?.name || `部门#${normalizedDepartmentId}`)
+      : '全部部门'
     const netEfficiencyFormula = buildNetEfficiencyFormulaConfig(storedRows)
     const previousActualByUserId = new Map(
       (previousRows || []).map((row) => [Number(row.user_id), Number(row.previous_actual_hours || 0)]),
@@ -6185,7 +6186,7 @@ const Work = {
 
     return {
       filters: {
-        department_id: normalizedDepartmentId,
+        department_id: normalizedDepartmentId || null,
         start_date: startDate,
         end_date: endDate,
         keyword: keyword || '',
@@ -6195,7 +6196,7 @@ const Work = {
         previous_end_date: previousRange.endDate,
       },
       summary: {
-        department_id: normalizedDepartmentId,
+        department_id: normalizedDepartmentId || null,
         department_name: departmentName,
         member_count: rows.length,
         avg_actual_hours: rows.length > 0 ? toDecimal1(totalActualHours / rows.length) : 0,
