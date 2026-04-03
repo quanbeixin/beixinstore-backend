@@ -19,6 +19,13 @@ for f in $(ls docs/migrations/*-up.sql | sort); do
 done
 ```
 
+已知依赖顺序（如果单独执行脚本，需注意）：
+
+1. `2026-03-29-bug-management-up.sql` 必须先于 `2026-03-29-bug-issue-stage-up.sql`
+2. `2026-03-30-work-demand-links-up.sql` 必须先于 `2026-03-30-demand-hour-summary-up.sql`
+
+说明：按文件名升序批量执行通常不会遇到人工顺序错误；若拆分执行，请按以上顺序处理。
+
 建议再执行 verify：
 
 ```bash
@@ -32,30 +39,30 @@ done
 
 ## 2. 必跑 Seed 清单
 
-为确保数据与当前环境一致，至少执行：
+为确保数据与当前环境一致，至少执行两份 seed：
 
-1. `/Users/baopengfei/.local/mysql/beixin_store_local_bootstrap.sql`
-2. `/Users/baopengfei/.local/mysql/beixin_store_local_seed_pm.sql`
+1. `<SEED_DIR>/beixin_store_local_bootstrap.sql`
+2. `<SEED_DIR>/beixin_store_local_seed_pm.sql`
 
-执行示例（按当前本机账号）：
+执行示例（请替换参数与路径）：
 
 ```bash
-/Users/baopengfei/.local/mysql/mysql-8.0.45/bin/mysql \
-  --protocol=TCP -h 127.0.0.1 -P 3306 -u beixin_local -p'beixin_local_123' \
-  beixin_store_local < /Users/baopengfei/.local/mysql/beixin_store_local_bootstrap.sql
+mysql \
+  --protocol=TCP -h <DB_HOST> -P <DB_PORT> -u <DB_USER> -p'<DB_PASSWORD>' \
+  <DB_NAME> < <SEED_DIR>/beixin_store_local_bootstrap.sql
 
-/Users/baopengfei/.local/mysql/mysql-8.0.45/bin/mysql \
-  --protocol=TCP -h 127.0.0.1 -P 3306 -u beixin_local -p'beixin_local_123' \
-  beixin_store_local < /Users/baopengfei/.local/mysql/beixin_store_local_seed_pm.sql
+mysql \
+  --protocol=TCP -h <DB_HOST> -P <DB_PORT> -u <DB_USER> -p'<DB_PASSWORD>' \
+  <DB_NAME> < <SEED_DIR>/beixin_store_local_seed_pm.sql
 ```
 
 ## 3. 一条命令导出数据库快照（当前机器）
 
 ```bash
-/Users/baopengfei/.local/mysql/mysql-8.0.45/bin/mysqldump \
-  --protocol=TCP -h 127.0.0.1 -P 3306 -u beixin_local -p'beixin_local_123' \
+mysqldump \
+  --protocol=TCP -h <DB_HOST> -P <DB_PORT> -u <DB_USER> -p'<DB_PASSWORD>' \
   --single-transaction --routines --triggers --default-character-set=utf8mb4 \
-  beixin_store_local > /Users/baopengfei/JS/beixinstore-backend/docs/db-snapshot-$(date +%F-%H%M%S).sql
+  <DB_NAME> > ./docs/db-snapshot-$(date +%F-%H%M%S).sql
 ```
 
 ## 4. 另一台机器导入命令
@@ -89,4 +96,3 @@ node scripts/smoke-project-management-v2.js
 1. 拉取前后端 `notification` 分支。
 2. 后端复制 `.env.example` 为 `.env`，配置 DB/JWT/飞书参数。
 3. 确认数据库网络可达、账号有建表与写入权限。
-
