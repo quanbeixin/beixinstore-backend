@@ -3314,59 +3314,52 @@ const Work = {
       ? String(logStatus).toUpperCase()
       : 'IN_PROGRESS'
     const normalizedOwnerEstimateRequired = normalizeNullableBooleanAsNumber(ownerEstimateRequired)
+    const baseInsertParams = [
+      userId,
+      logDate,
+      itemTypeId,
+      description,
+      normalizeDecimal(personalEstimateHours, 0),
+      normalizeDecimal(actualHours, 0),
+      normalizeDecimal(remainingHours, 0),
+      normalizedStatus,
+      normalizeTaskSource(taskSource, 'SELF'),
+      demandId,
+      phaseKey,
+      toPositiveInt(assignedByUserId),
+      expectedStartDate,
+      expectedCompletionDate,
+      normalizedStatus,
+      logCompletedAt,
+    ]
     try {
       const [result] = await pool.query(
         `INSERT INTO work_logs (
            user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, task_source, demand_id, phase_key, assigned_by_user_id, expected_start_date, expected_completion_date, log_completed_at, self_task_difficulty_code, owner_estimate_required
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END, ?, ?)`,
-        [
-          userId,
-          logDate,
-          itemTypeId,
-          description,
-          normalizeDecimal(personalEstimateHours, 0),
-          normalizeDecimal(actualHours, 0),
-          normalizeDecimal(remainingHours, 0),
-          normalizedStatus,
-          normalizeTaskSource(taskSource, 'SELF'),
-          demandId,
-          phaseKey,
-          toPositiveInt(assignedByUserId),
-          expectedStartDate,
-          expectedCompletionDate,
-          normalizedStatus,
-          logCompletedAt,
-          selfTaskDifficultyCode || null,
-          normalizedOwnerEstimateRequired,
-        ],
+        [...baseInsertParams, selfTaskDifficultyCode || null, normalizedOwnerEstimateRequired],
       )
       return result.insertId
     } catch (err) {
       if (!isMissingColumnError(err)) throw err
-      const [result] = await pool.query(
-        `INSERT INTO work_logs (
-           user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, task_source, demand_id, phase_key, assigned_by_user_id, expected_start_date, expected_completion_date, log_completed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END)`,
-        [
-          userId,
-          logDate,
-          itemTypeId,
-          description,
-          normalizeDecimal(personalEstimateHours, 0),
-          normalizeDecimal(actualHours, 0),
-          normalizeDecimal(remainingHours, 0),
-          normalizedStatus,
-          normalizeTaskSource(taskSource, 'SELF'),
-          demandId,
-          phaseKey,
-          toPositiveInt(assignedByUserId),
-          expectedStartDate,
-          expectedCompletionDate,
-          normalizedStatus,
-          logCompletedAt,
-        ],
-      )
-      return result.insertId
+      try {
+        const [result] = await pool.query(
+          `INSERT INTO work_logs (
+             user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, task_source, demand_id, phase_key, assigned_by_user_id, expected_start_date, expected_completion_date, log_completed_at, self_task_difficulty_code
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END, ?)`,
+          [...baseInsertParams, selfTaskDifficultyCode || null],
+        )
+        return result.insertId
+      } catch (secondaryErr) {
+        if (!isMissingColumnError(secondaryErr)) throw secondaryErr
+        const [result] = await pool.query(
+          `INSERT INTO work_logs (
+             user_id, log_date, item_type_id, description, personal_estimate_hours, actual_hours, remaining_hours, log_status, task_source, demand_id, phase_key, assigned_by_user_id, expected_start_date, expected_completion_date, log_completed_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'DONE' THEN COALESCE(?, NOW()) ELSE NULL END)`,
+          baseInsertParams,
+        )
+        return result.insertId
+      }
     }
   },
 
@@ -3395,6 +3388,22 @@ const Work = {
       ? String(logStatus).toUpperCase()
       : 'IN_PROGRESS'
     const normalizedOwnerEstimateRequired = normalizeNullableBooleanAsNumber(ownerEstimateRequired)
+    const baseUpdateParams = [
+      logDate,
+      itemTypeId,
+      description,
+      normalizeDecimal(personalEstimateHours, 0),
+      normalizeDecimal(actualHours, 0),
+      normalizeDecimal(remainingHours, 0),
+      normalizedStatus,
+      normalizeTaskSource(taskSource, 'SELF'),
+      demandId,
+      phaseKey,
+      toPositiveInt(assignedByUserId),
+      expectedStartDate,
+      expectedCompletionDate,
+    ]
+    const completionParams = [normalizedStatus, logCompletedAt, logCompletedAt, id]
     try {
       const [result] = await pool.query(
         `UPDATE work_logs
@@ -3419,73 +3428,64 @@ const Work = {
              ELSE ?
            END
          WHERE id = ?`,
-        [
-          logDate,
-          itemTypeId,
-          description,
-          normalizeDecimal(personalEstimateHours, 0),
-          normalizeDecimal(actualHours, 0),
-          normalizeDecimal(remainingHours, 0),
-          normalizedStatus,
-          normalizeTaskSource(taskSource, 'SELF'),
-          demandId,
-          phaseKey,
-          toPositiveInt(assignedByUserId),
-          expectedStartDate,
-          expectedCompletionDate,
-          selfTaskDifficultyCode || null,
-          normalizedOwnerEstimateRequired,
-          normalizedStatus,
-          logCompletedAt,
-          logCompletedAt,
-          id,
-        ],
+        [...baseUpdateParams, selfTaskDifficultyCode || null, normalizedOwnerEstimateRequired, ...completionParams],
       )
       return result.affectedRows
     } catch (err) {
       if (!isMissingColumnError(err)) throw err
-      const [result] = await pool.query(
-        `UPDATE work_logs
-         SET
-           log_date = ?,
-           item_type_id = ?,
-           description = ?,
-           personal_estimate_hours = ?,
-           actual_hours = ?,
-           remaining_hours = ?,
-           log_status = ?,
-           task_source = ?,
-           demand_id = ?,
-           phase_key = ?,
-           assigned_by_user_id = ?,
-           expected_start_date = ?,
-           expected_completion_date = ?,
-           log_completed_at = CASE
-             WHEN ? = 'DONE' THEN COALESCE(?, log_completed_at, NOW())
-             ELSE ?
-           END
-         WHERE id = ?`,
-        [
-          logDate,
-          itemTypeId,
-          description,
-          normalizeDecimal(personalEstimateHours, 0),
-          normalizeDecimal(actualHours, 0),
-          normalizeDecimal(remainingHours, 0),
-          normalizedStatus,
-          normalizeTaskSource(taskSource, 'SELF'),
-          demandId,
-          phaseKey,
-          toPositiveInt(assignedByUserId),
-          expectedStartDate,
-          expectedCompletionDate,
-          normalizedStatus,
-          logCompletedAt,
-          logCompletedAt,
-          id,
-        ],
-      )
-      return result.affectedRows
+      try {
+        const [result] = await pool.query(
+          `UPDATE work_logs
+           SET
+             log_date = ?,
+             item_type_id = ?,
+             description = ?,
+             personal_estimate_hours = ?,
+             actual_hours = ?,
+             remaining_hours = ?,
+             log_status = ?,
+             task_source = ?,
+             demand_id = ?,
+             phase_key = ?,
+             assigned_by_user_id = ?,
+             expected_start_date = ?,
+             expected_completion_date = ?,
+             self_task_difficulty_code = ?,
+             log_completed_at = CASE
+               WHEN ? = 'DONE' THEN COALESCE(?, log_completed_at, NOW())
+               ELSE ?
+             END
+           WHERE id = ?`,
+          [...baseUpdateParams, selfTaskDifficultyCode || null, ...completionParams],
+        )
+        return result.affectedRows
+      } catch (secondaryErr) {
+        if (!isMissingColumnError(secondaryErr)) throw secondaryErr
+        const [result] = await pool.query(
+          `UPDATE work_logs
+           SET
+             log_date = ?,
+             item_type_id = ?,
+             description = ?,
+             personal_estimate_hours = ?,
+             actual_hours = ?,
+             remaining_hours = ?,
+             log_status = ?,
+             task_source = ?,
+             demand_id = ?,
+             phase_key = ?,
+             assigned_by_user_id = ?,
+             expected_start_date = ?,
+             expected_completion_date = ?,
+             log_completed_at = CASE
+               WHEN ? = 'DONE' THEN COALESCE(?, log_completed_at, NOW())
+               ELSE ?
+             END
+           WHERE id = ?`,
+          [...baseUpdateParams, ...completionParams],
+        )
+        return result.affectedRows
+      }
     }
   },
 
@@ -3917,6 +3917,39 @@ const Work = {
 
     await this.syncLogActualHoursByDailyEntries(normalizedLogId)
     return normalizedEntryId
+  },
+
+  async ensureLogSelfTaskDifficulty(logId, { userId = null, difficultyCode = 'N1' } = {}) {
+    const normalizedLogId = toPositiveInt(logId)
+    if (!normalizedLogId) return 0
+
+    const normalizedUserId = toPositiveInt(userId)
+    const normalizedDifficultyCode = String(difficultyCode || '')
+      .trim()
+      .toUpperCase()
+      .slice(0, 64)
+    if (!normalizedDifficultyCode || !/^[A-Z][A-Z0-9_]{0,63}$/.test(normalizedDifficultyCode)) {
+      return 0
+    }
+
+    try {
+      let sql = `UPDATE work_logs
+                 SET self_task_difficulty_code = ?,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?
+                   AND (self_task_difficulty_code IS NULL OR TRIM(self_task_difficulty_code) = '')`
+      const params = [normalizedDifficultyCode, normalizedLogId]
+      if (normalizedUserId) {
+        sql += ' AND user_id = ?'
+        params.push(normalizedUserId)
+      }
+
+      const [result] = await pool.query(sql, params)
+      return Number(result?.affectedRows || 0)
+    } catch (err) {
+      if (!isMissingColumnError(err)) throw err
+      return 0
+    }
   },
 
   async listDailyEntriesForLog(logId, { startDate = '', endDate = '' } = {}) {
@@ -5726,6 +5759,8 @@ const Work = {
        l.personal_estimate_hours,
        l.actual_hours,
        l.owner_estimate_hours,
+       l.self_task_difficulty_code,
+       COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
        l.task_difficulty_code,
        COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
        l.owner_estimated_by,
@@ -5751,6 +5786,9 @@ const Work = {
      LEFT JOIN config_dict_items td
        ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
       AND td.item_code = l.task_difficulty_code
+     LEFT JOIN config_dict_items std
+       ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+      AND std.item_code = l.self_task_difficulty_code
      LEFT JOIN config_dict_items pdi
        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
       AND pdi.item_code = l.phase_key
@@ -5771,6 +5809,8 @@ const Work = {
        l.personal_estimate_hours,
        l.actual_hours,
        l.owner_estimate_hours,
+       l.self_task_difficulty_code,
+       COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
        l.task_difficulty_code,
        COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
        l.owner_estimated_by,
@@ -5796,6 +5836,9 @@ const Work = {
      LEFT JOIN config_dict_items td
        ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
       AND td.item_code = l.task_difficulty_code
+     LEFT JOIN config_dict_items std
+       ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+      AND std.item_code = l.self_task_difficulty_code
      LEFT JOIN config_dict_items pdi
        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
       AND pdi.item_code = l.phase_key
@@ -5813,6 +5856,8 @@ const Work = {
        l.personal_estimate_hours,
        l.actual_hours,
        NULL AS owner_estimate_hours,
+       NULL AS self_task_difficulty_code,
+       NULL AS self_task_difficulty_name,
        NULL AS task_difficulty_code,
        NULL AS task_difficulty_name,
        NULL AS owner_estimated_by,

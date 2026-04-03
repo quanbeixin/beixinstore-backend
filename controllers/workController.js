@@ -2380,6 +2380,9 @@ const createOwnerAssignedLog = async (req, res) => {
   let logStatus = hasManualLogStatus ? normalizeLogStatus(req.body.log_status) : ''
   const logCompletedAtRaw = req.body.log_completed_at
   const logCompletedAt = normalizeDateTime(logCompletedAtRaw)
+  const hasSelfTaskDifficultyField = Object.prototype.hasOwnProperty.call(req.body || {}, 'self_task_difficulty_code')
+  const selfTaskDifficultyCodeRaw = req.body.self_task_difficulty_code
+  let selfTaskDifficultyCode = normalizeDictCode(selfTaskDifficultyCodeRaw)
 
   if (demandId) {
     demand = await Work.findDemandById(demandId)
@@ -2458,6 +2461,19 @@ const createOwnerAssignedLog = async (req, res) => {
     return res.status(400).json({ success: false, message: 'log_completed_at 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm:ss' })
   }
 
+  if (
+    hasSelfTaskDifficultyField &&
+    selfTaskDifficultyCodeRaw !== undefined &&
+    selfTaskDifficultyCodeRaw !== null &&
+    String(selfTaskDifficultyCodeRaw).trim() !== '' &&
+    !selfTaskDifficultyCode
+  ) {
+    return res.status(400).json({ success: false, message: 'self_task_difficulty_code 格式不正确' })
+  }
+  if (!selfTaskDifficultyCode) {
+    selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
+  }
+
   if (!expectedStartDate) {
     expectedStartDate = logDate
   }
@@ -2485,6 +2501,11 @@ const createOwnerAssignedLog = async (req, res) => {
 
     if (Number(itemType.require_demand) === 1 && !demandId) {
       return res.status(400).json({ success: false, message: '当前事项类型必须关联需求' })
+    }
+
+    const selfTaskDifficultyDictItem = await ConfigDict.getItemByCode(TASK_DIFFICULTY_DICT_KEY, selfTaskDifficultyCode)
+    if (!selfTaskDifficultyDictItem || Number(selfTaskDifficultyDictItem.enabled) !== 1) {
+      return res.status(400).json({ success: false, message: '个人评估难度配置不存在或已停用' })
     }
 
     let ownerEstimateRequired = null
@@ -2521,6 +2542,7 @@ const createOwnerAssignedLog = async (req, res) => {
       expectedStartDate,
       expectedCompletionDate: expectedCompletionDate || null,
       logCompletedAt: logCompletedAt || null,
+      selfTaskDifficultyCode,
       ownerEstimateRequired,
     })
 
@@ -2698,6 +2720,9 @@ const updateLog = async (req, res) => {
       return res.status(400).json({ success: false, message: 'self_task_difficulty_code 格式不正确' })
     }
     if (hasSelfTaskDifficultyField && !selfTaskDifficultyCode) {
+      selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
+    }
+    if (!selfTaskDifficultyCode) {
       selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
     }
 
@@ -3045,6 +3070,10 @@ const createLogDailyEntry = async (req, res) => {
     if (!entryId) {
       return res.status(500).json({ success: false, message: '创建事项日投入失败，请稍后重试' })
     }
+    await Work.ensureLogSelfTaskDifficulty(id, {
+      userId: req.user.id,
+      difficultyCode: DEFAULT_SELF_TASK_DIFFICULTY_CODE,
+    })
     const rows = await Work.listDailyEntriesForLog(id, {
       startDate: entryDate,
       endDate: entryDate,
@@ -3104,6 +3133,10 @@ const updateLogDailyEntry = async (req, res) => {
       actualHours,
       description,
       createdBy: req.user.id,
+    })
+    await Work.ensureLogSelfTaskDifficulty(id, {
+      userId: req.user.id,
+      difficultyCode: DEFAULT_SELF_TASK_DIFFICULTY_CODE,
     })
     const rows = await Work.listDailyEntriesForLog(id, {
       startDate: entryDate,
@@ -4641,6 +4674,36 @@ async function updateAssignedLog(req, res) {
       expectedCompletionDate = normalizeDate(req.body.expected_completion_date) || null
     }
 
+    const hasSelfTaskDifficultyField = Object.prototype.hasOwnProperty.call(req.body || {}, 'self_task_difficulty_code')
+    const selfTaskDifficultyCodeRaw = req.body.self_task_difficulty_code
+    let selfTaskDifficultyCode = hasSelfTaskDifficultyField
+      ? normalizeDictCode(selfTaskDifficultyCodeRaw)
+      : normalizeDictCode(existing.self_task_difficulty_code)
+
+    if (
+      hasSelfTaskDifficultyField &&
+      selfTaskDifficultyCodeRaw !== undefined &&
+      selfTaskDifficultyCodeRaw !== null &&
+      String(selfTaskDifficultyCodeRaw).trim() !== '' &&
+      !selfTaskDifficultyCode
+    ) {
+      return res.status(400).json({ success: false, message: 'self_task_difficulty_code 格式不正确' })
+    }
+    if (hasSelfTaskDifficultyField && !selfTaskDifficultyCode) {
+      selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
+    }
+
+    if (!selfTaskDifficultyCode) {
+      selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
+    }
+
+    if (selfTaskDifficultyCode) {
+      const selfTaskDifficultyDictItem = await ConfigDict.getItemByCode(TASK_DIFFICULTY_DICT_KEY, selfTaskDifficultyCode)
+      if (!selfTaskDifficultyDictItem || Number(selfTaskDifficultyDictItem.enabled) !== 1) {
+        return res.status(400).json({ success: false, message: '个人评估难度配置不存在或已停用' })
+      }
+    }
+
     await Work.updateLog(id, {
       logDate: existing.log_date,
       itemTypeId: existing.item_type_id,
@@ -4656,6 +4719,7 @@ async function updateAssignedLog(req, res) {
       expectedStartDate: expectedStartDate,
       expectedCompletionDate: expectedCompletionDate,
       logCompletedAt: existing.log_completed_at,
+      selfTaskDifficultyCode: selfTaskDifficultyCode || null,
       ownerEstimateRequired: null,
     })
 
