@@ -11,7 +11,7 @@ const DEFAULT_VALUES = {
 let tableReady = false
 
 function normalizeDefaultHome(value) {
-  const allowed = new Set(['/work-logs', '/work-demands', '/owner-workbench', '/performance-dashboard'])
+  const allowed = new Set(['/work-logs', '/my-demands', '/work-demands', '/owner-workbench', '/performance-dashboard'])
   const path = String(value || '').trim()
   return allowed.has(path) ? path : DEFAULT_VALUES.default_home
 }

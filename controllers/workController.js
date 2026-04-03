@@ -388,6 +388,14 @@ function normalizePriorityOrder(value) {
   return ''
 }
 
+function normalizeDemandRelationScope(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return ''
+  if (normalized === 'owned') return 'OWNED'
+  if (normalized === 'participated') return 'PARTICIPATED'
+  return ''
+}
+
 function normalizeLogStatus(value) {
   const status = String(value || 'IN_PROGRESS').trim().toUpperCase()
   return Work.WORK_LOG_STATUSES.includes(status) ? status : 'IN_PROGRESS'
@@ -1083,6 +1091,8 @@ const listDemands = async (req, res) => {
   const updatedEndDateRaw = req.query.updated_end_date
   const updatedStartDate = normalizeDate(updatedStartDateRaw)
   const updatedEndDate = normalizeDate(updatedEndDateRaw)
+  const relationScopeRaw = req.query.relation_scope
+  const relationScope = normalizeDemandRelationScope(relationScopeRaw)
   const mine = toBool(req.query.mine, false)
   const completedOnly = toBool(req.query.completed_only, false)
   const excludeCompleted = toBool(req.query.exclude_completed, false)
@@ -1119,6 +1129,14 @@ const listDemands = async (req, res) => {
   if (updatedStartDate && updatedEndDate && updatedStartDate > updatedEndDate) {
     return res.status(400).json({ success: false, message: '更新时间范围不合法：开始日期不能大于结束日期' })
   }
+  if (
+    relationScopeRaw !== undefined &&
+    relationScopeRaw !== null &&
+    String(relationScopeRaw).trim() !== '' &&
+    !relationScope
+  ) {
+    return res.status(400).json({ success: false, message: 'relation_scope 仅支持 owned 或 participated' })
+  }
 
   try {
     const { rows, total, allTotal, completedTotal, cancelledTotal, groupCounts } = await Work.listDemands({
@@ -1132,6 +1150,8 @@ const listDemands = async (req, res) => {
       ownerUserId,
       updatedStartDate: updatedStartDate || '',
       updatedEndDate: updatedEndDate || '',
+      relationScope,
+      currentUserId: req.user?.id ? Number(req.user.id) : null,
       mineUserId: mine ? req.user.id : null,
       completedOnly,
       cancelledOnly,
@@ -2019,8 +2039,11 @@ const listLogs = async (req, res) => {
       ? ''
       : String(unifiedStatusRaw).trim().toUpperCase()
   const requestedUserId = toPositiveInt(req.query.user_id)
-  const teamScope = String(req.query.scope || '').trim().toLowerCase() === 'team'
+  const requestedScope = String(req.query.scope || '').trim().toLowerCase()
+  const teamScope = requestedScope === 'team'
+  const demandScope = requestedScope === 'demand'
   const canViewTeam = hasPermission(req, 'worklog.view.team')
+  const canManageDemandWorkflow = hasPermission(req, 'demand.workflow.manage') || hasPermission(req, 'demand.manage')
 
   if (logStatus && !Work.WORK_LOG_STATUSES.includes(logStatus)) {
     return res.status(400).json({ success: false, message: 'log_status 无效' })
@@ -2029,7 +2052,7 @@ const listLogs = async (req, res) => {
     return res.status(400).json({ success: false, message: 'unified_status 无效' })
   }
 
-  if (requestedUserId && requestedUserId !== req.user.id && !canViewTeam) {
+  if (requestedUserId && requestedUserId !== req.user.id && !canViewTeam && !demandScope) {
     return res.status(403).json({ success: false, message: '无权限查看其他成员工作记录' })
   }
 
@@ -2037,7 +2060,21 @@ const listLogs = async (req, res) => {
     return res.status(403).json({ success: false, message: '无权限查看团队工作记录' })
   }
 
-  const userId = teamScope ? null : requestedUserId || req.user.id
+  if (demandScope) {
+    if (!demandId) {
+      return res.status(400).json({ success: false, message: '需求维度查询必须提供 demand_id' })
+    }
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '关联需求不存在' })
+    }
+    const canViewDemandScope = canViewTeam || canManageDemandWorkflow || canEditDemand(req, demand)
+    if (!canViewDemandScope) {
+      return res.status(403).json({ success: false, message: '无权限查看当前需求下的全部事项' })
+    }
+  }
+
+  const userId = teamScope || demandScope ? null : requestedUserId || req.user.id
   const teamScopeUserId = teamScope ? req.user.id : null
 
   try {
@@ -2343,6 +2380,9 @@ const createOwnerAssignedLog = async (req, res) => {
   let logStatus = hasManualLogStatus ? normalizeLogStatus(req.body.log_status) : ''
   const logCompletedAtRaw = req.body.log_completed_at
   const logCompletedAt = normalizeDateTime(logCompletedAtRaw)
+  const hasSelfTaskDifficultyField = Object.prototype.hasOwnProperty.call(req.body || {}, 'self_task_difficulty_code')
+  const selfTaskDifficultyCodeRaw = req.body.self_task_difficulty_code
+  let selfTaskDifficultyCode = normalizeDictCode(selfTaskDifficultyCodeRaw)
 
   if (demandId) {
     demand = await Work.findDemandById(demandId)
@@ -2421,6 +2461,19 @@ const createOwnerAssignedLog = async (req, res) => {
     return res.status(400).json({ success: false, message: 'log_completed_at 格式错误，需为 YYYY-MM-DD 或 YYYY-MM-DD HH:mm:ss' })
   }
 
+  if (
+    hasSelfTaskDifficultyField &&
+    selfTaskDifficultyCodeRaw !== undefined &&
+    selfTaskDifficultyCodeRaw !== null &&
+    String(selfTaskDifficultyCodeRaw).trim() !== '' &&
+    !selfTaskDifficultyCode
+  ) {
+    return res.status(400).json({ success: false, message: 'self_task_difficulty_code 格式不正确' })
+  }
+  if (!selfTaskDifficultyCode) {
+    selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
+  }
+
   if (!expectedStartDate) {
     expectedStartDate = logDate
   }
@@ -2448,6 +2501,11 @@ const createOwnerAssignedLog = async (req, res) => {
 
     if (Number(itemType.require_demand) === 1 && !demandId) {
       return res.status(400).json({ success: false, message: '当前事项类型必须关联需求' })
+    }
+
+    const selfTaskDifficultyDictItem = await ConfigDict.getItemByCode(TASK_DIFFICULTY_DICT_KEY, selfTaskDifficultyCode)
+    if (!selfTaskDifficultyDictItem || Number(selfTaskDifficultyDictItem.enabled) !== 1) {
+      return res.status(400).json({ success: false, message: '个人评估难度配置不存在或已停用' })
     }
 
     let ownerEstimateRequired = null
@@ -2484,6 +2542,7 @@ const createOwnerAssignedLog = async (req, res) => {
       expectedStartDate,
       expectedCompletionDate: expectedCompletionDate || null,
       logCompletedAt: logCompletedAt || null,
+      selfTaskDifficultyCode,
       ownerEstimateRequired,
     })
 
@@ -2661,6 +2720,9 @@ const updateLog = async (req, res) => {
       return res.status(400).json({ success: false, message: 'self_task_difficulty_code 格式不正确' })
     }
     if (hasSelfTaskDifficultyField && !selfTaskDifficultyCode) {
+      selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
+    }
+    if (!selfTaskDifficultyCode) {
       selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
     }
 
@@ -3008,6 +3070,10 @@ const createLogDailyEntry = async (req, res) => {
     if (!entryId) {
       return res.status(500).json({ success: false, message: '创建事项日投入失败，请稍后重试' })
     }
+    await Work.ensureLogSelfTaskDifficulty(id, {
+      userId: req.user.id,
+      difficultyCode: DEFAULT_SELF_TASK_DIFFICULTY_CODE,
+    })
     const rows = await Work.listDailyEntriesForLog(id, {
       startDate: entryDate,
       endDate: entryDate,
@@ -3067,6 +3133,10 @@ const updateLogDailyEntry = async (req, res) => {
       actualHours,
       description,
       createdBy: req.user.id,
+    })
+    await Work.ensureLogSelfTaskDifficulty(id, {
+      userId: req.user.id,
+      difficultyCode: DEFAULT_SELF_TASK_DIFFICULTY_CODE,
     })
     const rows = await Work.listDailyEntriesForLog(id, {
       startDate: entryDate,
@@ -3208,14 +3278,27 @@ const getDepartmentEfficiencyRanking = async (req, res) => {
     return res.status(400).json({ success: false, message: error })
   }
 
-  const departmentId = toPositiveInt(req.query.department_id)
-  if (req.query.department_id !== undefined && req.query.department_id !== '' && !departmentId) {
+  const departmentIdRaw = req.query.department_id
+  const departmentId = toPositiveInt(departmentIdRaw)
+  if (
+    departmentIdRaw !== undefined &&
+    departmentIdRaw !== null &&
+    String(departmentIdRaw).trim() !== '' &&
+    !departmentId
+  ) {
     return res.status(400).json({ success: false, message: 'department_id 无效' })
   }
-  if (!departmentId) {
-    return res.status(400).json({ success: false, message: 'department_id 必填' })
+  if (departmentId && !canAccessDepartmentInsight(req, departmentId)) {
+    return res.status(403).json({ success: false, message: '仅可查看本人负责部门的数据' })
   }
-  if (!canAccessDepartmentInsight(req, departmentId)) {
+  const isPrivilegedViewer = Boolean(req.userAccess?.is_super_admin) || hasRole(req, 'ADMIN')
+  const managedDepartmentIds = Array.isArray(req.userAccess?.managed_department_ids)
+    ? req.userAccess.managed_department_ids
+        .map((item) => Number(item))
+        .filter((item) => Number.isInteger(item) && item > 0)
+    : []
+  const departmentIds = departmentId ? [] : (isPrivilegedViewer ? [] : managedDepartmentIds)
+  if (!departmentId && !isPrivilegedViewer && departmentIds.length === 0) {
     return res.status(403).json({ success: false, message: '仅可查看本人负责部门的数据' })
   }
 
@@ -3228,7 +3311,8 @@ const getDepartmentEfficiencyRanking = async (req, res) => {
 
   try {
     const data = await Work.getDepartmentEfficiencyRanking({
-      departmentId,
+      departmentId: departmentId || null,
+      departmentIds,
       startDate,
       endDate,
       sortOrder,
@@ -4590,6 +4674,36 @@ async function updateAssignedLog(req, res) {
       expectedCompletionDate = normalizeDate(req.body.expected_completion_date) || null
     }
 
+    const hasSelfTaskDifficultyField = Object.prototype.hasOwnProperty.call(req.body || {}, 'self_task_difficulty_code')
+    const selfTaskDifficultyCodeRaw = req.body.self_task_difficulty_code
+    let selfTaskDifficultyCode = hasSelfTaskDifficultyField
+      ? normalizeDictCode(selfTaskDifficultyCodeRaw)
+      : normalizeDictCode(existing.self_task_difficulty_code)
+
+    if (
+      hasSelfTaskDifficultyField &&
+      selfTaskDifficultyCodeRaw !== undefined &&
+      selfTaskDifficultyCodeRaw !== null &&
+      String(selfTaskDifficultyCodeRaw).trim() !== '' &&
+      !selfTaskDifficultyCode
+    ) {
+      return res.status(400).json({ success: false, message: 'self_task_difficulty_code 格式不正确' })
+    }
+    if (hasSelfTaskDifficultyField && !selfTaskDifficultyCode) {
+      selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
+    }
+
+    if (!selfTaskDifficultyCode) {
+      selfTaskDifficultyCode = DEFAULT_SELF_TASK_DIFFICULTY_CODE
+    }
+
+    if (selfTaskDifficultyCode) {
+      const selfTaskDifficultyDictItem = await ConfigDict.getItemByCode(TASK_DIFFICULTY_DICT_KEY, selfTaskDifficultyCode)
+      if (!selfTaskDifficultyDictItem || Number(selfTaskDifficultyDictItem.enabled) !== 1) {
+        return res.status(400).json({ success: false, message: '个人评估难度配置不存在或已停用' })
+      }
+    }
+
     await Work.updateLog(id, {
       logDate: existing.log_date,
       itemTypeId: existing.item_type_id,
@@ -4605,6 +4719,7 @@ async function updateAssignedLog(req, res) {
       expectedStartDate: expectedStartDate,
       expectedCompletionDate: expectedCompletionDate,
       logCompletedAt: existing.log_completed_at,
+      selfTaskDifficultyCode: selfTaskDifficultyCode || null,
       ownerEstimateRequired: null,
     })
 

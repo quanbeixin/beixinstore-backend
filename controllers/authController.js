@@ -59,7 +59,7 @@ function normalizeRealName(value) {
 function normalizeDefaultHome(value) {
   const path = String(value || '').trim()
   if (!path) return ''
-  const allowed = new Set(['/work-logs', '/work-demands', '/owner-workbench', '/performance-dashboard'])
+  const allowed = new Set(['/work-logs', '/my-demands', '/work-demands', '/owner-workbench', '/performance-dashboard'])
   return allowed.has(path) ? path : ''
 }
 
