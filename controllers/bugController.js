@@ -1,5 +1,7 @@
 const Bug = require('../models/Bug')
 const Work = require('../models/Work')
+const NotificationEvent = require('../models/NotificationEvent')
+const pool = require('../utils/db')
 const {
   buildOssObjectKey,
   buildPublicObjectUrl,
@@ -41,6 +43,75 @@ function normalizeDate(value) {
   if (!text) return ''
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return ''
   return text
+}
+
+async function resolveBusinessLineId(demandId) {
+  const normalizedDemandId = normalizeDemandId(demandId)
+  if (!normalizedDemandId) return null
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT i.id AS business_line_id
+       FROM work_demands d
+       LEFT JOIN config_dict_items i
+         ON i.type_key = 'business_group'
+        AND i.item_code = d.business_group_code
+       WHERE d.id = ?
+       LIMIT 1`,
+      [normalizedDemandId],
+    )
+    const value = toPositiveInt(rows?.[0]?.business_line_id)
+    return value || null
+  } catch (error) {
+    console.warn('解析Bug所属业务线失败:', error?.message || error)
+    return null
+  }
+}
+
+async function buildBugNotificationData({ bug, req, extra = {} }) {
+  const businessLineId = await resolveBusinessLineId(bug?.demand_id)
+  const operatorName =
+    normalizeText(req?.user?.real_name || '', 100) ||
+    normalizeText(req?.user?.username || '', 100) ||
+    normalizeText(bug?.reporter_name || '', 100) ||
+    '系统'
+
+  return {
+    bug_id: Number(bug?.id || 0) || null,
+    bug_no: normalizeText(bug?.bug_no, 64) || null,
+    bug_title: normalizeText(bug?.title, 200) || '',
+    bug_content: normalizeText(bug?.description, 20000) || '',
+    severity: normalizeText(bug?.severity_name || bug?.severity_code, 64) || '',
+    priority: normalizeText(bug?.priority_name || bug?.priority_code, 64) || '',
+    status: normalizeText(bug?.status_name || bug?.status_code, 64) || '',
+    reporter_id: toPositiveInt(bug?.reporter_id),
+    reporter_name: normalizeText(bug?.reporter_name, 100) || '',
+    assignee_id: toPositiveInt(bug?.assignee_id),
+    assignee_name: normalizeText(bug?.assignee_name, 100) || '',
+    operator_id: toPositiveInt(req?.user?.id),
+    operator_name: operatorName,
+    demand_id: normalizeText(bug?.demand_id, 64) || null,
+    demand_name: normalizeText(bug?.demand_name, 200) || '',
+    business_line_id: businessLineId,
+    ...extra,
+  }
+}
+
+async function emitBugNotificationEvent({ eventType, bug, req, extra = {} }) {
+  if (!eventType || !bug) return
+  try {
+    const data = await buildBugNotificationData({ bug, req, extra })
+    await NotificationEvent.processEvent({
+      eventType,
+      data,
+      operatorUserId: req?.user?.id || null,
+    })
+  } catch (error) {
+    console.warn(`触发Bug通知事件失败: ${eventType}`, {
+      bug_id: bug?.id || null,
+      message: error?.message || String(error || ''),
+    })
+  }
 }
 
 function hasPermission(req, code) {
@@ -205,6 +276,25 @@ const createBug = async (req, res) => {
       reporterId: req.user.id,
     })
     const detail = await Bug.getBugDetail(bugId)
+
+    // 创建成功后触发真实业务事件（不阻塞主业务）
+    await emitBugNotificationEvent({
+      eventType: 'bug_create',
+      bug: detail,
+      req,
+    })
+    await emitBugNotificationEvent({
+      eventType: 'bug_assign',
+      bug: detail,
+      req,
+      extra: {
+        from_assignee_id: null,
+        from_assignee_name: '',
+        to_assignee_id: toPositiveInt(detail?.assignee_id),
+        to_assignee_name: normalizeText(detail?.assignee_name, 100) || '',
+      },
+    })
+
     return res.status(201).json({
       success: true,
       message: 'Bug创建成功',
@@ -238,6 +328,24 @@ const updateBug = async (req, res) => {
 
     await Bug.updateBug(bugId, validation.data)
     const detail = await Bug.getBugDetail(bugId)
+
+    // 指派变更时触发 bug_assign
+    const prevAssigneeId = toPositiveInt(existing?.assignee_id)
+    const nextAssigneeId = toPositiveInt(detail?.assignee_id)
+    if (prevAssigneeId !== nextAssigneeId) {
+      await emitBugNotificationEvent({
+        eventType: 'bug_assign',
+        bug: detail,
+        req,
+        extra: {
+          from_assignee_id: prevAssigneeId,
+          from_assignee_name: normalizeText(existing?.assignee_name, 100) || '',
+          to_assignee_id: nextAssigneeId,
+          to_assignee_name: normalizeText(detail?.assignee_name, 100) || '',
+        },
+      })
+    }
+
     return res.json({ success: true, message: 'Bug更新成功', data: detail })
   } catch (err) {
     console.error('更新Bug失败:', err)
@@ -301,6 +409,42 @@ async function handleTransition(req, res, targetStatus, { requireFixSolution = f
     }
 
     const detail = await Bug.getBugDetail(bugId)
+
+    const fromStatus = normalizeText(existing?.status_name || existing?.status_code, 64) || ''
+    const toStatus = normalizeText(detail?.status_name || detail?.status_code, 64) || ''
+    await emitBugNotificationEvent({
+      eventType: 'bug_status_change',
+      bug: detail,
+      req,
+      extra: {
+        from_status: fromStatus,
+        to_status: toStatus,
+      },
+    })
+    if (targetStatus === BUG_STATUS.FIXED) {
+      await emitBugNotificationEvent({
+        eventType: 'bug_fixed',
+        bug: detail,
+        req,
+        extra: {
+          from_status: fromStatus,
+          to_status: toStatus,
+        },
+      })
+    }
+    if (targetStatus === BUG_STATUS.REOPENED) {
+      await emitBugNotificationEvent({
+        eventType: 'bug_reopen',
+        bug: detail,
+        req,
+        extra: {
+          from_status: fromStatus,
+          to_status: toStatus,
+          reopen_reason: normalizeText(req.body?.remark, 500) || '',
+        },
+      })
+    }
+
     return res.json({ success: true, message: successMessage, data: detail })
   } catch (err) {
     console.error('Bug流转失败:', err)

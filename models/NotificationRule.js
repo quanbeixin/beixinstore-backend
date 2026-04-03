@@ -115,12 +115,19 @@ async function syncLegacyRuleReceivers(ruleId, receiverConfig) {
   const normalizedConfig = normalizeReceiverConfig(receiverConfig)
   const roleIds = normalizePositiveIntArray(normalizedConfig.roles)
   const userIds = normalizePositiveIntArray(normalizedConfig.user_ids || normalizedConfig.users)
+  const dynamicFields = Array.from(
+    new Set(
+      [normalizedConfig.user_id_field]
+        .map((item) => normalizeText(item, 128))
+        .filter(Boolean),
+    ),
+  )
 
   const roleLabelMap = await getRoleLabelMap(roleIds)
   const userLabelMap = await getUserLabelMap(userIds)
 
   await pool.query('DELETE FROM notification_rule_receivers WHERE rule_id = ?', [ruleId])
-  if (roleIds.length === 0 && userIds.length === 0) return
+  if (roleIds.length === 0 && userIds.length === 0 && dynamicFields.length === 0) return
 
   const roleValues = roleIds.map((roleId) => [
     Number(ruleId),
@@ -138,7 +145,15 @@ async function syncLegacyRuleReceivers(ruleId, receiverConfig) {
     1,
   ])
 
-  const values = [...roleValues, ...userValues]
+  const dynamicValues = dynamicFields.map((fieldPath) => [
+    Number(ruleId),
+    'DYNAMIC',
+    fieldPath,
+    `字段映射(${fieldPath})`,
+    1,
+  ])
+
+  const values = [...roleValues, ...userValues, ...dynamicValues]
   await pool.query(
     `INSERT INTO notification_rule_receivers (
        rule_id,
@@ -197,6 +212,8 @@ async function getLegacyRuleReceiversMap(ruleIds) {
 
 function inferReceiverType(receiverConfig, fallback = 'role') {
   if (!receiverConfig || typeof receiverConfig !== 'object') return fallback
+  if (normalizeText(receiverConfig.user_id_field, 128)) return 'field'
+  if (Array.isArray(receiverConfig.dynamic) && receiverConfig.dynamic.length > 0) return 'field'
   if (Array.isArray(receiverConfig.users) && receiverConfig.users.length > 0) return 'user'
   if (Array.isArray(receiverConfig.user_ids) && receiverConfig.user_ids.length > 0) return 'user'
   if (Array.isArray(receiverConfig.roles) && receiverConfig.roles.length > 0) return 'role'
@@ -217,7 +234,20 @@ function mapRuleRowLegacy(row, receiverConfig = {}) {
     channel_type: String(firstChannel || 'feishu').toLowerCase(),
     template_id: null,
     receiver_type: receiverType,
-    receiver_config_json: receiverConfig,
+    receiver_config_json: {
+      ...receiverConfig,
+      user_id_field:
+        normalizeText(receiverConfig.user_id_field, 128) ||
+        (Array.isArray(receiverConfig.dynamic)
+          ? normalizeText(
+              receiverConfig.dynamic.find(
+                (item) => item && !String(item).startsWith('chat_id:') && !String(item).startsWith('open_id:'),
+              ),
+              128,
+            )
+          : '') ||
+        undefined,
+    },
     message_title: row.message_title || '',
     message_content: row.message_content || '',
     condition_config_json: safeJsonParse(row.trigger_condition_json, null),
