@@ -63,6 +63,13 @@ const DEFAULT_NOTIFICATION_SCENES = [
   'task_deadline',
   'task_complete',
   'node_complete',
+  'weekly_report_send',
+  'demand_create',
+  'demand_assign',
+  'demand_status_change',
+  'worklog_create',
+  'worklog_assign',
+  'worklog_status_change',
   'bug_assign',
   'bug_status_change',
   'bug_fixed',
@@ -4056,7 +4063,7 @@ const Work = {
 
     let rows = []
     try {
-      ;[rows] = await pool.query(
+      [rows] = await pool.query(
         `SELECT
            l.id,
            l.user_id,
@@ -4661,8 +4668,8 @@ const Work = {
 
     const actualByLogDate = new Map()
     const actualTotalByLog = new Map()
-    const entryCountByLog = new Map()
-    ;(entryRows || []).forEach((row) => {
+    const entryCountByLog = new Map();
+    (entryRows || []).forEach((row) => {
       const logId = Number(row.log_id)
       const entryDate = normalizeDateOnly(row.entry_date)
       const actualHours = toDecimal1(row.actual_hours)
@@ -6696,7 +6703,7 @@ const Work = {
       return target
     }
 
-    ;(entryRows || []).forEach((row) => {
+    (entryRows || []).forEach((row) => {
       const userId = Number(row.user_id)
       const logId = Number(row.log_id)
       const entryDate = normalizeDateOnly(row.entry_date)

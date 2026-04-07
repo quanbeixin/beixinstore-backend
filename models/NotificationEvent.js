@@ -111,6 +111,33 @@ function evaluateConditionNode(node, eventData) {
 
 function evaluateRuleCondition(conditionConfig, eventData) {
   if (!conditionConfig) return true
+  if (typeof conditionConfig !== 'object' || Array.isArray(conditionConfig)) return true
+
+  const mode = String(conditionConfig.trigger_mode || conditionConfig.mode || '').trim().toLowerCase()
+  if (!mode) return evaluateConditionNode(conditionConfig, eventData)
+
+  const fieldCondition =
+    conditionConfig.field_condition && typeof conditionConfig.field_condition === 'object'
+      ? conditionConfig.field_condition
+      : null
+
+  if (mode === 'event') {
+    if (!fieldCondition) return true
+    return evaluateConditionNode(fieldCondition, eventData)
+  }
+
+  if (mode === 'schedule') {
+    if (!eventData?.__schedule_context?.matched) return false
+    if (!fieldCondition) return true
+    return evaluateConditionNode(fieldCondition, eventData)
+  }
+
+  if (mode === 'deadline') {
+    if (!eventData?.__deadline_context?.matched) return false
+    if (!fieldCondition) return true
+    return evaluateConditionNode(fieldCondition, eventData)
+  }
+
   return evaluateConditionNode(conditionConfig, eventData)
 }
 
@@ -144,13 +171,26 @@ function mapRuleRowLegacy(row) {
   }
 }
 
-async function listCandidateRules(eventType, businessLineId) {
+async function listCandidateRules(eventType, businessLineId, { ruleIds = [] } = {}) {
   const params = [eventType]
   let whereSql = 'WHERE enabled = 1 AND LOWER(event_type) = LOWER(?)'
 
   if (businessLineId !== null && businessLineId !== undefined) {
     whereSql += ' AND (biz_line_id = 0 OR biz_line_id = ?)'
     params.push(Number(businessLineId))
+  }
+
+  const normalizedRuleIds = Array.from(
+    new Set(
+      (ruleIds || [])
+        .map((item) => Number(item))
+        .filter((item) => Number.isInteger(item) && item > 0),
+    ),
+  )
+  if (normalizedRuleIds.length > 0) {
+    const placeholders = normalizedRuleIds.map(() => '?').join(', ')
+    whereSql += ` AND id IN (${placeholders})`
+    params.push(...normalizedRuleIds)
   }
 
   const [rows] = await pool.query(
@@ -459,11 +499,13 @@ async function createNotificationLog(payload) {
 }
 
 const NotificationEvent = {
-  async processEvent({ eventType, data = {}, operatorUserId = null }) {
+  async processEvent({ eventType, data = {}, operatorUserId = null, targetRuleIds = [] }) {
     const normalizedEventType = normalizeText(eventType, 64)
     const businessLineId = data?.business_line_id ?? null
 
-    const candidateRules = await listCandidateRules(normalizedEventType, businessLineId)
+    const candidateRules = await listCandidateRules(normalizedEventType, businessLineId, {
+      ruleIds: targetRuleIds,
+    })
     const passedRules = candidateRules.filter((rule) => evaluateRuleCondition(rule.condition_config_json, data))
 
     const results = []

@@ -2,10 +2,11 @@ const NotificationRule = require('../models/NotificationRule')
 const {
   getNotificationSendControl,
   updateNotificationSendControl,
+  listFeishuChats,
 } = require('../utils/notificationSender')
 
 const ALLOWED_CHANNEL_TYPES = new Set(['feishu'])
-const ALLOWED_RECEIVER_TYPES = new Set(['role', 'user', 'field'])
+const ALLOWED_RECEIVER_TYPES = new Set(['role', 'user', 'field', 'chat'])
 
 function sendSuccess(res, { status = 200, message = '成功', data = null } = {}) {
   return res.status(status).json({
@@ -284,6 +285,50 @@ const updateSendControl = async (req, res) => {
   }
 }
 
+const getFeishuChatOptions = async (req, res) => {
+  const pageToken = normalizeText(req.query?.page_token, 256)
+  const pageSizeRaw = Number(req.query?.page_size || 50)
+  const pageSize = Number.isInteger(pageSizeRaw) ? Math.min(Math.max(pageSizeRaw, 1), 100) : 50
+  const keyword = normalizeText(req.query?.keyword, 100).toLowerCase()
+
+  try {
+    const result = await listFeishuChats({
+      pageToken,
+      pageSize,
+    })
+
+    if (!result?.success) {
+      return sendError(res, {
+        status: 502,
+        message: result?.error_message || '获取飞书群列表失败',
+        code: result?.error_code || 'FEISHU_CHAT_LIST_FAILED',
+        details: result?.response || null,
+      })
+    }
+
+    const rows = Array.isArray(result.data) ? result.data : []
+    const filteredRows = keyword
+      ? rows.filter((item) => {
+        const id = String(item?.chat_id || '').toLowerCase()
+        const name = String(item?.name || '').toLowerCase()
+        return id.includes(keyword) || name.includes(keyword)
+      })
+      : rows
+
+    return sendSuccess(res, {
+      message: '查询成功',
+      data: {
+        items: filteredRows,
+        next_page_token: result.next_page_token || '',
+        has_more: Boolean(result.has_more),
+      },
+    })
+  } catch (err) {
+    console.error('获取飞书群列表失败:', err)
+    return sendError(res, { status: 500, message: '服务器错误', code: 'INTERNAL_ERROR' })
+  }
+}
+
 module.exports = {
   createRule,
   getRules,
@@ -291,4 +336,5 @@ module.exports = {
   deleteRule,
   getSendControl,
   updateSendControl,
+  getFeishuChatOptions,
 }

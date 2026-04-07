@@ -2,6 +2,9 @@
 const User = require('../models/User')
 const Workflow = require('../models/Workflow')
 const ConfigDict = require('../models/ConfigDict')
+const NotificationEvent = require('../models/NotificationEvent')
+const pool = require('../utils/db')
+const { sendNotification } = require('../utils/notificationSender')
 const {
   normalizeTemplateGraph,
   filterTemplateGraphByParticipantRoles,
@@ -15,6 +18,13 @@ const NOTIFICATION_SCENES = new Set([
   'task_deadline',
   'task_complete',
   'node_complete',
+  'weekly_report_send',
+  'demand_create',
+  'demand_assign',
+  'demand_status_change',
+  'worklog_create',
+  'worklog_assign',
+  'worklog_status_change',
   'bug_assign',
   'bug_status_change',
   'bug_fixed',
@@ -144,6 +154,285 @@ function normalizeDateTime(value) {
   if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$/.test(str)) return `${str}:00`
   if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}$/.test(str)) return str
   return ''
+}
+
+async function resolveDemandBusinessLineId(demandId) {
+  const normalizedDemandId = normalizeDemandId(demandId)
+  if (!normalizedDemandId) return null
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT i.id AS business_line_id
+       FROM work_demands d
+       LEFT JOIN config_dict_items i
+         ON i.type_key = 'business_group'
+        AND i.item_code = d.business_group_code
+       WHERE d.id = ?
+       LIMIT 1`,
+      [normalizedDemandId],
+    )
+    const value = toPositiveInt(rows?.[0]?.business_line_id)
+    return value || null
+  } catch (error) {
+    console.warn('解析需求所属业务线失败:', error?.message || error)
+    return null
+  }
+}
+
+async function buildDemandNotificationData({ demand, req, extra = {} }) {
+  const businessLineId = await resolveDemandBusinessLineId(demand?.id)
+  const operatorName =
+    normalizeText(req?.user?.real_name || '', 100) ||
+    normalizeText(req?.user?.username || '', 100) ||
+    normalizeText(demand?.owner_name || '', 100) ||
+    '系统'
+
+  return {
+    demand_id: normalizeDemandId(demand?.id),
+    demand_name: normalizeText(demand?.name, 200) || '',
+    status: normalizeText(demand?.status, 64) || '',
+    priority: normalizeText(demand?.priority, 64) || '',
+    owner_user_id: toPositiveInt(demand?.owner_user_id),
+    owner_name: normalizeText(demand?.owner_name, 100) || '',
+    project_manager_id: toPositiveInt(demand?.project_manager),
+    project_manager_name: normalizeText(demand?.project_manager_name, 100) || '',
+    operator_id: toPositiveInt(req?.user?.id),
+    operator_name: operatorName,
+    business_line_id: businessLineId,
+    business_line_name: normalizeText(demand?.business_group_name, 100) || '',
+    ...extra,
+  }
+}
+
+async function emitDemandNotificationEvent({ eventType, demand, req, extra = {} }) {
+  if (!eventType || !demand) return
+  try {
+    const data = await buildDemandNotificationData({ demand, req, extra })
+    await NotificationEvent.processEvent({
+      eventType,
+      data,
+      operatorUserId: req?.user?.id || null,
+    })
+  } catch (error) {
+    console.warn(`触发需求通知事件失败: ${eventType}`, {
+      demand_id: demand?.id || null,
+      message: error?.message || String(error || ''),
+    })
+  }
+}
+
+async function buildWorklogNotificationData({ log, req, extra = {} }) {
+  const normalizedLog = log || {}
+  const assigneeUserId = toPositiveInt(normalizedLog?.user_id)
+  const assignedByUserId = toPositiveInt(normalizedLog?.assigned_by_user_id)
+  const operatorUserId = toPositiveInt(req?.user?.id)
+  const demandId = normalizeDemandId(normalizedLog?.demand_id)
+
+  let assigneeName = ''
+  let assignedByName = ''
+  let demandName = ''
+  let businessLineName = ''
+  let businessLineId = null
+  let itemTypeName = ''
+
+  if (assigneeUserId) {
+    const assigneeUser = await User.findById(assigneeUserId)
+    assigneeName = normalizeText(assigneeUser?.real_name || assigneeUser?.username, 100) || ''
+  }
+  if (assignedByUserId) {
+    const assignedByUser = await User.findById(assignedByUserId)
+    assignedByName = normalizeText(assignedByUser?.real_name || assignedByUser?.username, 100) || ''
+  }
+  if (demandId) {
+    const demand = await Work.findDemandById(demandId)
+    demandName = normalizeText(demand?.name, 200) || ''
+    businessLineName = normalizeText(demand?.business_group_name, 100) || ''
+    businessLineId = await resolveDemandBusinessLineId(demandId)
+  }
+  if (toPositiveInt(normalizedLog?.item_type_id)) {
+    const itemType = await Work.findItemTypeById(normalizedLog?.item_type_id)
+    itemTypeName = normalizeText(itemType?.name, 100) || ''
+  }
+
+  const operatorName =
+    normalizeText(req?.user?.real_name || '', 100) ||
+    normalizeText(req?.user?.username || '', 100) ||
+    assignedByName ||
+    assigneeName ||
+    '系统'
+
+  return {
+    worklog_id: toPositiveInt(normalizedLog?.id),
+    log_id: toPositiveInt(normalizedLog?.id),
+    task_title: normalizeText(normalizedLog?.description, 200) || '',
+    task_content: normalizeText(normalizedLog?.description, 2000) || '',
+    status: normalizeText(normalizedLog?.log_status, 64) || '',
+    item_type_id: toPositiveInt(normalizedLog?.item_type_id),
+    item_type_name: itemTypeName,
+    assignee_id: assigneeUserId,
+    assignee_name: assigneeName,
+    user_id: assigneeUserId,
+    user_name: assigneeName,
+    assigned_by_user_id: assignedByUserId,
+    assigned_by_name: assignedByName,
+    operator_id: operatorUserId,
+    operator_name: operatorName,
+    demand_id: demandId,
+    demand_name: demandName,
+    phase_key: normalizePhaseKey(normalizedLog?.phase_key),
+    expected_start_date: normalizeDate(normalizedLog?.expected_start_date),
+    expected_completion_date: normalizeDate(normalizedLog?.expected_completion_date),
+    business_line_id: businessLineId,
+    business_line_name: businessLineName,
+    ...extra,
+  }
+}
+
+async function emitWorklogNotificationEvent({ eventType, log, req, extra = {} }) {
+  if (!eventType || !log) return
+  try {
+    const data = await buildWorklogNotificationData({ log, req, extra })
+    await NotificationEvent.processEvent({
+      eventType,
+      data,
+      operatorUserId: req?.user?.id || null,
+    })
+  } catch (error) {
+    console.warn(`触发人效通知事件失败: ${eventType}`, {
+      worklog_id: log?.id || null,
+      message: error?.message || String(error || ''),
+    })
+  }
+}
+
+function isTaskOpenStatus(status) {
+  const normalized = String(status || '').trim().toUpperCase()
+  return normalized === 'TODO' || normalized === 'IN_PROGRESS'
+}
+
+function buildOpenTaskMap(workflow) {
+  const map = new Map()
+  const tasks = Array.isArray(workflow?.tasks) ? workflow.tasks : []
+  tasks.forEach((task) => {
+    const taskId = toPositiveInt(task?.id)
+    if (!taskId) return
+    if (!isTaskOpenStatus(task?.status)) return
+    map.set(taskId, task)
+  })
+  return map
+}
+
+async function emitWorkflowNodeNotificationEvent({ eventType, demand, workflow, nodeKey, req, extra = {} }) {
+  if (!eventType || !demand || !workflow) return
+
+  const normalizedNodeKey = normalizePhaseKey(nodeKey || workflow?.current_node?.node_key || '')
+  const node = (Array.isArray(workflow?.nodes) ? workflow.nodes : []).find(
+    (item) => normalizePhaseKey(item?.node_key) === normalizedNodeKey,
+  ) || workflow?.current_node || null
+
+  const businessLineId = await resolveDemandBusinessLineId(demand?.id)
+  const operatorName =
+    normalizeText(req?.user?.real_name || '', 100) ||
+    normalizeText(req?.user?.username || '', 100) ||
+    '系统'
+
+  try {
+    await NotificationEvent.processEvent({
+      eventType,
+      data: {
+        demand_id: normalizeDemandId(demand?.id),
+        demand_name: normalizeText(demand?.name, 200) || '',
+        node_id: toPositiveInt(node?.id),
+        node_key: normalizePhaseKey(node?.node_key),
+        node_name: normalizeText(node?.node_name_snapshot || node?.node_name || '', 100) || '',
+        status: normalizeText(node?.status, 64) || '',
+        assignee_id: toPositiveInt(node?.assignee_user_id),
+        assignee_name: normalizeText(node?.assignee_name, 100) || '',
+        operator_id: toPositiveInt(req?.user?.id),
+        operator_name: operatorName,
+        business_line_id: businessLineId,
+        ...extra,
+      },
+      operatorUserId: req?.user?.id || null,
+    })
+  } catch (error) {
+    console.warn(`触发Workflow节点通知事件失败: ${eventType}`, {
+      demand_id: demand?.id || null,
+      node_key: normalizedNodeKey || null,
+      message: error?.message || String(error || ''),
+    })
+  }
+}
+
+async function emitWorkflowTaskNotificationEvent({ eventType, demand, task, req, extra = {} }) {
+  if (!eventType || !demand || !task) return
+  const businessLineId = await resolveDemandBusinessLineId(demand?.id)
+  const operatorName =
+    normalizeText(req?.user?.real_name || '', 100) ||
+    normalizeText(req?.user?.username || '', 100) ||
+    '系统'
+
+  try {
+    await NotificationEvent.processEvent({
+      eventType,
+      data: {
+        demand_id: normalizeDemandId(demand?.id),
+        demand_name: normalizeText(demand?.name, 200) || '',
+        task_id: toPositiveInt(task?.id),
+        task_title: normalizeText(task?.task_title, 255) || '',
+        status: normalizeText(task?.status, 64) || '',
+        priority: normalizeText(task?.priority, 32) || '',
+        due_at: normalizeDate(task?.due_at) || '',
+        deadline: normalizeDateTime(task?.deadline) || '',
+        assignee_id: toPositiveInt(task?.assignee_user_id),
+        assignee_name: normalizeText(task?.assignee_name, 100) || '',
+        operator_id: toPositiveInt(req?.user?.id),
+        operator_name: operatorName,
+        business_line_id: businessLineId,
+        ...extra,
+      },
+      operatorUserId: req?.user?.id || null,
+    })
+  } catch (error) {
+    console.warn(`触发Workflow任务通知事件失败: ${eventType}`, {
+      demand_id: demand?.id || null,
+      task_id: task?.id || null,
+      message: error?.message || String(error || ''),
+    })
+  }
+}
+
+function buildWeeklySummaryText(report) {
+  const range = report?.range || {}
+  const summary = report?.summary || {}
+  const topItems = Array.isArray(report?.top_items) ? report.top_items.slice(0, 3) : []
+  const lines = [
+    `【个人周报】${range.start_date || '-'} ~ ${range.end_date || '-'}`,
+    `事项总数: ${Number(summary.item_count || 0)}（待开始 ${Number(summary.todo_count || 0)} / 进行中 ${Number(summary.in_progress_count || 0)} / 已完成 ${Number(summary.done_count || 0)}）`,
+    `计划用时: ${Number(summary.planned_hours || 0)}h`,
+    `实际用时: ${Number(summary.actual_hours || 0)}h`,
+    `偏差: ${Number(summary.variance_hours || 0)}h`,
+  ]
+  if (topItems.length > 0) {
+    lines.push('本周重点事项:')
+    topItems.forEach((item, index) => {
+      const title = normalizeText(item?.description || item?.item_type_name || `事项${index + 1}`, 120) || `事项${index + 1}`
+      lines.push(`${index + 1}. ${title}`)
+    })
+  }
+  return lines.join('\n')
+}
+
+async function safeGetDemandWorkflowSnapshot(demandId) {
+  try {
+    return await Workflow.getDemandWorkflowByDemandId(demandId, { includeActionsLimit: 0 })
+  } catch (error) {
+    console.warn('读取流程快照失败（已忽略）:', {
+      demand_id: demandId || null,
+      message: error?.message || String(error || ''),
+    })
+    return null
+  }
 }
 
 async function resolveDemandTaskSelection(demandId, phaseKey) {
@@ -1565,6 +1854,24 @@ const createDemand = async (req, res) => {
 
     await refreshDemandHourSummaryQuietly(finalDemandId)
     const created = await Work.findDemandById(finalDemandId)
+
+    await emitDemandNotificationEvent({
+      eventType: 'demand_create',
+      demand: created,
+      req,
+    })
+    await emitDemandNotificationEvent({
+      eventType: 'demand_assign',
+      demand: created,
+      req,
+      extra: {
+        from_owner_user_id: null,
+        from_owner_name: '',
+        to_owner_user_id: toPositiveInt(created?.owner_user_id),
+        to_owner_name: normalizeText(created?.owner_name, 100) || '',
+      },
+    })
+
     return res.status(201).json({
       success: true,
       message: workflowInitWarning ? `需求创建成功（${workflowInitWarning}）` : '需求创建成功',
@@ -1839,6 +2146,36 @@ const updateDemand = async (req, res) => {
 
     await refreshDemandHourSummaryQuietly(demandId)
     const updated = await Work.findDemandById(demandId)
+
+    const prevOwnerUserId = toPositiveInt(existing?.owner_user_id)
+    const nextOwnerUserId = toPositiveInt(updated?.owner_user_id)
+    if (prevOwnerUserId !== nextOwnerUserId) {
+      await emitDemandNotificationEvent({
+        eventType: 'demand_assign',
+        demand: updated,
+        req,
+        extra: {
+          from_owner_user_id: prevOwnerUserId,
+          from_owner_name: normalizeText(existing?.owner_name, 100) || '',
+          to_owner_user_id: nextOwnerUserId,
+          to_owner_name: normalizeText(updated?.owner_name, 100) || '',
+        },
+      })
+    }
+
+    const prevStatus = normalizeText(existing?.status, 64) || ''
+    const nextStatus = normalizeText(updated?.status, 64) || ''
+    if (prevStatus && nextStatus && prevStatus !== nextStatus) {
+      await emitDemandNotificationEvent({
+        eventType: 'demand_status_change',
+        demand: updated,
+        req,
+        extra: {
+          from_status: prevStatus,
+          to_status: nextStatus,
+        },
+      })
+    }
 
     return res.json({
       success: true,
@@ -2325,6 +2662,11 @@ const createLog = async (req, res) => {
 
     await refreshDemandHourSummaryQuietly(demandId)
     const created = await Work.findLogById(id)
+    await emitWorklogNotificationEvent({
+      eventType: 'worklog_create',
+      log: created,
+      req,
+    })
     return res.status(201).json({
       success: true,
       message: '工作记录创建成功',
@@ -2589,6 +2931,22 @@ const createOwnerAssignedLog = async (req, res) => {
 
     await refreshDemandHourSummaryQuietly(demandId)
     const created = await Work.findLogById(id)
+    await emitWorklogNotificationEvent({
+      eventType: 'worklog_create',
+      log: created,
+      req,
+    })
+    await emitWorklogNotificationEvent({
+      eventType: 'worklog_assign',
+      log: created,
+      req,
+      extra: {
+        from_assignee_id: null,
+        from_assignee_name: '',
+        to_assignee_id: toPositiveInt(created?.user_id),
+        to_assignee_name: normalizeText(created?.user_name, 100) || '',
+      },
+    })
     return res.status(201).json({
       success: true,
       message: isDemandNodeQuickAdd ? '任务创建成功' : 'Owner 指派事项创建成功',
@@ -2850,6 +3208,19 @@ const updateLog = async (req, res) => {
       await refreshDemandHourSummaryQuietly(demandId)
     }
     const updated = await Work.findLogById(id)
+    const prevStatus = normalizeText(existing?.log_status, 64) || ''
+    const nextStatus = normalizeText(updated?.log_status, 64) || ''
+    if (prevStatus && nextStatus && prevStatus !== nextStatus) {
+      await emitWorklogNotificationEvent({
+        eventType: 'worklog_status_change',
+        log: updated,
+        req,
+        extra: {
+          from_status: prevStatus,
+          to_status: nextStatus,
+        },
+      })
+    }
     return res.json({
       success: true,
       message: '工作记录更新成功',
@@ -3592,6 +3963,27 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
       comment,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+
+    await emitWorkflowNodeNotificationEvent({
+      eventType: 'node_assign',
+      demand,
+      workflow,
+      nodeKey: workflow?.current_node?.node_key,
+      req,
+    })
+    const currentNodeId = toPositiveInt(workflow?.current_node?.id)
+    const assignedTasks = (Array.isArray(workflow?.tasks) ? workflow.tasks : []).filter(
+      (task) => toPositiveInt(task?.instance_node_id) === currentNodeId && isTaskOpenStatus(task?.status),
+    )
+    for (const task of assignedTasks) {
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_assign',
+        demand,
+        task,
+        req,
+      })
+    }
+
     return res.json({
       success: true,
       message: '当前节点负责人已更新',
@@ -3670,6 +4062,30 @@ const assignDemandWorkflowNode = async (req, res) => {
       comment,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+
+    await emitWorkflowNodeNotificationEvent({
+      eventType: 'node_assign',
+      demand,
+      workflow,
+      nodeKey,
+      req,
+    })
+    const targetNode = (Array.isArray(workflow?.nodes) ? workflow.nodes : []).find(
+      (node) => normalizePhaseKey(node?.node_key) === normalizePhaseKey(nodeKey),
+    )
+    const targetNodeId = toPositiveInt(targetNode?.id)
+    const assignedTasks = (Array.isArray(workflow?.tasks) ? workflow.tasks : []).filter(
+      (task) => toPositiveInt(task?.instance_node_id) === targetNodeId && isTaskOpenStatus(task?.status),
+    )
+    for (const task of assignedTasks) {
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_assign',
+        demand,
+        task,
+        req,
+      })
+    }
+
     return res.json({
       success: true,
       message: '节点负责人已更新',
@@ -3707,6 +4123,10 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
+    const workflowBefore = await safeGetDemandWorkflowSnapshot(demandId)
+    const fromNodeKey = normalizePhaseKey(workflowBefore?.current_node?.node_key || '')
+    const beforeTaskMap = buildOpenTaskMap(workflowBefore)
+
     const workflow = await Workflow.submitCurrentNode({
       demandId,
       operatorUserId: req.user.id,
@@ -3714,6 +4134,48 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
       sourceType: 'MANUAL',
     })
     await refreshDemandHourSummaryQuietly(demandId)
+
+    await emitWorkflowNodeNotificationEvent({
+      eventType: 'node_complete',
+      demand,
+      workflow,
+      nodeKey: fromNodeKey,
+      req,
+      extra: {
+        from_node_key: fromNodeKey,
+        to_node_key: normalizePhaseKey(workflow?.current_node?.node_key || ''),
+      },
+    })
+
+    const completedNode = (Array.isArray(workflowBefore?.nodes) ? workflowBefore.nodes : []).find(
+      (node) => normalizePhaseKey(node?.node_key) === fromNodeKey,
+    )
+    const completedNodeId = toPositiveInt(completedNode?.id)
+    const doneTasks = Array.from(beforeTaskMap.values()).filter(
+      (task) => toPositiveInt(task?.instance_node_id) === completedNodeId,
+    )
+    for (const task of doneTasks) {
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_complete',
+        demand,
+        task: {
+          ...task,
+          status: 'DONE',
+        },
+        req,
+      })
+    }
+
+    const afterTaskMap = buildOpenTaskMap(workflow)
+    for (const [taskId, task] of afterTaskMap.entries()) {
+      if (beforeTaskMap.has(taskId)) continue
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_assign',
+        demand,
+        task,
+        req,
+      })
+    }
 
     return res.json({
       success: true,
@@ -3753,6 +4215,10 @@ const submitDemandWorkflowNode = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
+    const workflowBefore = await safeGetDemandWorkflowSnapshot(demandId)
+    const fromNodeKey = normalizePhaseKey(nodeKey)
+    const beforeTaskMap = buildOpenTaskMap(workflowBefore)
+
     const workflow = await Workflow.submitNode({
       demandId,
       nodeKey,
@@ -3761,6 +4227,48 @@ const submitDemandWorkflowNode = async (req, res) => {
       sourceType: 'MANUAL',
     })
     await refreshDemandHourSummaryQuietly(demandId)
+
+    await emitWorkflowNodeNotificationEvent({
+      eventType: 'node_complete',
+      demand,
+      workflow,
+      nodeKey: fromNodeKey,
+      req,
+      extra: {
+        from_node_key: fromNodeKey,
+        to_node_key: normalizePhaseKey(workflow?.current_node?.node_key || ''),
+      },
+    })
+
+    const completedNode = (Array.isArray(workflowBefore?.nodes) ? workflowBefore.nodes : []).find(
+      (node) => normalizePhaseKey(node?.node_key) === fromNodeKey,
+    )
+    const completedNodeId = toPositiveInt(completedNode?.id)
+    const doneTasks = Array.from(beforeTaskMap.values()).filter(
+      (task) => toPositiveInt(task?.instance_node_id) === completedNodeId,
+    )
+    for (const task of doneTasks) {
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_complete',
+        demand,
+        task: {
+          ...task,
+          status: 'DONE',
+        },
+        req,
+      })
+    }
+
+    const afterTaskMap = buildOpenTaskMap(workflow)
+    for (const [taskId, task] of afterTaskMap.entries()) {
+      if (beforeTaskMap.has(taskId)) continue
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_assign',
+        demand,
+        task,
+        req,
+      })
+    }
 
     return res.json({
       success: true,
@@ -3806,6 +4314,10 @@ const rejectDemandWorkflowCurrentNode = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
+    const workflowBefore = await safeGetDemandWorkflowSnapshot(demandId)
+    const fromNodeKey = normalizePhaseKey(workflowBefore?.current_node?.node_key || '')
+    const beforeTaskMap = buildOpenTaskMap(workflowBefore)
+
     const workflow = await Workflow.rejectCurrentNode({
       demandId,
       operatorUserId: req.user.id,
@@ -3813,6 +4325,30 @@ const rejectDemandWorkflowCurrentNode = async (req, res) => {
       comment,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+
+    await emitWorkflowNodeNotificationEvent({
+      eventType: 'node_reject',
+      demand,
+      workflow,
+      nodeKey: fromNodeKey,
+      req,
+      extra: {
+        from_node_key: fromNodeKey,
+        to_node_key: normalizePhaseKey(workflow?.current_node?.node_key || ''),
+        reject_reason: rejectReason,
+      },
+    })
+
+    const afterTaskMap = buildOpenTaskMap(workflow)
+    for (const [taskId, task] of afterTaskMap.entries()) {
+      if (beforeTaskMap.has(taskId)) continue
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_assign',
+        demand,
+        task,
+        req,
+      })
+    }
 
     return res.json({
       success: true,
@@ -3859,6 +4395,10 @@ const rejectDemandWorkflowNode = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
+    const workflowBefore = await safeGetDemandWorkflowSnapshot(demandId)
+    const fromNodeKey = normalizePhaseKey(nodeKey)
+    const beforeTaskMap = buildOpenTaskMap(workflowBefore)
+
     const workflow = await Workflow.rejectNode({
       demandId,
       nodeKey,
@@ -3867,6 +4407,30 @@ const rejectDemandWorkflowNode = async (req, res) => {
       comment,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+
+    await emitWorkflowNodeNotificationEvent({
+      eventType: 'node_reject',
+      demand,
+      workflow,
+      nodeKey: fromNodeKey,
+      req,
+      extra: {
+        from_node_key: fromNodeKey,
+        to_node_key: normalizePhaseKey(workflow?.current_node?.node_key || ''),
+        reject_reason: rejectReason,
+      },
+    })
+
+    const afterTaskMap = buildOpenTaskMap(workflow)
+    for (const [taskId, task] of afterTaskMap.entries()) {
+      if (beforeTaskMap.has(taskId)) continue
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_assign',
+        demand,
+        task,
+        req,
+      })
+    }
 
     return res.json({
       success: true,
@@ -3908,6 +4472,10 @@ const forceCompleteDemandWorkflowCurrentNode = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
+    const workflowBefore = await safeGetDemandWorkflowSnapshot(demandId)
+    const fromNodeKey = normalizePhaseKey(workflowBefore?.current_node?.node_key || '')
+    const beforeTaskMap = buildOpenTaskMap(workflowBefore)
+
     const workflow = await Workflow.submitCurrentNode({
       demandId,
       operatorUserId: req.user.id,
@@ -3916,6 +4484,47 @@ const forceCompleteDemandWorkflowCurrentNode = async (req, res) => {
       skipAssigneeCheck: true,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+
+    await emitWorkflowNodeNotificationEvent({
+      eventType: 'node_complete',
+      demand,
+      workflow,
+      nodeKey: fromNodeKey,
+      req,
+      extra: {
+        from_node_key: fromNodeKey,
+        to_node_key: normalizePhaseKey(workflow?.current_node?.node_key || ''),
+      },
+    })
+    const completedNode = (Array.isArray(workflowBefore?.nodes) ? workflowBefore.nodes : []).find(
+      (node) => normalizePhaseKey(node?.node_key) === fromNodeKey,
+    )
+    const completedNodeId = toPositiveInt(completedNode?.id)
+    const doneTasks = Array.from(beforeTaskMap.values()).filter(
+      (task) => toPositiveInt(task?.instance_node_id) === completedNodeId,
+    )
+    for (const task of doneTasks) {
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_complete',
+        demand,
+        task: {
+          ...task,
+          status: 'DONE',
+        },
+        req,
+      })
+    }
+
+    const afterTaskMap = buildOpenTaskMap(workflow)
+    for (const [taskId, task] of afterTaskMap.entries()) {
+      if (beforeTaskMap.has(taskId)) continue
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_assign',
+        demand,
+        task,
+        req,
+      })
+    }
 
     return res.json({
       success: true,
@@ -3952,6 +4561,10 @@ const forceCompleteDemandWorkflowNode = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
+    const workflowBefore = await safeGetDemandWorkflowSnapshot(demandId)
+    const fromNodeKey = normalizePhaseKey(nodeKey)
+    const beforeTaskMap = buildOpenTaskMap(workflowBefore)
+
     const workflow = await Workflow.submitNode({
       demandId,
       nodeKey,
@@ -3961,6 +4574,47 @@ const forceCompleteDemandWorkflowNode = async (req, res) => {
       skipAssigneeCheck: true,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+
+    await emitWorkflowNodeNotificationEvent({
+      eventType: 'node_complete',
+      demand,
+      workflow,
+      nodeKey: fromNodeKey,
+      req,
+      extra: {
+        from_node_key: fromNodeKey,
+        to_node_key: normalizePhaseKey(workflow?.current_node?.node_key || ''),
+      },
+    })
+    const completedNode = (Array.isArray(workflowBefore?.nodes) ? workflowBefore.nodes : []).find(
+      (node) => normalizePhaseKey(node?.node_key) === fromNodeKey,
+    )
+    const completedNodeId = toPositiveInt(completedNode?.id)
+    const doneTasks = Array.from(beforeTaskMap.values()).filter(
+      (task) => toPositiveInt(task?.instance_node_id) === completedNodeId,
+    )
+    for (const task of doneTasks) {
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_complete',
+        demand,
+        task: {
+          ...task,
+          status: 'DONE',
+        },
+        req,
+      })
+    }
+
+    const afterTaskMap = buildOpenTaskMap(workflow)
+    for (const [taskId, task] of afterTaskMap.entries()) {
+      if (beforeTaskMap.has(taskId)) continue
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_assign',
+        demand,
+        task,
+        req,
+      })
+    }
 
     return res.json({
       success: true,
@@ -4160,6 +4814,11 @@ const updateDemandWorkflowTaskHours = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
+    const workflowBefore = await safeGetDemandWorkflowSnapshot(demandId)
+    const beforeTask = (Array.isArray(workflowBefore?.tasks) ? workflowBefore.tasks : []).find(
+      (item) => Number(item?.id) === Number(taskId),
+    ) || null
+
     const workflow = await Workflow.updateTaskHours({
       demandId,
       taskId,
@@ -4172,6 +4831,29 @@ const updateDemandWorkflowTaskHours = async (req, res) => {
       comment,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+
+    const afterTask = (Array.isArray(workflow?.tasks) ? workflow.tasks : []).find(
+      (item) => Number(item?.id) === Number(taskId),
+    ) || null
+    const beforeDue = normalizeDate(beforeTask?.due_at)
+    const afterDue = normalizeDate(afterTask?.due_at)
+    const beforeDeadline = normalizeDateTime(beforeTask?.deadline)
+    const afterDeadline = normalizeDateTime(afterTask?.deadline)
+    const deadlineTouched = req.body.deadline !== undefined || req.body.expected_completion_date !== undefined
+    if (deadlineTouched && afterTask && (beforeDue !== afterDue || beforeDeadline !== afterDeadline)) {
+      await emitWorkflowTaskNotificationEvent({
+        eventType: 'task_deadline',
+        demand,
+        task: afterTask,
+        req,
+        extra: {
+          from_due_at: beforeDue || '',
+          to_due_at: afterDue || '',
+          from_deadline: beforeDeadline || '',
+          to_deadline: afterDeadline || '',
+        },
+      })
+    }
 
     return res.json({
       success: true,
@@ -4449,6 +5131,93 @@ const getMyWeeklyReport = async (req, res) => {
   }
 }
 
+const sendMyWeeklyReport = async (req, res) => {
+  const rangeSource = req.body && typeof req.body === 'object' ? req.body : req.query
+  const { startDate, endDate, error } = resolveWeeklyReportDateRange(rangeSource?.start_date, rangeSource?.end_date)
+  if (error) {
+    return res.status(400).json({ success: false, message: error })
+  }
+
+  try {
+    const targetUser = await User.findById(req.user.id)
+    if (!targetUser) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+    const openId = normalizeText(targetUser?.feishu_open_id, 128)
+    if (!openId) {
+      return res.status(400).json({ success: false, message: '当前账号未绑定飞书 OpenID，无法发送周报' })
+    }
+
+    const report = await Work.getMyWeeklyReport(req.user.id, {
+      startDate,
+      endDate,
+    })
+    const weekRange = `${report?.range?.start_date || startDate} ~ ${report?.range?.end_date || endDate}`
+    const weeklySummaryText = buildWeeklySummaryText(report)
+
+    const sendResult = await sendNotification({
+      channelType: 'feishu',
+      title: `个人周报 ${weekRange}`,
+      content: weeklySummaryText,
+      targets: [
+        {
+          target_type: 'user',
+          target_id: openId,
+          target_name: normalizeText(targetUser?.real_name || targetUser?.username, 100) || null,
+          extra: {
+            user_id: Number(req.user.id),
+          },
+        },
+      ],
+      metadata: {
+        source: 'weekly_report_manual_send',
+        user_id: Number(req.user.id),
+      },
+    })
+
+    if (sendResult?.skipped) {
+      return res.status(400).json({
+        success: false,
+        message: sendResult?.error_message || '发送被策略跳过',
+        code: sendResult?.error_code || 'SEND_SKIPPED',
+      })
+    }
+    if (!sendResult?.success) {
+      return res.status(500).json({
+        success: false,
+        message: sendResult?.error_message || '周报发送失败',
+        code: sendResult?.error_code || 'SEND_FAILED',
+      })
+    }
+
+    await NotificationEvent.processEvent({
+      eventType: 'weekly_report_send',
+      data: {
+        user_id: Number(req.user.id),
+        user_name: normalizeText(targetUser?.real_name || targetUser?.username, 100) || '',
+        department_id: toPositiveInt(targetUser?.department_id),
+        week_range: weekRange,
+        weekly_summary_text: weeklySummaryText,
+        business_line_id: null,
+      },
+      operatorUserId: req.user?.id || null,
+    })
+
+    return res.json({
+      success: true,
+      message: '周报已发送',
+      data: {
+        week_range: weekRange,
+        target_open_id: openId,
+        send_response: sendResult?.response || {},
+      },
+    })
+  } catch (err) {
+    console.error('发送个人周报失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getOwnerWorkbench = async (req, res) => {
   try {
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
@@ -4618,6 +5387,7 @@ module.exports = {
   replaceDemandWorkflowLatestTemplate,
   getMyWorkbench,
   getMyWeeklyReport,
+  sendMyWeeklyReport,
   getOwnerWorkbench,
   getMorningStandupBoard,
   sendNoFillReminders,
@@ -4726,6 +5496,21 @@ async function updateAssignedLog(req, res) {
       selfTaskDifficultyCode: selfTaskDifficultyCode || null,
       ownerEstimateRequired: null,
     })
+
+    const updated = await Work.findLogById(id)
+    const prevStatus = normalizeText(existing?.log_status, 64) || ''
+    const nextStatus = normalizeText(updated?.log_status, 64) || ''
+    if (prevStatus && nextStatus && prevStatus !== nextStatus) {
+      await emitWorklogNotificationEvent({
+        eventType: 'worklog_status_change',
+        log: updated,
+        req,
+        extra: {
+          from_status: prevStatus,
+          to_status: nextStatus,
+        },
+      })
+    }
 
     return res.json({ success: true })
   } catch (error) {

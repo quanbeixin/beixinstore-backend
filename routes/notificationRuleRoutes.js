@@ -8,6 +8,7 @@ const {
   deleteRule,
   getSendControl,
   updateSendControl,
+  getFeishuChatOptions,
 } = require('../controllers/notificationRuleController')
 
 const router = express.Router()
@@ -19,6 +20,7 @@ router.post('/', createRule)
 router.get('/', getRules)
 router.get('/send-control', getSendControl)
 router.put('/send-control', updateSendControl)
+router.get('/feishu/chats', getFeishuChatOptions)
 router.put('/:id', updateRule)
 router.delete('/:id', deleteRule)
 
