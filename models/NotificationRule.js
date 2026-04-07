@@ -113,6 +113,7 @@ async function getUserLabelMap(userIds) {
 
 async function syncLegacyRuleReceivers(ruleId, receiverConfig) {
   const normalizedConfig = normalizeReceiverConfig(receiverConfig)
+  const useDemandBoundChat = normalizedConfig.use_demand_bound_chat === true
   const roleIds = normalizePositiveIntArray(normalizedConfig.roles)
   const userIds = normalizePositiveIntArray(normalizedConfig.user_ids || normalizedConfig.users)
   const chatIds = Array.from(
@@ -134,7 +135,7 @@ async function syncLegacyRuleReceivers(ruleId, receiverConfig) {
   const userLabelMap = await getUserLabelMap(userIds)
 
   await pool.query('DELETE FROM notification_rule_receivers WHERE rule_id = ?', [ruleId])
-  if (roleIds.length === 0 && userIds.length === 0 && dynamicFields.length === 0 && chatIds.length === 0) return
+  if (roleIds.length === 0 && userIds.length === 0 && dynamicFields.length === 0 && chatIds.length === 0 && !useDemandBoundChat) return
 
   const roleValues = roleIds.map((roleId) => [
     Number(ruleId),
@@ -168,7 +169,17 @@ async function syncLegacyRuleReceivers(ruleId, receiverConfig) {
     1,
   ])
 
-  const values = [...roleValues, ...userValues, ...dynamicValues, ...chatValues]
+  const demandBoundChatValues = useDemandBoundChat
+    ? [[
+      Number(ruleId),
+      'DYNAMIC',
+      '__demand_bound_chat__',
+      '需求绑定群',
+      1,
+    ]]
+    : []
+
+  const values = [...roleValues, ...userValues, ...dynamicValues, ...chatValues, ...demandBoundChatValues]
   await pool.query(
     `INSERT INTO notification_rule_receivers (
        rule_id,
@@ -227,6 +238,13 @@ async function getLegacyRuleReceiversMap(ruleIds) {
 
 function inferReceiverType(receiverConfig, fallback = 'role') {
   if (!receiverConfig || typeof receiverConfig !== 'object') return fallback
+  if (receiverConfig.use_demand_bound_chat === true) return 'demand_group'
+  if (
+    Array.isArray(receiverConfig.dynamic) &&
+    receiverConfig.dynamic.some((item) => String(item || '') === '__demand_bound_chat__')
+  ) {
+    return 'demand_group'
+  }
   if (Array.isArray(receiverConfig.chat_ids) && receiverConfig.chat_ids.length > 0) return 'chat'
   if (
     Array.isArray(receiverConfig.dynamic) &&
@@ -254,6 +272,10 @@ function mapRuleRowLegacy(row, receiverConfig = {}) {
       .filter(Boolean)
     : []
 
+  const useDemandBoundChat = Array.isArray(receiverConfig.dynamic)
+    ? receiverConfig.dynamic.some((item) => String(item || '') === '__demand_bound_chat__')
+    : false
+
   return {
     id: Number(row.id),
     rule_code: row.rule_code,
@@ -265,6 +287,7 @@ function mapRuleRowLegacy(row, receiverConfig = {}) {
     receiver_type: receiverType,
     receiver_config_json: {
       ...receiverConfig,
+      use_demand_bound_chat: useDemandBoundChat,
       chat_ids: chatIds,
       user_id_field:
         normalizeText(receiverConfig.user_id_field, 128) ||

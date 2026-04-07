@@ -6,7 +6,7 @@ const {
 } = require('../utils/notificationSender')
 
 const ALLOWED_CHANNEL_TYPES = new Set(['feishu'])
-const ALLOWED_RECEIVER_TYPES = new Set(['role', 'user', 'field', 'chat'])
+const ALLOWED_RECEIVER_TYPES = new Set(['role', 'user', 'field', 'chat', 'demand_group'])
 
 function sendSuccess(res, { status = 200, message = '成功', data = null } = {}) {
   return res.status(status).json({

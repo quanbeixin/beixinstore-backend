@@ -4,7 +4,7 @@ const Workflow = require('../models/Workflow')
 const ConfigDict = require('../models/ConfigDict')
 const NotificationEvent = require('../models/NotificationEvent')
 const pool = require('../utils/db')
-const { sendNotification } = require('../utils/notificationSender')
+const { sendNotification, createFeishuDemandChat } = require('../utils/notificationSender')
 const {
   normalizeTemplateGraph,
   filterTemplateGraphByParticipantRoles,
@@ -131,6 +131,21 @@ function normalizeBusinessGroupCode(value) {
   const code = String(value || '').trim().toUpperCase()
   if (!code) return null
   return /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : ''
+}
+
+function normalizeDemandGroupChatMode(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const mode = String(value || '').trim().toLowerCase()
+  if (!mode) return undefined
+  if (mode === 'auto' || mode === 'none' || mode === 'bind') return mode
+  return ''
+}
+
+function normalizeDemandGroupChatId(value) {
+  if (value === undefined) return undefined
+  const chatId = String(value || '').trim()
+  if (!chatId) return null
+  return /^oc_[a-zA-Z0-9]+$/.test(chatId) ? chatId : ''
 }
 
 function normalizeDictCode(value) {
@@ -631,6 +646,66 @@ function normalizeParticipantRolesFromBody(value) {
 
   if (!Array.isArray(list)) return { ok: false, value: null }
   return { ok: true, value: normalizeParticipantRoles(list) }
+}
+
+function normalizeParticipantRoleUserMapFromBody(value, participantRoles = []) {
+  if (value === undefined) return { ok: true, value: undefined }
+  if (value === null || value === '') return { ok: true, value: {} }
+
+  let mapValue = value
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (!text) return { ok: true, value: {} }
+    try {
+      mapValue = JSON.parse(text)
+    } catch (err) {
+      return { ok: false, value: null }
+    }
+  }
+
+  if (!mapValue || typeof mapValue !== 'object' || Array.isArray(mapValue)) {
+    return { ok: false, value: null }
+  }
+
+  const roleSet = new Set(normalizeParticipantRoles(participantRoles))
+  const result = {}
+  Object.entries(mapValue).forEach(([roleKey, userIdRaw]) => {
+    const role = String(roleKey || '').trim().replace(/\s+/g, '_').toUpperCase().slice(0, 64)
+    const userId = toPositiveInt(userIdRaw)
+    if (!role || !roleSet.has(role) || !userId) return
+    result[role] = userId
+  })
+  return { ok: true, value: result }
+}
+
+async function resolveOpenIdsByUserIds(userIds = []) {
+  const normalizedUserIds = Array.from(
+    new Set(
+      (Array.isArray(userIds) ? userIds : [])
+        .map((item) => toPositiveInt(item))
+        .filter(Boolean),
+    ),
+  )
+  if (normalizedUserIds.length === 0) return []
+
+  const placeholders = normalizedUserIds.map(() => '?').join(', ')
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, feishu_open_id
+       FROM users
+       WHERE id IN (${placeholders})`,
+      normalizedUserIds,
+    )
+    return Array.from(
+      new Set(
+        (rows || [])
+          .map((row) => normalizeText(row?.feishu_open_id, 128))
+          .filter(Boolean),
+      ),
+    )
+  } catch {
+    return []
+  }
 }
 
 function validateTemplateParticipantRoles(template, participantRoles = []) {
@@ -1693,12 +1768,20 @@ const createDemand = async (req, res) => {
       ? null
       : toPositiveInt(templateIdRaw)
   const participantRolesResult = normalizeParticipantRolesFromBody(req.body.participant_roles)
+  const participantRoleUserMapResult = normalizeParticipantRoleUserMapFromBody(
+    req.body.participant_role_user_map,
+    participantRolesResult.ok ? participantRolesResult.value || [] : [],
+  )
   const projectManagerRaw = req.body.project_manager
   const projectManager =
     projectManagerRaw === undefined || projectManagerRaw === null || projectManagerRaw === ''
       ? null
       : toPositiveInt(projectManagerRaw)
   const healthStatus = normalizeDemandHealthStatus(req.body.health_status)
+  const parsedGroupChatMode = normalizeDemandGroupChatMode(req.body.group_chat_mode)
+  const groupChatMode = parsedGroupChatMode === undefined ? 'none' : parsedGroupChatMode
+  const parsedGroupChatId = normalizeDemandGroupChatId(req.body.group_chat_id)
+  const groupChatId = groupChatMode === 'bind' ? parsedGroupChatId : null
   const actualStartTimeRaw = req.body.actual_start_time
   const actualStartTime = normalizeDateTime(actualStartTimeRaw)
   const actualEndTimeRaw = req.body.actual_end_time
@@ -1743,8 +1826,23 @@ const createDemand = async (req, res) => {
   if ((participantRolesResult.value || []).length === 0) {
     return res.status(400).json({ success: false, message: '请至少选择一个需求涉及角色' })
   }
+  if (!participantRoleUserMapResult.ok) {
+    return res.status(400).json({ success: false, message: 'participant_role_user_map 必须是 JSON 对象' })
+  }
   if (projectManagerRaw !== undefined && projectManager === null) {
     return res.status(400).json({ success: false, message: 'project_manager 无效' })
+  }
+  if (
+    req.body.group_chat_mode !== undefined &&
+    (groupChatMode === '' || groupChatMode === undefined)
+  ) {
+    return res.status(400).json({ success: false, message: 'group_chat_mode 仅支持 auto / none / bind' })
+  }
+  if (groupChatMode === 'bind' && !groupChatId) {
+    return res.status(400).json({ success: false, message: '绑定现有群时，group_chat_id 不能为空' })
+  }
+  if (parsedGroupChatId === '') {
+    return res.status(400).json({ success: false, message: 'group_chat_id 格式错误，应为 oc_xxx' })
   }
   if (
     actualStartTimeRaw !== undefined &&
@@ -1819,8 +1917,11 @@ const createDemand = async (req, res) => {
       managementMode,
       templateId,
       participantRoles: participantRolesResult.value || [],
+      participantRoleUserMap: participantRoleUserMapResult.value || {},
       projectManager,
       healthStatus,
+      groupChatMode,
+      groupChatId,
       actualStartTime: actualStartTime || null,
       actualEndTime: actualEndTime || null,
       docLink: docLink || null,
@@ -1853,7 +1954,47 @@ const createDemand = async (req, res) => {
     }
 
     await refreshDemandHourSummaryQuietly(finalDemandId)
-    const created = await Work.findDemandById(finalDemandId)
+    let created = await Work.findDemandById(finalDemandId)
+
+    let autoGroupChatWarning = ''
+    let autoGroupChatResult = null
+    if (groupChatMode === 'auto') {
+      const ownerOpenId = normalizeText(owner?.feishu_open_id, 128)
+      if (!ownerOpenId) {
+        autoGroupChatWarning = '需求负责人未绑定飞书 OpenID，未能自动拉群'
+      } else {
+        const roleUserIds = Array.from(
+          new Set(
+            Object.values(participantRoleUserMapResult.value || {})
+              .map((item) => toPositiveInt(item))
+              .filter(Boolean),
+          ),
+        )
+        const participantOpenIds = await resolveOpenIdsByUserIds(roleUserIds)
+        const memberOpenIds = Array.from(new Set([ownerOpenId, ...participantOpenIds]))
+
+        const chatResult = await createFeishuDemandChat({
+          demandId: finalDemandId,
+          demandName: created?.name || name,
+          ownerOpenId,
+          memberOpenIds,
+        })
+        if (chatResult?.success && chatResult?.data?.chat_id) {
+          await Work.updateDemandGroupChatBinding(finalDemandId, {
+            groupChatMode: 'bind',
+            groupChatId: chatResult.data.chat_id,
+          })
+          created = await Work.findDemandById(finalDemandId)
+          autoGroupChatResult = {
+            mode: 'bind',
+            chat_id: chatResult.data.chat_id,
+            chat_name: chatResult.data.name || null,
+          }
+        } else {
+          autoGroupChatWarning = `自动拉群失败：${chatResult?.error_message || '请检查飞书应用权限'}`
+        }
+      }
+    }
 
     await emitDemandNotificationEvent({
       eventType: 'demand_create',
@@ -1872,13 +2013,17 @@ const createDemand = async (req, res) => {
       },
     })
 
+    const warningMessages = [workflowInitWarning, autoGroupChatWarning].filter(Boolean)
+
     return res.status(201).json({
       success: true,
-      message: workflowInitWarning ? `需求创建成功（${workflowInitWarning}）` : '需求创建成功',
+      message: warningMessages.length > 0 ? `需求创建成功（${warningMessages.join('；')}）` : '需求创建成功',
       data: {
         ...created,
         workflow,
         workflow_init_warning: workflowInitWarning || null,
+        auto_group_chat_warning: autoGroupChatWarning || null,
+        auto_group_chat_result: autoGroupChatResult,
       },
     })
   } catch (err) {
@@ -1933,6 +2078,12 @@ const updateDemand = async (req, res) => {
       req.body.health_status === undefined
         ? normalizeDemandHealthStatus(existing.health_status)
         : normalizeDemandHealthStatus(req.body.health_status)
+    const parsedGroupChatMode = normalizeDemandGroupChatMode(req.body.group_chat_mode)
+    const groupChatMode = parsedGroupChatMode === undefined ? String(existing.group_chat_mode || 'none').toLowerCase() : parsedGroupChatMode
+    const parsedGroupChatId = normalizeDemandGroupChatId(req.body.group_chat_id)
+    const groupChatId = groupChatMode === 'bind'
+      ? (parsedGroupChatId === undefined ? normalizeDemandGroupChatId(existing.group_chat_id) : parsedGroupChatId)
+      : null
     const parsedTemplateId =
       req.body.template_id === undefined
         ? undefined
@@ -1940,15 +2091,28 @@ const updateDemand = async (req, res) => {
           ? null
           : toPositiveInt(req.body.template_id)
     const participantRolesResult = normalizeParticipantRolesFromBody(req.body.participant_roles)
+    const participantRoleUserMapResult = normalizeParticipantRoleUserMapFromBody(
+      req.body.participant_role_user_map,
+      participantRolesResult.ok
+        ? participantRolesResult.value || []
+        : existing.participant_roles || [],
+    )
     if (req.body.template_id !== undefined && req.body.template_id !== null && req.body.template_id !== '' && !parsedTemplateId) {
       return res.status(400).json({ success: false, message: 'template_id 无效' })
     }
     if (!participantRolesResult.ok) {
       return res.status(400).json({ success: false, message: 'participant_roles 必须是数组或 JSON 数组字符串' })
     }
+    if (!participantRoleUserMapResult.ok) {
+      return res.status(400).json({ success: false, message: 'participant_role_user_map 必须是 JSON 对象' })
+    }
     const templateId = parsedTemplateId === undefined ? toPositiveInt(existing.template_id) : parsedTemplateId
     const participantRoles =
       participantRolesResult.value === undefined ? existing.participant_roles || [] : participantRolesResult.value
+    const participantRoleUserMap =
+      participantRoleUserMapResult.value === undefined
+        ? (existing.participant_role_user_map || {})
+        : participantRoleUserMapResult.value
     if (!templateId) {
       return res.status(400).json({ success: false, message: '请先选择需求模板' })
     }
@@ -1961,6 +2125,18 @@ const updateDemand = async (req, res) => {
         : req.body.project_manager === null || String(req.body.project_manager).trim() === ''
           ? null
           : toPositiveInt(req.body.project_manager)
+    if (
+      req.body.group_chat_mode !== undefined &&
+      (groupChatMode === '' || groupChatMode === undefined)
+    ) {
+      return res.status(400).json({ success: false, message: 'group_chat_mode 仅支持 auto / none / bind' })
+    }
+    if (groupChatMode === 'bind' && !groupChatId) {
+      return res.status(400).json({ success: false, message: '绑定现有群时，group_chat_id 不能为空' })
+    }
+    if (parsedGroupChatId === '') {
+      return res.status(400).json({ success: false, message: 'group_chat_id 格式错误，应为 oc_xxx' })
+    }
     if (
       req.body.project_manager !== undefined &&
       req.body.project_manager !== null &&
@@ -2089,8 +2265,11 @@ const updateDemand = async (req, res) => {
       managementMode,
       templateId: templateId || null,
       participantRoles: participantRoles || [],
+      participantRoleUserMap: participantRoleUserMap || {},
       projectManager: projectManager || null,
       healthStatus,
+      groupChatMode,
+      groupChatId,
       actualStartTime,
       actualEndTime,
       docLink,

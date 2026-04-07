@@ -46,6 +46,17 @@ function parseJsonArray(value, fallback = []) {
   return Array.isArray(parsed) ? parsed : fallback
 }
 
+function normalizeDemandId(value) {
+  const text = normalizeText(value, 64).toUpperCase()
+  return text || ''
+}
+
+const BUSINESS_ROLE_RECEIVER_KEYS = new Set([
+  'demand_owner',
+  'node_owner',
+  'node_assignee',
+])
+
 function getValueByPath(obj, path) {
   if (!path) return undefined
   const segments = String(path)
@@ -313,6 +324,126 @@ function dedupeTargets(targets) {
   return Array.from(map.values())
 }
 
+async function resolveDemandIdFromEventData(eventData) {
+  const directDemandId = normalizeDemandId(eventData?.demand_id)
+  if (directDemandId) return directDemandId
+
+  const bugId = toNullableInt(eventData?.bug_id)
+  if (!bugId) return ''
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT demand_id
+       FROM bugs
+       WHERE id = ?
+       LIMIT 1`,
+      [bugId],
+    )
+    return normalizeDemandId(rows?.[0]?.demand_id)
+  } catch {
+    return ''
+  }
+}
+
+async function resolveDemandBoundChatTargets(eventData) {
+  const demandId = await resolveDemandIdFromEventData(eventData)
+  if (!demandId) return []
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, name, group_chat_mode, group_chat_id
+       FROM work_demands
+       WHERE id = ?
+       LIMIT 1`,
+      [demandId],
+    )
+    const row = rows?.[0] || null
+    if (!row) return []
+    const mode = normalizeText(row.group_chat_mode, 20).toLowerCase()
+    const chatId = normalizeText(row.group_chat_id, 128)
+    if (mode !== 'bind' || !chatId) return []
+
+    return [{
+      target_type: 'chat',
+      target_id: chatId,
+      target_name: normalizeText(row.name, 128) || `需求群(${demandId})`,
+      extra: {
+        demand_id: demandId,
+      },
+    }]
+  } catch {
+    return []
+  }
+}
+
+async function resolveDemandOwnerUserIdByDemandId(demandId) {
+  const normalizedDemandId = normalizeDemandId(demandId)
+  if (!normalizedDemandId) return null
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT owner_user_id
+       FROM work_demands
+       WHERE id = ?
+       LIMIT 1`,
+      [normalizedDemandId],
+    )
+    return toNullableInt(rows?.[0]?.owner_user_id)
+  } catch {
+    return null
+  }
+}
+
+async function resolveBusinessRoleUserIds(roleKeys, eventData) {
+  const keys = Array.from(
+    new Set(
+      (Array.isArray(roleKeys) ? roleKeys : [])
+        .map((item) => normalizeText(item, 64).toLowerCase())
+        .filter((item) => BUSINESS_ROLE_RECEIVER_KEYS.has(item)),
+    ),
+  )
+  if (keys.length === 0) return []
+
+  const userIds = []
+  let demandOwnerUserIdResolved = false
+  let demandOwnerUserId = null
+
+  for (const key of keys) {
+    if (key === 'demand_owner') {
+      const directDemandOwner =
+        toNullableInt(getValueByPath(eventData, 'to_owner_user_id')) ||
+        toNullableInt(getValueByPath(eventData, 'owner_user_id')) ||
+        toNullableInt(getValueByPath(eventData, 'demand_owner_user_id'))
+      if (directDemandOwner) {
+        userIds.push(directDemandOwner)
+        continue
+      }
+
+      if (!demandOwnerUserIdResolved) {
+        const demandId = await resolveDemandIdFromEventData(eventData)
+        demandOwnerUserId = demandId ? await resolveDemandOwnerUserIdByDemandId(demandId) : null
+        demandOwnerUserIdResolved = true
+      }
+      if (demandOwnerUserId) {
+        userIds.push(demandOwnerUserId)
+      }
+      continue
+    }
+
+    if (key === 'node_owner' || key === 'node_assignee') {
+      const nodeOwnerUserId =
+        toNullableInt(getValueByPath(eventData, 'assignee_id')) ||
+        toNullableInt(getValueByPath(eventData, 'to_assignee_id')) ||
+        toNullableInt(getValueByPath(eventData, 'task_assignee_id'))
+      if (nodeOwnerUserId) {
+        userIds.push(nodeOwnerUserId)
+      }
+    }
+  }
+
+  return Array.from(new Set(userIds))
+}
+
 async function resolveTargetsFromRuleConfig(rule, eventData) {
   const config = rule.receiver_config_json && typeof rule.receiver_config_json === 'object' ? rule.receiver_config_json : {}
 
@@ -327,7 +458,17 @@ async function resolveTargetsFromRuleConfig(rule, eventData) {
     config.roles.forEach((item) => {
       const numeric = toNullableInt(item)
       if (numeric) roleIds.push(numeric)
-      else roleKeys.push(item)
+      else {
+        const key = normalizeText(item, 64).toLowerCase()
+        if (BUSINESS_ROLE_RECEIVER_KEYS.has(key)) roleKeys.push(key)
+        else roleKeys.push(item)
+      }
+    })
+  }
+  if (Array.isArray(config.business_roles)) {
+    config.business_roles.forEach((item) => {
+      const key = normalizeText(item, 64).toLowerCase()
+      if (BUSINESS_ROLE_RECEIVER_KEYS.has(key)) roleKeys.push(key)
     })
   }
   if (Array.isArray(config.role_ids)) roleIds.push(...config.role_ids)
@@ -349,10 +490,21 @@ async function resolveTargetsFromRuleConfig(rule, eventData) {
     if (dynamicUserId) userIds.push(dynamicUserId)
   }
 
+  const businessRoleUserIds = await resolveBusinessRoleUserIds(roleKeys, eventData)
+  if (businessRoleUserIds.length > 0) {
+    userIds.push(...businessRoleUserIds)
+  }
+  const pureRoleKeys = roleKeys.filter((item) => !BUSINESS_ROLE_RECEIVER_KEYS.has(normalizeText(item, 64).toLowerCase()))
+
+  if (rule.receiver_type === 'demand_group' || config.use_demand_bound_chat === true) {
+    const demandChatTargets = await resolveDemandBoundChatTargets(eventData)
+    chatIds.push(...demandChatTargets.map((item) => item.target_id))
+  }
+
   const [usersById, usersByRole, usersByRoleKeys, usersByDept] = await Promise.all([
     getUsersByIds(userIds),
     getUsersByRoleIds(roleIds),
-    getUsersByRoleKeys(roleKeys),
+    getUsersByRoleKeys(pureRoleKeys),
     getUsersByDepartmentIds(deptIds),
   ])
 
@@ -382,6 +534,7 @@ async function resolveTargetsFromLegacyReceivers(ruleId, eventData) {
   const deptIds = []
   const chatIds = []
   const directOpenIds = []
+  let useDemandBoundChat = false
 
   for (const receiver of receiverRows) {
     const receiverType = normalizeText(receiver.receiver_type, 16).toUpperCase()
@@ -409,6 +562,11 @@ async function resolveTargetsFromLegacyReceivers(ruleId, eventData) {
     }
 
     if (receiverType === 'DYNAMIC') {
+      if (receiverValueRaw === '__demand_bound_chat__') {
+        useDemandBoundChat = true
+        continue
+      }
+
       if (receiverValueRaw.startsWith('chat_id:')) {
         const chatId = receiverValueRaw.slice('chat_id:'.length)
         if (chatId) chatIds.push(chatId)
@@ -451,6 +609,8 @@ async function resolveTargetsFromLegacyReceivers(ruleId, eventData) {
     extra: null,
   }))
 
+  const demandBoundChatTargets = useDemandBoundChat ? await resolveDemandBoundChatTargets(eventData) : []
+
   const targets = [
     ...usersById.map(mapUserTarget).filter(Boolean),
     ...usersByRole.map(mapUserTarget).filter(Boolean),
@@ -458,6 +618,7 @@ async function resolveTargetsFromLegacyReceivers(ruleId, eventData) {
     ...usersByDept.map(mapUserTarget).filter(Boolean),
     ...directOpenIdTargets,
     ...collectChatTargets(chatIds),
+    ...demandBoundChatTargets,
   ]
 
   return dedupeTargets(targets)

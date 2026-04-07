@@ -435,6 +435,154 @@ async function listFeishuChats({ pageSize = 50, pageToken = '' } = {}) {
   }
 }
 
+function buildDemandChatName({ demandId, demandName }) {
+  const normalizedDemandId = normalizeText(demandId, 64)
+  const normalizedDemandName = normalizeText(demandName, 200)
+  const parts = []
+  if (normalizedDemandId) parts.push(normalizedDemandId)
+  if (normalizedDemandName) parts.push(normalizedDemandName)
+  const rawName = parts.length > 0 ? `需求协作-${parts.join('-')}` : `需求协作-${Date.now()}`
+  return normalizeText(rawName, 50) || `需求协作-${Date.now()}`
+}
+
+async function createFeishuDemandChat({ demandId = '', demandName = '', ownerOpenId = '', memberOpenIds = [] } = {}) {
+  const normalizedOwnerOpenId = normalizeText(ownerOpenId, 128)
+  if (!normalizedOwnerOpenId) {
+    return {
+      success: false,
+      error_code: 'FEISHU_CHAT_OWNER_OPENID_MISSING',
+      error_message: '缺少群主 open_id，无法自动建群',
+      response: {},
+    }
+  }
+
+  const tokenResult = await getTenantAccessToken()
+  if (!tokenResult.success) {
+    return {
+      success: false,
+      error_code: tokenResult.error_code || 'TOKEN_ERROR',
+      error_message: tokenResult.error_message || '获取飞书 token 失败',
+      response: tokenResult.response || {},
+    }
+  }
+
+  const { timeoutMs } = pickFeishuConfig()
+  const normalizedMemberOpenIds = Array.from(
+    new Set(
+      (Array.isArray(memberOpenIds) ? memberOpenIds : [])
+        .map((item) => normalizeText(item, 128))
+        .filter(Boolean),
+    ),
+  )
+  const bodyPayload = {
+    name: buildDemandChatName({ demandId, demandName }),
+    description: normalizeText(`需求协作群 ${normalizeText(demandId, 64)} ${normalizeText(demandName, 200)}`, 200),
+    chat_mode: 'group',
+    chat_type: 'private',
+    owner_id: normalizedOwnerOpenId,
+    user_id_list: normalizedMemberOpenIds,
+  }
+
+  const requestCandidates = [
+    {
+      url: 'https://open.feishu.cn/open-apis/im/v1/chats?user_id_type=open_id',
+      body: bodyPayload,
+    },
+    {
+      url: 'https://open.feishu.cn/open-apis/im/v1/chats',
+      body: {
+        ...bodyPayload,
+        owner_id_type: 'open_id',
+      },
+    },
+  ]
+
+  let lastError = null
+  for (const candidate of requestCandidates) {
+    try {
+      const response = await requestWithTimeout(
+        candidate.url,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${tokenResult.token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(candidate.body),
+        },
+        timeoutMs,
+      )
+
+      const parsed = await response.json().catch(() => null)
+      if (!response.ok) {
+        lastError = {
+          success: false,
+          error_code: 'FEISHU_CHAT_CREATE_HTTP_ERROR',
+          error_message: `创建飞书群失败: HTTP ${response.status}`,
+          response: {
+            http_status: response.status,
+            body: parsed,
+          },
+        }
+        continue
+      }
+
+      if (!parsed || Number(parsed.code) !== 0) {
+        lastError = {
+          success: false,
+          error_code: 'FEISHU_CHAT_CREATE_FAILED',
+          error_message: parsed?.msg || '飞书返回建群失败',
+          response: {
+            http_status: response.status,
+            body: parsed,
+          },
+        }
+        continue
+      }
+
+      const chatId = normalizeText(parsed?.data?.chat_id, 128)
+      if (!chatId) {
+        lastError = {
+          success: false,
+          error_code: 'FEISHU_CHAT_ID_EMPTY',
+          error_message: '飞书建群成功但未返回 chat_id',
+          response: {
+            http_status: response.status,
+            body: parsed,
+          },
+        }
+        continue
+      }
+
+      return {
+        success: true,
+        data: {
+          chat_id: chatId,
+          name: normalizeText(parsed?.data?.name, 200) || bodyPayload.name,
+        },
+        response: {
+          http_status: response.status,
+          body: parsed,
+        },
+      }
+    } catch (error) {
+      lastError = {
+        success: false,
+        error_code: 'FEISHU_CHAT_CREATE_REQUEST_FAILED',
+        error_message: error?.message || '创建飞书群请求失败',
+        response: {},
+      }
+    }
+  }
+
+  return lastError || {
+    success: false,
+    error_code: 'FEISHU_CHAT_CREATE_FAILED',
+    error_message: '创建飞书群失败',
+    response: {},
+  }
+}
+
 function normalizeTargets(targets) {
   if (!Array.isArray(targets)) return []
 
@@ -653,4 +801,5 @@ module.exports = {
   getNotificationSendControl,
   updateNotificationSendControl,
   listFeishuChats,
+  createFeishuDemandChat,
 }
