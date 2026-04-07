@@ -4143,7 +4143,6 @@ const Work = {
          FROM work_logs l
          LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
          WHERE l.id = ?
-           AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
          LIMIT 1`,
         [logId],
       )
@@ -4160,7 +4159,6 @@ const Work = {
          FROM work_logs l
          LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
          WHERE l.id = ?
-           AND COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
          LIMIT 1`,
         [logId],
       )
