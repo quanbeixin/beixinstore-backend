@@ -6291,6 +6291,7 @@ const Work = {
       SELECT
         l.demand_id,
         COALESCE(d.name, l.demand_id) AS demand_name,
+        COALESCE(d.description, '') AS demand_description,
         d.owner_user_id,
         COALESCE(NULLIF(ou.real_name, ''), ou.username) AS owner_name,
         d.business_group_code,
@@ -6319,6 +6320,7 @@ const Work = {
       GROUP BY
         l.demand_id,
         d.name,
+        d.description,
         d.owner_user_id,
         COALESCE(NULLIF(ou.real_name, ''), ou.username),
         d.business_group_code,
@@ -6442,6 +6444,7 @@ const Work = {
       return {
         demand_id: demandId,
         demand_name: row.demand_name || demandId,
+        description: row.demand_description || '',
         owner_user_id: toPositiveInt(row.owner_user_id),
         owner_name: row.owner_name || '-',
         business_group_code: row.business_group_code || null,
@@ -7466,6 +7469,7 @@ const Work = {
         ? demandInsight.demand_list.map((item) => ({
             demand_id: item.demand_id,
             demand_name: item.demand_name,
+            description: item.description || '',
             business_group_code: item.business_group_code || null,
             business_group_name: item.business_group_name || '-',
             phase_count: Number(item.phase_count || 0),
