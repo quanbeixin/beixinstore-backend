@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
+    "dev:staging": "NODE_ENV=production DB_USER=root_staging DB_PASSWORD=Micube_12345 DB_NAME=beixin_store_staging nodemon server.js",
     "lint": "eslint .",
     "format": "prettier --write .",
     "pm2:start": "pm2 start server.js --name admin-backend --env production",

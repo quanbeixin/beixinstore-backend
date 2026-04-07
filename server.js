@@ -16,9 +16,12 @@ const configRoutes = require('./routes/configRoutes')
 const orgRoutes = require('./routes/orgRoutes')
 const rbacRoutes = require('./routes/rbacRoutes')
 const workRoutes = require('./routes/workRoutes')
+const notificationRuleRoutes = require('./routes/notificationRuleRoutes')
+const notificationEventRoutes = require('./routes/notificationEventRoutes')
 const agentRoutes = require('./routes/agentRoutes')
 const integrationRoutes = require('./routes/integrationRoutes')
 const { apiLimiter, loginLimiter } = require('./middleware/security')
+const notificationSchedulerService = require('./services/notificationSchedulerService')
 
 const app = express()
 const PORT = process.env.PORT || 3000
@@ -107,6 +110,8 @@ app.use('/api/rbac', rbacRoutes)
 app.use('/api/agents', agentRoutes)
 app.use('/api/work', workRoutes)
 app.use('/api/integrations', integrationRoutes)
+app.use('/api/notification/rules', notificationRuleRoutes)
+app.use('/api/notification', notificationEventRoutes)
 app.use('/api', testRoutes)
 
 app.get('/', (req, res) => {
@@ -147,10 +152,12 @@ const server = app.listen(PORT, HOST, () => {
   console.log(`CORS origins: ${allowedOrigins.join(', ') || 'none'}`)
   console.log(`Trust proxy: ${String(trustProxy)}`)
   console.log(`Loaded env file: ${envFile}`)
+  notificationSchedulerService.start()
 })
 
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully...')
+  notificationSchedulerService.stop()
   server.close(() => {
     console.log('Server closed')
     process.exit(0)
@@ -159,6 +166,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully...')
+  notificationSchedulerService.stop()
   server.close(() => {
     console.log('Server closed')
     process.exit(0)

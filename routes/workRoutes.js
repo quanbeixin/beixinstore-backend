@@ -84,6 +84,7 @@ const {
   replaceDemandWorkflowLatestTemplate,
   getMyWorkbench,
   getMyWeeklyReport,
+  sendMyWeeklyReport,
   getMyAssignedItems,
   updateAssignedLog,
   getOwnerWorkbench,
@@ -285,6 +286,7 @@ router.get('/insight/member-detail', getMemberEfficiencyDetail)
 
 router.get('/workbench/me', authMiddleware.requirePermission('workbench.view.self'), getMyWorkbench)
 router.get('/workbench/me/weekly-report', authMiddleware.requirePermission('workbench.view.self'), getMyWeeklyReport)
+router.post('/workbench/me/weekly-report/send', authMiddleware.requirePermission('workbench.view.self'), sendMyWeeklyReport)
 router.get('/my-assigned-items', authMiddleware.requirePermission('worklog.view.self'), getMyAssignedItems)
 router.put('/my-assigned-items/:id', authMiddleware.requirePermission('worklog.view.self'), updateAssignedLog)
 router.get('/workbench/morning', getMorningStandupBoard)

@@ -63,6 +63,13 @@ const DEFAULT_NOTIFICATION_SCENES = [
   'task_deadline',
   'task_complete',
   'node_complete',
+  'weekly_report_send',
+  'demand_create',
+  'demand_assign',
+  'demand_status_change',
+  'worklog_create',
+  'worklog_assign',
+  'worklog_status_change',
   'bug_assign',
   'bug_status_change',
   'bug_fixed',
@@ -354,6 +361,20 @@ function normalizeParticipantRoles(values) {
         .filter(Boolean),
     ),
   )
+}
+
+function normalizeParticipantRoleUserMap(value, allowedRoles = []) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const roleSet = new Set(normalizeParticipantRoles(allowedRoles))
+  const result = {}
+  Object.entries(value).forEach(([roleKey, userIdRaw]) => {
+    const role = String(roleKey || '').trim().replace(/\s+/g, '_').toUpperCase().slice(0, 64)
+    const userId = Number(userIdRaw)
+    if (!role || !roleSet.has(role)) return
+    if (!Number.isInteger(userId) || userId <= 0) return
+    result[role] = userId
+  })
+  return result
 }
 
 function parseRequireDemand(extraJson, fallback = 0) {
@@ -1994,6 +2015,7 @@ const Work = {
         d.management_mode,
         d.template_id,
         d.participant_roles_json,
+        d.participant_role_user_map_json,
         pt.name AS template_name,
         pt.node_config AS template_node_config,
         d.project_manager,
@@ -2004,6 +2026,8 @@ const Work = {
         d.doc_link,
         d.ui_design_link,
         d.test_case_link,
+        d.group_chat_mode,
+        d.group_chat_id,
         d.business_group_code,
         bg.item_name AS business_group_name,
         DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
@@ -2148,6 +2172,10 @@ const Work = {
           ...rest,
           ...resolvedCurrentPhase,
           participant_roles: normalizeParticipantRoles(row?.participant_roles_json),
+          participant_role_user_map: normalizeParticipantRoleUserMap(
+            parseExtraJson(row?.participant_role_user_map_json),
+            normalizeParticipantRoles(row?.participant_roles_json),
+          ),
         },
         { todayDate },
       )
@@ -2176,6 +2204,7 @@ const Work = {
          d.management_mode,
          d.template_id,
          d.participant_roles_json,
+         d.participant_role_user_map_json,
          pt.name AS template_name,
          d.project_manager,
          COALESCE(NULLIF(pm.real_name, ''), pm.username) AS project_manager_name,
@@ -2185,6 +2214,8 @@ const Work = {
          d.doc_link,
          d.ui_design_link,
          d.test_case_link,
+         d.group_chat_mode,
+         d.group_chat_id,
          COALESCE(d.overall_estimated_hours, 0) AS overall_estimated_hours,
          COALESCE(d.overall_actual_hours, 0) AS overall_actual_hours,
          d.business_group_code,
@@ -2221,6 +2252,10 @@ const Work = {
           return {
             ...rest,
             participant_roles: normalizeParticipantRoles(row?.participant_roles_json),
+            participant_role_user_map: normalizeParticipantRoleUserMap(
+              parseExtraJson(row?.participant_role_user_map_json),
+              normalizeParticipantRoles(row?.participant_roles_json),
+            ),
           }
         })()
       : null
@@ -2237,8 +2272,11 @@ const Work = {
     managementMode = 'simple',
     templateId = null,
     participantRoles = [],
+    participantRoleUserMap = {},
     projectManager = null,
     healthStatus = 'green',
+    groupChatMode = 'none',
+    groupChatId = null,
     actualStartTime = null,
     actualEndTime = null,
     docLink = null,
@@ -2259,9 +2297,10 @@ const Work = {
       await conn.query(
         `INSERT INTO work_demands (
           id, name, owner_user_id, management_mode, template_id, participant_roles_json, project_manager, health_status,
-          actual_start_time, actual_end_time, doc_link, ui_design_link, test_case_link, business_group_code,
+          participant_role_user_map_json,
+          group_chat_mode, group_chat_id, actual_start_time, actual_end_time, doc_link, ui_design_link, test_case_link, business_group_code,
           expected_release_date, status, priority, description, created_by
-        ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           finalDemandId,
           name,
@@ -2271,6 +2310,14 @@ const Work = {
           JSON.stringify(normalizeParticipantRoles(participantRoles)),
           toPositiveInt(projectManager),
           normalizeHealthStatus(healthStatus),
+          JSON.stringify(
+            normalizeParticipantRoleUserMap(
+              participantRoleUserMap,
+              normalizeParticipantRoles(participantRoles),
+            ),
+          ),
+          normalizeText(groupChatMode, 20) || 'none',
+          normalizeText(groupChatId, 128) || null,
           normalizeDateTime(actualStartTime, null),
           normalizeDateTime(actualEndTime, null),
           normalizeText(docLink, 500) || null,
@@ -2303,8 +2350,11 @@ const Work = {
       managementMode = 'simple',
       templateId = null,
       participantRoles = [],
+      participantRoleUserMap = {},
       projectManager = null,
       healthStatus = 'green',
+      groupChatMode = 'none',
+      groupChatId = null,
       actualStartTime = null,
       actualEndTime = null,
       docLink = null,
@@ -2328,6 +2378,9 @@ const Work = {
          participant_roles_json = CAST(? AS JSON),
          project_manager = ?,
          health_status = ?,
+         participant_role_user_map_json = CAST(? AS JSON),
+         group_chat_mode = ?,
+         group_chat_id = ?,
          actual_start_time = ?,
          actual_end_time = ?,
          doc_link = ?,
@@ -2348,6 +2401,14 @@ const Work = {
         JSON.stringify(normalizeParticipantRoles(participantRoles)),
         toPositiveInt(projectManager),
         normalizeHealthStatus(healthStatus),
+        JSON.stringify(
+          normalizeParticipantRoleUserMap(
+            participantRoleUserMap,
+            normalizeParticipantRoles(participantRoles),
+          ),
+        ),
+        normalizeText(groupChatMode, 20) || 'none',
+        normalizeText(groupChatId, 128) || null,
         normalizeDateTime(actualStartTime, null),
         normalizeDateTime(actualEndTime, null),
         normalizeText(docLink, 500) || null,
@@ -2360,6 +2421,21 @@ const Work = {
         description || null,
         completedAt || null,
         demandId,
+      ],
+    )
+    return result.affectedRows
+  },
+
+  async updateDemandGroupChatBinding(demandId, { groupChatMode = 'none', groupChatId = null } = {}) {
+    const [result] = await pool.query(
+      `UPDATE work_demands
+       SET group_chat_mode = ?,
+           group_chat_id = ?
+       WHERE id = ?`,
+      [
+        normalizeText(groupChatMode, 20) || 'none',
+        normalizeText(groupChatId, 128) || null,
+        normalizeText(demandId, 64).toUpperCase(),
       ],
     )
     return result.affectedRows
@@ -4056,7 +4132,7 @@ const Work = {
 
     let rows = []
     try {
-      ;[rows] = await pool.query(
+      [rows] = await pool.query(
         `SELECT
            l.id,
            l.user_id,
@@ -4659,8 +4735,8 @@ const Work = {
 
     const actualByLogDate = new Map()
     const actualTotalByLog = new Map()
-    const entryCountByLog = new Map()
-    ;(entryRows || []).forEach((row) => {
+    const entryCountByLog = new Map();
+    (entryRows || []).forEach((row) => {
       const logId = Number(row.log_id)
       const entryDate = normalizeDateOnly(row.entry_date)
       const actualHours = toDecimal1(row.actual_hours)
@@ -6694,7 +6770,7 @@ const Work = {
       return target
     }
 
-    ;(entryRows || []).forEach((row) => {
+    (entryRows || []).forEach((row) => {
       const userId = Number(row.user_id)
       const logId = Number(row.log_id)
       const entryDate = normalizeDateOnly(row.entry_date)

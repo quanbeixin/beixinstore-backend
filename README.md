@@ -4,6 +4,13 @@ Node.js + Express + MySQL 后端 API 服务，支持 JWT 认证，配套前端 R
 
 ---
 
+## 架构文档（必读）
+
+- 全系统整合架构文档：`docs/system-architecture.md`
+- 要求：凡是涉及 API、权限、Workflow、数据库结构、前端路由权限变更，必须同步更新该文档。
+
+---
+
 ## 技术栈
 
 - Node.js + Express
