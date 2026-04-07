@@ -1,4 +1,4 @@
-﻿const pool = require('../utils/db')
+const pool = require('../utils/db')
 const {
   normalizeTemplateGraph,
   filterTemplateGraphByParticipantRoles,
@@ -56,25 +56,6 @@ const NET_EFFICIENCY_FORMULA_TOKEN_LABELS = Object.freeze({
   [NET_EFFICIENCY_FORMULA_OPERATORS.DIV]: '÷',
 })
 const OWNER_ESTIMATE_RULES = ['NONE', 'OPTIONAL', 'REQUIRED']
-const DEFAULT_NOTIFICATION_SCENES = [
-  'node_assign',
-  'node_reject',
-  'task_assign',
-  'task_deadline',
-  'task_complete',
-  'node_complete',
-  'weekly_report_send',
-  'demand_create',
-  'demand_assign',
-  'demand_status_change',
-  'worklog_create',
-  'worklog_assign',
-  'worklog_status_change',
-  'bug_assign',
-  'bug_status_change',
-  'bug_fixed',
-  'bug_reopen',
-]
 const TRUE_LIKE_VALUES = new Set(['1', 'true', 'yes', 'y', 'on'])
 const WORK_UNIFIED_STATUS = {
   RISK: 'RISK',
@@ -1660,122 +1641,6 @@ const Work = {
       ],
     )
     return Number(result.affectedRows || 0)
-  },
-
-  async listNotificationConfigs() {
-    let rows = []
-    try {
-      const [queryRows] = await pool.query(
-        `SELECT
-           id,
-           scene,
-           enabled,
-           receiver_roles,
-           advance_days,
-           DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
-           DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
-         FROM notification_config
-         ORDER BY scene ASC`,
-      )
-      rows = queryRows
-    } catch (err) {
-      if (!isMissingTableError(err)) throw err
-      return []
-    }
-
-    const sceneMap = new Map()
-    ;(rows || []).forEach((row) => {
-      const scene = String(row.scene || '').trim()
-      if (!scene) return
-      sceneMap.set(scene, {
-        id: Number(row.id),
-        scene,
-        enabled: Number(row.enabled) === 1 ? 1 : 0,
-        receiver_roles: parseJsonArray(row.receiver_roles, []),
-        advance_days: Number(row.advance_days || 0),
-        created_at: row.created_at || null,
-        updated_at: row.updated_at || null,
-      })
-    })
-
-    DEFAULT_NOTIFICATION_SCENES.forEach((scene) => {
-      if (sceneMap.has(scene)) return
-      sceneMap.set(scene, {
-        id: null,
-        scene,
-        enabled: 1,
-        receiver_roles: [],
-        advance_days: 0,
-        created_at: null,
-        updated_at: null,
-      })
-    })
-
-    return Array.from(sceneMap.values()).sort((a, b) => String(a.scene).localeCompare(String(b.scene)))
-  },
-
-  async findNotificationConfigByScene(scene) {
-    const normalizedScene = normalizeText(scene, 50).toLowerCase()
-    if (!normalizedScene) return null
-
-    try {
-      const [rows] = await pool.query(
-        `SELECT
-           id,
-           scene,
-           enabled,
-           receiver_roles,
-           advance_days,
-           DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
-           DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
-         FROM notification_config
-         WHERE scene = ?
-         LIMIT 1`,
-        [normalizedScene],
-      )
-      const row = rows[0] || null
-      if (!row) return null
-      return {
-        id: Number(row.id),
-        scene: row.scene,
-        enabled: Number(row.enabled) === 1 ? 1 : 0,
-        receiver_roles: parseJsonArray(row.receiver_roles, []),
-        advance_days: Number(row.advance_days || 0),
-        created_at: row.created_at || null,
-        updated_at: row.updated_at || null,
-      }
-    } catch (err) {
-      if (isMissingTableError(err)) return null
-      throw err
-    }
-  },
-
-  async upsertNotificationConfig(scene, { enabled = 1, receiverRoles = [], advanceDays = 0 } = {}) {
-    const normalizedScene = normalizeText(scene, 50).toLowerCase()
-    if (!normalizedScene) return 0
-
-    const normalizedRoles = Array.isArray(receiverRoles)
-      ? receiverRoles
-          .map((item) => normalizeText(item, 64))
-          .filter(Boolean)
-      : []
-
-    const [result] = await pool.query(
-      `INSERT INTO notification_config (scene, enabled, receiver_roles, advance_days)
-       VALUES (?, ?, CAST(? AS JSON), ?)
-       ON DUPLICATE KEY UPDATE
-         enabled = VALUES(enabled),
-         receiver_roles = VALUES(receiver_roles),
-         advance_days = VALUES(advance_days),
-         updated_at = CURRENT_TIMESTAMP`,
-      [
-        normalizedScene,
-        Number(enabled) === 1 ? 1 : 0,
-        JSON.stringify(normalizedRoles),
-        Math.max(0, Number(advanceDays) || 0),
-      ],
-    )
-    return Number(result?.affectedRows || 0)
   },
 
   async listEfficiencyFactorSettings() {

@@ -31,8 +31,6 @@ const {
   getProjectTemplateById,
   createProjectTemplate,
   updateProjectTemplate,
-  listNotificationConfigs,
-  updateNotificationConfig,
   getEfficiencyFactorSettings,
   updateEfficiencyFactorSettings,
   listDemands,
@@ -146,12 +144,6 @@ router.get(
 )
 router.post('/project-templates', authMiddleware.requirePermission('project.template.manage'), createProjectTemplate)
 router.put('/project-templates/:id', authMiddleware.requirePermission('project.template.manage'), updateProjectTemplate)
-router.get('/notification-configs', authMiddleware.requirePermission('notification.config.view'), listNotificationConfigs)
-router.put(
-  '/notification-configs/:scene',
-  authMiddleware.requirePermission('notification.config.manage'),
-  updateNotificationConfig,
-)
 router.get('/efficiency-factor-settings', getEfficiencyFactorSettings)
 router.put('/efficiency-factor-settings', updateEfficiencyFactorSettings)
 

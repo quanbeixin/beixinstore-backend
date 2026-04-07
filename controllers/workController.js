@@ -1,4 +1,4 @@
-﻿const Work = require('../models/Work')
+const Work = require('../models/Work')
 const User = require('../models/User')
 const Workflow = require('../models/Workflow')
 const ConfigDict = require('../models/ConfigDict')
@@ -10,26 +10,6 @@ const {
   filterTemplateGraphByParticipantRoles,
   normalizeParticipantRoles,
 } = require('../utils/projectTemplateWorkflowGraph')
-
-const NOTIFICATION_SCENES = new Set([
-  'node_assign',
-  'node_reject',
-  'task_assign',
-  'task_deadline',
-  'task_complete',
-  'node_complete',
-  'weekly_report_send',
-  'demand_create',
-  'demand_assign',
-  'demand_status_change',
-  'worklog_create',
-  'worklog_assign',
-  'worklog_status_change',
-  'bug_assign',
-  'bug_status_change',
-  'bug_fixed',
-  'bug_reopen',
-])
 
 const DEMAND_NODE_QUICK_ADD_SCENE = 'DEMAND_NODE_QUICK_ADD'
 const JOB_LEVEL_DICT_KEY = 'job_level'
@@ -721,30 +701,6 @@ function areStringArraysEqual(left = [], right = []) {
   return left.every((item, index) => String(item || '') === String(right[index] || ''))
 }
 
-function normalizeNotificationReceiverRoles(value) {
-  if (value === undefined) return { ok: true, value: undefined }
-  if (value === null) return { ok: true, value: [] }
-
-  let list = value
-  if (typeof value === 'string') {
-    const text = value.trim()
-    if (!text) return { ok: true, value: [] }
-    try {
-      list = JSON.parse(text)
-    } catch (err) {
-      return { ok: false, value: null }
-    }
-  }
-
-  if (!Array.isArray(list)) return { ok: false, value: null }
-
-  const normalized = list
-    .map((item) => normalizeText(item, 64))
-    .filter(Boolean)
-
-  return { ok: true, value: normalized }
-}
-
 function normalizePriorityOrder(value) {
   const order = String(value || '').trim().toLowerCase()
   if (!order) return ''
@@ -1213,73 +1169,6 @@ const updateProjectTemplate = async (req, res) => {
     return res.json({ success: true, message: '模板更新成功', data: updated })
   } catch (err) {
     console.error('更新项目模板失败:', err)
-    return res.status(500).json({ success: false, message: '服务器错误' })
-  }
-}
-
-const listNotificationConfigs = async (req, res) => {
-  try {
-    const rows = await Work.listNotificationConfigs()
-    return res.json({ success: true, data: rows })
-  } catch (err) {
-    console.error('获取通知配置失败:', err)
-    return res.status(500).json({ success: false, message: '服务器错误' })
-  }
-}
-
-const updateNotificationConfig = async (req, res) => {
-  const scene = normalizeText(req.params.scene, 50).toLowerCase()
-  if (!scene || !NOTIFICATION_SCENES.has(scene)) {
-    return res.status(400).json({ success: false, message: 'scene 无效或不在支持范围内' })
-  }
-
-  const receiverRolesResult = normalizeNotificationReceiverRoles(req.body.receiver_roles)
-  if (!receiverRolesResult.ok) {
-    return res.status(400).json({ success: false, message: 'receiver_roles 必须是字符串数组或 JSON 数组' })
-  }
-
-  const advanceDaysRaw = req.body.advance_days
-  const hasAdvanceDays = advanceDaysRaw !== undefined
-  let parsedAdvanceDays = null
-  if (hasAdvanceDays) {
-    const num = Number(advanceDaysRaw)
-    if (!Number.isInteger(num) || num < 0 || num > 30) {
-      return res.status(400).json({ success: false, message: 'advance_days 仅支持 0-30 的整数' })
-    }
-    parsedAdvanceDays = num
-  }
-
-  try {
-    const existing = await Work.findNotificationConfigByScene(scene)
-    const nextEnabled = req.body.enabled === undefined ? Number(existing?.enabled || 1) : (toBool(req.body.enabled, true) ? 1 : 0)
-    const nextRoles =
-      receiverRolesResult.value === undefined
-        ? Array.isArray(existing?.receiver_roles)
-          ? existing.receiver_roles
-          : []
-        : receiverRolesResult.value
-    const nextAdvanceDays =
-      parsedAdvanceDays === null ? Number(existing?.advance_days || 0) : parsedAdvanceDays
-
-    await Work.upsertNotificationConfig(scene, {
-      enabled: nextEnabled,
-      receiverRoles: nextRoles,
-      advanceDays: nextAdvanceDays,
-    })
-
-    const updated = await Work.findNotificationConfigByScene(scene)
-    return res.json({
-      success: true,
-      message: '通知配置更新成功',
-      data: updated || {
-        scene,
-        enabled: nextEnabled,
-        receiver_roles: nextRoles,
-        advance_days: nextAdvanceDays,
-      },
-    })
-  } catch (err) {
-    console.error('更新通知配置失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -5513,8 +5402,6 @@ module.exports = {
   getProjectTemplateById,
   createProjectTemplate,
   updateProjectTemplate,
-  listNotificationConfigs,
-  updateNotificationConfig,
   getEfficiencyFactorSettings,
   updateEfficiencyFactorSettings,
   listDemands,

@@ -1,4 +1,4 @@
-﻿const pool = require('../utils/db')
+const pool = require('../utils/db')
 
 const ConfigDict = {
   async listTypes({ enabledOnly = false } = {}) {

@@ -1,4 +1,4 @@
-﻿const ConfigDict = require('../models/ConfigDict')
+const ConfigDict = require('../models/ConfigDict')
 
 function normalizeText(value) {
   return typeof value === 'string' ? value.trim() : ''

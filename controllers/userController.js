@@ -1,4 +1,4 @@
-﻿const bcrypt = require('bcryptjs')
+const bcrypt = require('bcryptjs')
 const User = require('../models/User')
 const Department = require('../models/Department')
 const UserChangeLog = require('../models/UserChangeLog')

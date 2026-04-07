@@ -1,4 +1,4 @@
-﻿const pool = require('../utils/db')
+const pool = require('../utils/db')
 
 function isMissingTableError(err) {
   return err && (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146)

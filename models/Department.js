@@ -1,4 +1,4 @@
-﻿const pool = require('../utils/db')
+const pool = require('../utils/db')
 
 function normalizeParentId(value) {
   const num = Number(value)
