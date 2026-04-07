@@ -1098,6 +1098,8 @@ const listDemands = async (req, res) => {
   const excludeCompleted = toBool(req.query.exclude_completed, false)
   const cancelledOnly = toBool(req.query.cancelled_only, false)
   const excludeCancelled = toBool(req.query.exclude_cancelled, false)
+  const expectedReleaseOnly = toBool(req.query.expected_release_only, false)
+  const orderByExpectedReleaseDate = toBool(req.query.order_by_expected_release_date, false)
 
   if (businessGroupCode === '') {
     return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
@@ -1157,6 +1159,8 @@ const listDemands = async (req, res) => {
       cancelledOnly,
       excludeCompleted: completedOnly ? false : excludeCompleted,
       excludeCancelled: completedOnly || cancelledOnly ? false : excludeCancelled,
+      expectedReleaseOnly,
+      orderByExpectedReleaseDate,
     })
 
     return res.json({
