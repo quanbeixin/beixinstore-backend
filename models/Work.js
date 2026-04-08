@@ -4211,13 +4211,26 @@ const Work = {
 
     if (latestEntries.length === 1) {
       const onlyEntry = latestEntries[0]
+      const onlyEntryDate = normalizeDateOnly(onlyEntry.entry_date)
+      const shouldMoveDate =
+        Boolean(preferredDate) &&
+        onlyEntryDate &&
+        onlyEntryDate !== preferredDate &&
+        Number(onlyEntry.actual_hours || 0) <= 0 &&
+        targetActualHours > 0
       await pool.query(
         `UPDATE work_log_daily_entries
-         SET actual_hours = ?,
+         SET entry_date = ?,
+             actual_hours = ?,
              created_by = ?,
              created_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
-        [targetActualHours, normalizedCreatedBy, Number(onlyEntry.id)],
+        [
+          shouldMoveDate ? preferredDate : onlyEntryDate || preferredDate,
+          targetActualHours,
+          normalizedCreatedBy,
+          Number(onlyEntry.id),
+        ],
       )
       return 1
     }
