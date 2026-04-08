@@ -70,6 +70,34 @@ function getNowParts(timeZone = DEFAULT_TIMEZONE) {
   }
 }
 
+function formatDate(date) {
+  const d = new Date(date)
+  if (Number.isNaN(d.getTime())) return ''
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
+
+function addDays(date, days) {
+  const d = new Date(date)
+  if (Number.isNaN(d.getTime())) return null
+  d.setDate(d.getDate() + Number(days || 0))
+  return d
+}
+
+function getCurrentWeekRange(timeZone = DEFAULT_TIMEZONE) {
+  const nowParts = getNowParts(timeZone)
+  const localToday = new Date(`${String(nowParts.year).padStart(4, '0')}-${String(nowParts.month).padStart(2, '0')}-${String(nowParts.day).padStart(2, '0')}T00:00:00`)
+  const weekday = Number(nowParts.weekday || 1)
+  const offsetToMonday = weekday === 0 ? 6 : weekday - 1
+  const monday = addDays(localToday, -offsetToMonday)
+  return {
+    startDate: formatDate(monday || localToday),
+    endDate: formatDate(localToday),
+  }
+}
+
 function getScheduleBucketKey(eventType, nowParts) {
   const y = String(nowParts.year).padStart(4, '0')
   const m = String(nowParts.month).padStart(2, '0')
@@ -171,30 +199,36 @@ async function listEnabledRulesForScheduler() {
 
 async function dispatchScheduleRules(rules) {
   for (const rule of rules) {
-    const eventType = String(rule?.event_type || '').toLowerCase()
-    if (!SCHEDULE_EVENT_TYPES.has(eventType)) continue
+    const scheduleSceneCode = String(rule?.event_type || '').toLowerCase()
+    if (!SCHEDULE_EVENT_TYPES.has(scheduleSceneCode)) continue
 
     const conditionConfig = safeJsonParse(rule?.trigger_condition_json, null) || {}
     const triggerMode = String(conditionConfig?.trigger_mode || '').toLowerCase()
     if (triggerMode !== 'schedule') continue
 
     const scheduleConfig = conditionConfig?.schedule && typeof conditionConfig.schedule === 'object' ? conditionConfig.schedule : {}
+    const dispatchEventType = String(scheduleConfig.event_type || scheduleSceneCode).trim().toLowerCase() || scheduleSceneCode
     const timeZone = String(scheduleConfig.timezone || DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE
     const nowParts = getNowParts(timeZone)
 
-    if (!isScheduleMatched(eventType, scheduleConfig, nowParts)) continue
+    if (!isScheduleMatched(scheduleSceneCode, scheduleConfig, nowParts)) continue
 
-    const bucketKey = getScheduleBucketKey(eventType, nowParts)
-    const triggerKey = `schedule:${eventType}:${bucketKey}`
+    const bucketKey = getScheduleBucketKey(scheduleSceneCode, nowParts)
+    const triggerKey = `schedule:${scheduleSceneCode}:${bucketKey}`
     const acquired = await acquireTriggerCursor(rule.id, triggerKey, { expireHours: 240 })
     if (!acquired) continue
 
+    const weeklyRange = getCurrentWeekRange(timeZone)
+    const weekRangeText = `${weeklyRange.startDate} ~ ${weeklyRange.endDate}`
+
     await NotificationEvent.processEvent({
-      eventType,
+      eventType: dispatchEventType,
       data: {
         business_line_id: Number(rule?.biz_line_id || 0) || null,
         schedule_timezone: timeZone,
         schedule_bucket: bucketKey,
+        week_range: weekRangeText,
+        weekly_summary_text: `【定时周报】${weekRangeText}\n本次为系统定时触发，请在模板中按需补充业务字段。`,
         __schedule_context: {
           matched: true,
           trigger_key: triggerKey,

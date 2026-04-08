@@ -183,13 +183,8 @@ function mapRuleRowLegacy(row) {
 }
 
 async function listCandidateRules(eventType, businessLineId, { ruleIds = [] } = {}) {
-  const params = [eventType]
-  let whereSql = 'WHERE enabled = 1 AND LOWER(event_type) = LOWER(?)'
-
-  if (businessLineId !== null && businessLineId !== undefined) {
-    whereSql += ' AND (biz_line_id = 0 OR biz_line_id = ?)'
-    params.push(Number(businessLineId))
-  }
+  const params = []
+  let whereSql = 'WHERE enabled = 1'
 
   const normalizedRuleIds = Array.from(
     new Set(
@@ -198,11 +193,21 @@ async function listCandidateRules(eventType, businessLineId, { ruleIds = [] } = 
         .filter((item) => Number.isInteger(item) && item > 0),
     ),
   )
+
   if (normalizedRuleIds.length > 0) {
     const placeholders = normalizedRuleIds.map(() => '?').join(', ')
     whereSql += ` AND id IN (${placeholders})`
     params.push(...normalizedRuleIds)
+  } else {
+    whereSql += ' AND LOWER(event_type) = LOWER(?)'
+    params.push(eventType)
+
+    if (businessLineId !== null && businessLineId !== undefined) {
+      whereSql += ' AND (biz_line_id = 0 OR biz_line_id = ?)'
+      params.push(Number(businessLineId))
+    }
   }
+
 
   const [rows] = await pool.query(
     `SELECT
@@ -361,7 +366,7 @@ async function resolveDemandBoundChatTargets(eventData) {
     if (!row) return []
     const mode = normalizeText(row.group_chat_mode, 20).toLowerCase()
     const chatId = normalizeText(row.group_chat_id, 128)
-    if (mode !== 'bind' || !chatId) return []
+    if ((mode !== 'bind' && mode !== 'auto') || !chatId) return []
 
     return [{
       target_type: 'chat',

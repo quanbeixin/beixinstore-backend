@@ -1875,12 +1875,12 @@ const createDemand = async (req, res) => {
         })
         if (chatResult?.success && chatResult?.data?.chat_id) {
           await Work.updateDemandGroupChatBinding(finalDemandId, {
-            groupChatMode: 'bind',
+            groupChatMode: 'auto',
             groupChatId: chatResult.data.chat_id,
           })
           created = await Work.findDemandById(finalDemandId)
           autoGroupChatResult = {
-            mode: 'bind',
+            mode: 'auto',
             chat_id: chatResult.data.chat_id,
             chat_name: chatResult.data.name || null,
           }
@@ -1977,7 +1977,9 @@ const updateDemand = async (req, res) => {
     const parsedGroupChatId = normalizeDemandGroupChatId(req.body.group_chat_id)
     const groupChatId = groupChatMode === 'bind'
       ? (parsedGroupChatId === undefined ? normalizeDemandGroupChatId(existing.group_chat_id) : parsedGroupChatId)
-      : null
+      : groupChatMode === 'auto'
+        ? (parsedGroupChatId === undefined ? normalizeDemandGroupChatId(existing.group_chat_id) : parsedGroupChatId)
+        : null
     const parsedTemplateId =
       req.body.template_id === undefined
         ? undefined
