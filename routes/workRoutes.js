@@ -91,6 +91,7 @@ const {
   getMorningStandupWeeklyCompletedSummary,
   sendNoFillReminders,
 } = require('../controllers/workController')
+const { getHumanGantt } = require('../controllers/humanGanttController')
 
 router.use(authMiddleware)
 
@@ -277,6 +278,7 @@ router.get('/insight/department-detail', getDepartmentEfficiencyDetail)
 router.get('/insight/demand', getDemandInsight)
 router.get('/insight/member', getMemberInsight)
 router.get('/insight/member-detail', getMemberEfficiencyDetail)
+router.get('/human-gantt', getHumanGantt)
 
 router.get('/workbench/me', authMiddleware.requirePermission('workbench.view.self'), getMyWorkbench)
 router.get('/workbench/me/weekly-report', authMiddleware.requirePermission('workbench.view.self'), getMyWeeklyReport)
