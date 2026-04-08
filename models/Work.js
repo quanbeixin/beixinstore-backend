@@ -1,4 +1,5 @@
 ﻿const pool = require('../utils/db')
+const { buildChinaBusinessCalendarRange, getChinaBusinessDayInfo } = require('../utils/chinaBusinessCalendar')
 const {
   normalizeTemplateGraph,
   filterTemplateGraphByParticipantRoles,
@@ -124,6 +125,8 @@ const ITEM_TYPE_LOOKUP_SQL = `
 `
 
 const OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL = `CASE
+  WHEN l.owner_estimate_required = 1 THEN 1
+  WHEN l.owner_estimate_required = 0 THEN 0
   WHEN COALESCE(t.owner_estimate_rule, 'NONE') = 'NONE' THEN 0
   ELSE 1
 END`
@@ -131,6 +134,12 @@ END`
 const EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL = `CASE
   WHEN ${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL} = 1 THEN COALESCE(l.owner_estimate_hours, 0)
   ELSE COALESCE(l.actual_hours, 0)
+END`
+
+const EFFECTIVE_TASK_DIFFICULTY_CODE_SQL = `CASE
+  WHEN ${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL} = 1
+    THEN COALESCE(NULLIF(l.task_difficulty_code, ''), '${DEFAULT_TASK_DIFFICULTY_CODE}')
+  ELSE COALESCE(NULLIF(l.self_task_difficulty_code, ''), '${DEFAULT_TASK_DIFFICULTY_CODE}')
 END`
 
 const DEFAULT_DAILY_CAPACITY_HOURS = Number.isFinite(Number(process.env.DAILY_CAPACITY_HOURS))
@@ -490,6 +499,150 @@ function parseMorningTabKey(tabKey) {
   return { type: 'DEPARTMENT', departmentId }
 }
 
+function buildMorningStandupScopePayload(scope = {}) {
+  return {
+    tabs: Array.isArray(scope.tabs) ? scope.tabs : [],
+    default_tab_key: scope.defaultTabKey || '',
+    current_tab_key: scope.currentTabKey || scope.defaultTabKey || '',
+    view_scope: scope.viewScope || {
+      mode: 'DEPARTMENT',
+      department_id: null,
+      department_name: null,
+      department_ids: [],
+    },
+  }
+}
+
+async function resolveMorningStandupScope(
+  viewerUserId,
+  {
+    canViewAll = false,
+    targetDepartmentId = null,
+    tabKey = '',
+  } = {},
+) {
+  const viewerDepartment = await findUserDepartmentRow(viewerUserId)
+  const allEnabledDepartments = await listEnabledDepartments()
+  const allEnabledDepartmentIds = allEnabledDepartments.map((item) => Number(item.id))
+
+  const requestedDepartmentId = toPositiveInt(targetDepartmentId)
+  const parsedTab = parseMorningTabKey(tabKey)
+
+  let currentMode = canViewAll ? 'ALL' : 'DEPARTMENT'
+  let currentDepartmentId = null
+
+  if (canViewAll) {
+    if (parsedTab.type === 'DEPARTMENT') {
+      currentMode = 'DEPARTMENT'
+      currentDepartmentId = parsedTab.departmentId
+    } else if (requestedDepartmentId) {
+      currentMode = 'DEPARTMENT'
+      currentDepartmentId = requestedDepartmentId
+    } else if (parsedTab.type === 'ALL') {
+      currentMode = 'ALL'
+    } else {
+      currentMode = 'ALL'
+    }
+
+    if (currentMode === 'DEPARTMENT' && !allEnabledDepartmentIds.includes(currentDepartmentId)) {
+      currentMode = 'ALL'
+      currentDepartmentId = null
+    }
+  } else {
+    currentMode = 'DEPARTMENT'
+    if (parsedTab.type === 'DEPARTMENT' && allEnabledDepartmentIds.includes(parsedTab.departmentId)) {
+      currentDepartmentId = parsedTab.departmentId
+    } else if (requestedDepartmentId && allEnabledDepartmentIds.includes(requestedDepartmentId)) {
+      currentDepartmentId = requestedDepartmentId
+    } else if (viewerDepartment?.id && allEnabledDepartmentIds.includes(viewerDepartment.id)) {
+      currentDepartmentId = viewerDepartment.id
+    } else {
+      currentDepartmentId = allEnabledDepartmentIds[0] || null
+    }
+  }
+
+  const tabs = []
+  if (canViewAll) {
+    tabs.push({
+      key: 'all',
+      label: '全部',
+      department_id: null,
+      is_all: true,
+    })
+    allEnabledDepartments.forEach((item) => {
+      tabs.push({
+        key: buildMorningTabKey(item.id),
+        label: item.name,
+        department_id: item.id,
+        is_all: false,
+      })
+    })
+  } else {
+    allEnabledDepartments.forEach((item) => {
+      tabs.push({
+        key: buildMorningTabKey(item.id),
+        label: item.name,
+        department_id: item.id,
+        is_all: false,
+      })
+    })
+  }
+
+  const defaultTabKey = canViewAll
+    ? 'all'
+    : viewerDepartment?.id && allEnabledDepartmentIds.includes(viewerDepartment.id)
+      ? buildMorningTabKey(viewerDepartment.id)
+      : tabs[0]?.key || ''
+  const currentTabKey = currentMode === 'ALL' ? 'all' : buildMorningTabKey(currentDepartmentId)
+
+  let scopedDepartmentIds = []
+  if (currentMode === 'ALL') {
+    scopedDepartmentIds = allEnabledDepartmentIds
+  } else if (currentDepartmentId) {
+    scopedDepartmentIds = [currentDepartmentId]
+  }
+
+  return {
+    tabs,
+    defaultTabKey,
+    currentTabKey: currentTabKey || defaultTabKey,
+    scopedDepartmentIds,
+    viewScope: {
+      mode: currentMode,
+      department_id: currentMode === 'DEPARTMENT' ? currentDepartmentId : null,
+      department_name:
+        currentMode === 'DEPARTMENT'
+          ? (tabs.find((item) => item.department_id === currentDepartmentId)?.label || null)
+          : '全部部门',
+      department_ids: scopedDepartmentIds,
+    },
+  }
+}
+
+async function listMorningStandupMemberRows(scopedDepartmentIds = []) {
+  const normalizedIds = Array.isArray(scopedDepartmentIds)
+    ? scopedDepartmentIds.map((item) => toPositiveInt(item)).filter(Boolean)
+    : []
+  if (normalizedIds.length === 0) return []
+
+  const [rows] = await pool.query(
+    `SELECT
+       u.id AS user_id,
+       COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+       u.department_id,
+       COALESCE(d.name, CONCAT('部门#', u.department_id)) AS department_name
+     FROM users u
+     LEFT JOIN departments d ON d.id = u.department_id
+     WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
+       AND COALESCE(u.include_in_metrics, 1) = 1
+       AND u.department_id IN (?)
+     ORDER BY u.department_id ASC, u.id ASC`,
+    [normalizedIds],
+  )
+
+  return rows || []
+}
+
 async function ensureDailyTables() {
   if (isDailyTablesReady) return
   if (ensureDailyTablesPromise) {
@@ -627,12 +780,15 @@ function getPreviousWorkdayDate(dateText) {
   if (Number.isNaN(date.getTime())) return ''
 
   let guard = 0
-  do {
+  while (guard < 31) {
     date.setDate(date.getDate() - 1)
     guard += 1
-  } while (guard < 7 && isWeekendDate(formatLocalDateOnly(date)))
+    const currentDateText = formatLocalDateOnly(date)
+    const dayInfo = getChinaBusinessDayInfo(currentDateText)
+    if (dayInfo?.is_workday) return currentDateText
+  }
 
-  return formatLocalDateOnly(date)
+  return ''
 }
 
 function buildWorkDateRange(startDate, endDate, { fallbackToStart = true } = {}) {
@@ -4056,7 +4212,7 @@ const Work = {
 
     let rows = []
     try {
-      ;[rows] = await pool.query(
+      const [queryRows] = await pool.query(
         `SELECT
            l.id,
            l.user_id,
@@ -4070,9 +4226,10 @@ const Work = {
          LIMIT 1`,
         [logId],
       )
+      rows = queryRows
     } catch (err) {
       if (!isMissingColumnError(err)) throw err
-      ;[rows] = await pool.query(
+      const [queryRows] = await pool.query(
         `SELECT
            l.id,
            l.user_id,
@@ -4086,6 +4243,7 @@ const Work = {
          LIMIT 1`,
         [logId],
       )
+      rows = queryRows
     }
     if (rows.length === 0) return false
 
@@ -4846,100 +5004,15 @@ const Work = {
       tabKey = '',
     } = {},
   ) {
-    const viewerDepartment = await findUserDepartmentRow(viewerUserId)
-    const allEnabledDepartments = await listEnabledDepartments()
-    const allEnabledDepartmentIds = allEnabledDepartments.map((item) => Number(item.id))
-
-    const requestedDepartmentId = toPositiveInt(targetDepartmentId)
-    const parsedTab = parseMorningTabKey(tabKey)
-
-    let currentMode = canViewAll ? 'ALL' : 'DEPARTMENT'
-    let currentDepartmentId = null
-
-    if (canViewAll) {
-      if (parsedTab.type === 'DEPARTMENT') {
-        currentMode = 'DEPARTMENT'
-        currentDepartmentId = parsedTab.departmentId
-      } else if (requestedDepartmentId) {
-        currentMode = 'DEPARTMENT'
-        currentDepartmentId = requestedDepartmentId
-      } else if (parsedTab.type === 'ALL') {
-        currentMode = 'ALL'
-      } else {
-        currentMode = 'ALL'
-      }
-
-      if (currentMode === 'DEPARTMENT' && !allEnabledDepartmentIds.includes(currentDepartmentId)) {
-        currentMode = 'ALL'
-        currentDepartmentId = null
-      }
-    } else {
-      currentMode = 'DEPARTMENT'
-      if (parsedTab.type === 'DEPARTMENT' && allEnabledDepartmentIds.includes(parsedTab.departmentId)) {
-        currentDepartmentId = parsedTab.departmentId
-      } else if (requestedDepartmentId && allEnabledDepartmentIds.includes(requestedDepartmentId)) {
-        currentDepartmentId = requestedDepartmentId
-      } else if (viewerDepartment?.id && allEnabledDepartmentIds.includes(viewerDepartment.id)) {
-        currentDepartmentId = viewerDepartment.id
-      } else {
-        currentDepartmentId = allEnabledDepartmentIds[0] || null
-      }
-    }
-
-    const tabs = []
-    if (canViewAll) {
-      tabs.push({
-        key: 'all',
-        label: '全部',
-        department_id: null,
-        is_all: true,
-      })
-      allEnabledDepartments.forEach((item) => {
-        tabs.push({
-          key: buildMorningTabKey(item.id),
-          label: item.name,
-          department_id: item.id,
-          is_all: false,
-        })
-      })
-    } else {
-      allEnabledDepartments.forEach((item) => {
-        tabs.push({
-          key: buildMorningTabKey(item.id),
-          label: item.name,
-          department_id: item.id,
-          is_all: false,
-        })
-      })
-    }
-
-    const defaultTabKey = canViewAll
-      ? 'all'
-      : viewerDepartment?.id && allEnabledDepartmentIds.includes(viewerDepartment.id)
-        ? buildMorningTabKey(viewerDepartment.id)
-        : tabs[0]?.key || ''
-    const currentTabKey = currentMode === 'ALL' ? 'all' : buildMorningTabKey(currentDepartmentId)
-
-    let scopedDepartmentIds = []
-    if (currentMode === 'ALL') {
-      scopedDepartmentIds = allEnabledDepartmentIds
-    } else if (currentDepartmentId) {
-      scopedDepartmentIds = [currentDepartmentId]
-    }
+    const scope = await resolveMorningStandupScope(viewerUserId, {
+      canViewAll,
+      targetDepartmentId,
+      tabKey,
+    })
+    const { scopedDepartmentIds, tabs, defaultTabKey, currentTabKey, viewScope } = scope
 
     const emptyPayload = {
-      tabs,
-      default_tab_key: defaultTabKey,
-      current_tab_key: currentTabKey || defaultTabKey,
-      view_scope: {
-        mode: currentMode,
-        department_id: currentMode === 'DEPARTMENT' ? currentDepartmentId : null,
-        department_name:
-          currentMode === 'DEPARTMENT'
-            ? (tabs.find((item) => item.department_id === currentDepartmentId)?.label || null)
-            : '全部部门',
-        department_ids: scopedDepartmentIds,
-      },
+      ...buildMorningStandupScopePayload(scope),
       summary: {
         team_size: 0,
         filled_users_today: 0,
@@ -4976,20 +5049,7 @@ const Work = {
       return emptyPayload
     }
 
-    const [memberRows] = await pool.query(
-      `SELECT
-         u.id AS user_id,
-         COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
-         u.department_id,
-         COALESCE(d.name, CONCAT('部门#', u.department_id)) AS department_name
-       FROM users u
-       LEFT JOIN departments d ON d.id = u.department_id
-       WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
-         AND COALESCE(u.include_in_metrics, 1) = 1
-         AND u.department_id IN (?)
-       ORDER BY u.department_id ASC, u.id ASC`,
-      [scopedDepartmentIds],
-    )
+    const memberRows = await listMorningStandupMemberRows(scopedDepartmentIds)
 
     const userIds = memberRows
       .map((row) => Number(row.user_id))
@@ -5484,15 +5544,7 @@ const Work = {
       tabs,
       default_tab_key: defaultTabKey,
       current_tab_key: currentTabKey || defaultTabKey,
-      view_scope: {
-        mode: currentMode,
-        department_id: currentMode === 'DEPARTMENT' ? currentDepartmentId : null,
-        department_name:
-          currentMode === 'DEPARTMENT'
-            ? (tabs.find((item) => item.department_id === currentDepartmentId)?.label || null)
-            : '全部部门',
-        department_ids: scopedDepartmentIds,
-      },
+      view_scope: viewScope,
       summary: {
         team_size: members.length,
         filled_users_today: filledUsersToday,
@@ -5527,6 +5579,514 @@ const Work = {
       today_actual_detail_items: todayActualDetailItems,
       members,
       no_fill_members: noFillMembers,
+    }
+  },
+
+  async getMorningStandupWeeklyProgress(
+    viewerUserId,
+    {
+      canViewAll = false,
+      targetDepartmentId = null,
+      tabKey = '',
+      startDate,
+      endDate,
+    } = {},
+  ) {
+    const scope = await resolveMorningStandupScope(viewerUserId, {
+      canViewAll,
+      targetDepartmentId,
+      tabKey,
+    })
+    const normalizedStartDate = normalizeDateOnly(startDate)
+    const normalizedEndDate = normalizeDateOnly(endDate)
+
+    const emptyPayload = {
+      ...buildMorningStandupScopePayload(scope),
+      range: {
+        start_date: normalizedStartDate || '',
+        end_date: normalizedEndDate || '',
+        total_days:
+          normalizedStartDate && normalizedEndDate && normalizedStartDate <= normalizedEndDate
+            ? buildDateRange(normalizedStartDate, normalizedEndDate).length
+            : 0,
+      },
+      summary: {
+        demand_count: 0,
+        item_count: 0,
+        active_item_count: 0,
+        done_item_count: 0,
+        risk_item_count: 0,
+      },
+      demand_list: [],
+    }
+
+    if (
+      !normalizedStartDate ||
+      !normalizedEndDate ||
+      normalizedStartDate > normalizedEndDate ||
+      scope.scopedDepartmentIds.length === 0
+    ) {
+      return emptyPayload
+    }
+
+    const memberRows = await listMorningStandupMemberRows(scope.scopedDepartmentIds)
+    const userIds = memberRows
+      .map((row) => Number(row.user_id))
+      .filter((id) => Number.isInteger(id) && id > 0)
+    if (userIds.length === 0) return emptyPayload
+
+    await ensureDailyTables()
+
+    const [rows] = await pool.query(
+      `SELECT
+         l.id,
+         l.user_id,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+         DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+         COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+         l.description,
+         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+         DATE_FORMAT(COALESCE(l.log_completed_at, l.updated_at), '%Y-%m-%d %H:%i:%s') AS effective_completed_at,
+         DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+         l.demand_id,
+         d.name AS demand_name,
+         d.priority AS demand_priority,
+         l.phase_key,
+         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name
+       FROM work_logs l
+       INNER JOIN users u ON u.id = l.user_id
+       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+       LEFT JOIN work_demands d ON d.id = l.demand_id
+       LEFT JOIN config_dict_items pdi
+         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+        AND pdi.item_code = l.phase_key
+       WHERE l.user_id IN (?)
+         AND l.demand_id IS NOT NULL
+         AND (
+           COALESCE(l.log_status, 'IN_PROGRESS') <> 'DONE'
+           OR DATE(COALESCE(l.log_completed_at, l.updated_at)) BETWEEN ? AND ?
+           OR l.expected_start_date BETWEEN ? AND ?
+           OR l.expected_completion_date BETWEEN ? AND ?
+           OR EXISTS (
+             SELECT 1
+             FROM work_log_daily_plans p
+             WHERE p.log_id = l.id
+               AND p.user_id = l.user_id
+               AND p.plan_date BETWEEN ? AND ?
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM work_log_daily_entries e
+             WHERE e.log_id = l.id
+               AND e.user_id = l.user_id
+               AND e.entry_date BETWEEN ? AND ?
+           )
+         )
+       ORDER BY COALESCE(d.priority, 'P3') ASC, l.updated_at DESC, l.id DESC
+       LIMIT 5000`,
+      [
+        userIds,
+        normalizedStartDate,
+        normalizedEndDate,
+        normalizedStartDate,
+        normalizedEndDate,
+        normalizedStartDate,
+        normalizedEndDate,
+        normalizedStartDate,
+        normalizedEndDate,
+        normalizedStartDate,
+        normalizedEndDate,
+      ],
+    )
+
+    const demandMap = new Map()
+    let itemCount = 0
+    let activeItemCount = 0
+    let doneItemCount = 0
+    let riskItemCount = 0
+
+    ;(rows || []).forEach((row) => {
+      const demandId = String(row?.demand_id || '').trim()
+      if (!demandId) return
+
+      const demandName = String(row?.demand_name || demandId).trim() || demandId
+      const username = String(row?.username || `用户${Number(row?.user_id || 0)}`).trim()
+      const demandPriority = String(row?.demand_priority || '').trim().toUpperCase()
+      const logStatus = String(row?.log_status || 'IN_PROGRESS').trim().toUpperCase()
+      const expectedStartDate = normalizeDateOnly(row?.expected_start_date)
+      const expectedCompletionDate = normalizeDateOnly(row?.expected_completion_date)
+      const completedDate = normalizeDateOnly(row?.effective_completed_at)
+      const updatedAt = String(row?.updated_at || '').trim()
+      const phaseKey = String(row?.phase_key || '').trim().toUpperCase() || '__NO_PHASE__'
+      const phaseName = String(row?.phase_name || '').trim() || '其他事项'
+      const isDone = logStatus === 'DONE'
+      const isDoneThisWeek = Boolean(completedDate && completedDate >= normalizedStartDate && completedDate <= normalizedEndDate)
+      const isRisk = !isDone && Boolean(expectedCompletionDate && expectedCompletionDate < normalizedEndDate)
+
+      itemCount += 1
+      if (isDoneThisWeek) doneItemCount += 1
+      if (!isDone) activeItemCount += 1
+      if (isRisk) riskItemCount += 1
+
+      if (!demandMap.has(demandId)) {
+        demandMap.set(demandId, {
+          demand_id: demandId,
+          demand_name: demandName,
+          demand_priority: ['P0', 'P1', 'P2', 'P3'].includes(demandPriority) ? demandPriority : null,
+          owner_names: [],
+          active_item_count: 0,
+          done_item_count: 0,
+          risk_item_count: 0,
+          latest_updated_at: updatedAt || null,
+          phase_list: [],
+          latest_items: [],
+          _ownerNameSet: new Set(),
+          _phaseMap: new Map(),
+        })
+      }
+
+      const demandEntry = demandMap.get(demandId)
+      if (!demandEntry) return
+
+      if (!demandEntry._ownerNameSet.has(username)) {
+        demandEntry._ownerNameSet.add(username)
+        demandEntry.owner_names.push(username)
+      }
+
+      if (!isDone) demandEntry.active_item_count += 1
+      if (isDoneThisWeek) demandEntry.done_item_count += 1
+      if (isRisk) demandEntry.risk_item_count += 1
+      if (updatedAt && (!demandEntry.latest_updated_at || updatedAt > demandEntry.latest_updated_at)) {
+        demandEntry.latest_updated_at = updatedAt
+      }
+
+      if (!demandEntry._phaseMap.has(phaseKey)) {
+        demandEntry._phaseMap.set(phaseKey, {
+          phase_key: phaseKey === '__NO_PHASE__' ? '' : phaseKey,
+          phase_name: phaseName,
+          owner_names: [],
+          active_item_count: 0,
+          done_item_count: 0,
+          risk_item_count: 0,
+          start_date: expectedStartDate || null,
+          end_date: expectedCompletionDate || null,
+          items: [],
+          _ownerNameSet: new Set(),
+        })
+      }
+
+      const phaseEntry = demandEntry._phaseMap.get(phaseKey)
+      if (phaseEntry && !phaseEntry._ownerNameSet.has(username)) {
+        phaseEntry._ownerNameSet.add(username)
+        phaseEntry.owner_names.push(username)
+      }
+      if (phaseEntry) {
+        if (!isDone) phaseEntry.active_item_count += 1
+        if (isDoneThisWeek) phaseEntry.done_item_count += 1
+        if (isRisk) phaseEntry.risk_item_count += 1
+        if (expectedStartDate && (!phaseEntry.start_date || expectedStartDate < phaseEntry.start_date)) {
+          phaseEntry.start_date = expectedStartDate
+        }
+        if (expectedCompletionDate && (!phaseEntry.end_date || expectedCompletionDate > phaseEntry.end_date)) {
+          phaseEntry.end_date = expectedCompletionDate
+        }
+
+        phaseEntry.items.push({
+          id: Number(row.id),
+          user_id: Number(row.user_id),
+          username,
+          item_type_name: row.item_type_name || '-',
+          description: row.description || '',
+          log_status: logStatus,
+          expected_start_date: expectedStartDate || null,
+          expected_completion_date: expectedCompletionDate || null,
+          completed_at: String(row.effective_completed_at || '').trim() || null,
+          updated_at: updatedAt || null,
+          is_risk: isRisk,
+        })
+      }
+
+      demandEntry.latest_items.push({
+        id: Number(row.id),
+        user_id: Number(row.user_id),
+        username,
+        item_type_name: row.item_type_name || '-',
+        phase_name: phaseName,
+        description: row.description || '',
+        log_status: logStatus,
+        expected_start_date: expectedStartDate || null,
+        expected_completion_date: expectedCompletionDate || null,
+        completed_at: String(row.effective_completed_at || '').trim() || null,
+        updated_at: updatedAt || null,
+        is_risk: isRisk,
+      })
+    })
+
+    const demandList = [...demandMap.values()]
+      .map((item) => {
+        const phaseList = [...item._phaseMap.values()]
+          .map((phase) => ({
+            phase_key: phase.phase_key,
+            phase_name: phase.phase_name,
+            owner_names: phase.owner_names,
+            active_item_count: phase.active_item_count,
+            done_item_count: phase.done_item_count,
+            risk_item_count: phase.risk_item_count,
+            start_date: phase.start_date,
+            end_date: phase.end_date,
+            items: phase.items
+              .sort((a, b) => {
+                const riskDiff = Number(Boolean(b.is_risk)) - Number(Boolean(a.is_risk))
+                if (riskDiff !== 0) return riskDiff
+                const dateA = String(a.expected_completion_date || '9999-12-31')
+                const dateB = String(b.expected_completion_date || '9999-12-31')
+                if (dateA !== dateB) return dateA.localeCompare(dateB)
+                return Number(b.id || 0) - Number(a.id || 0)
+              })
+              .slice(0, 10),
+          }))
+          .sort((a, b) => {
+            const riskDiff = Number(b.risk_item_count || 0) - Number(a.risk_item_count || 0)
+            if (riskDiff !== 0) return riskDiff
+            const dateA = String(a.end_date || '9999-12-31')
+            const dateB = String(b.end_date || '9999-12-31')
+            if (dateA !== dateB) return dateA.localeCompare(dateB)
+            return String(a.phase_name || '').localeCompare(String(b.phase_name || ''), 'zh-Hans-CN')
+          })
+
+        return {
+          demand_id: item.demand_id,
+          demand_name: item.demand_name,
+          demand_priority: item.demand_priority,
+          owner_names: item.owner_names,
+          active_item_count: item.active_item_count,
+          done_item_count: item.done_item_count,
+          risk_item_count: item.risk_item_count,
+          latest_updated_at: item.latest_updated_at,
+          phase_list: phaseList,
+          latest_items: item.latest_items
+            .sort((a, b) => {
+              const riskDiff = Number(Boolean(b.is_risk)) - Number(Boolean(a.is_risk))
+              if (riskDiff !== 0) return riskDiff
+              const updatedA = String(a.updated_at || '')
+              const updatedB = String(b.updated_at || '')
+              if (updatedA !== updatedB) return updatedB.localeCompare(updatedA)
+              return Number(b.id || 0) - Number(a.id || 0)
+            })
+            .slice(0, 8),
+        }
+      })
+      .sort((a, b) => {
+        const priorityRank = { P0: 0, P1: 1, P2: 2, P3: 3 }
+        const riskDiff = Number(b.risk_item_count || 0) - Number(a.risk_item_count || 0)
+        if (riskDiff !== 0) return riskDiff
+        const activeDiff = Number(b.active_item_count || 0) - Number(a.active_item_count || 0)
+        if (activeDiff !== 0) return activeDiff
+        const doneDiff = Number(b.done_item_count || 0) - Number(a.done_item_count || 0)
+        if (doneDiff !== 0) return doneDiff
+        const priorityDiff = (priorityRank[a.demand_priority] ?? 99) - (priorityRank[b.demand_priority] ?? 99)
+        if (priorityDiff !== 0) return priorityDiff
+        return String(a.latest_updated_at || '').localeCompare(String(b.latest_updated_at || '')) * -1
+      })
+
+    return {
+      ...buildMorningStandupScopePayload(scope),
+      range: {
+        start_date: normalizedStartDate,
+        end_date: normalizedEndDate,
+        total_days: buildDateRange(normalizedStartDate, normalizedEndDate).length,
+      },
+      summary: {
+        demand_count: demandList.length,
+        item_count: itemCount,
+        active_item_count: activeItemCount,
+        done_item_count: doneItemCount,
+        risk_item_count: riskItemCount,
+      },
+      demand_list: demandList,
+    }
+  },
+
+  async getMorningStandupWeeklyCompletedSummary(
+    viewerUserId,
+    {
+      canViewAll = false,
+      targetDepartmentId = null,
+      tabKey = '',
+      startDate,
+      endDate,
+    } = {},
+  ) {
+    const scope = await resolveMorningStandupScope(viewerUserId, {
+      canViewAll,
+      targetDepartmentId,
+      tabKey,
+    })
+    const normalizedStartDate = normalizeDateOnly(startDate)
+    const normalizedEndDate = normalizeDateOnly(endDate)
+
+    const emptyPayload = {
+      ...buildMorningStandupScopePayload(scope),
+      range: {
+        start_date: normalizedStartDate || '',
+        end_date: normalizedEndDate || '',
+        total_days:
+          normalizedStartDate && normalizedEndDate && normalizedStartDate <= normalizedEndDate
+            ? buildDateRange(normalizedStartDate, normalizedEndDate).length
+            : 0,
+      },
+      summary: {
+        member_count: 0,
+        day_count: 0,
+        done_item_count: 0,
+      },
+      member_tree: [],
+    }
+
+    if (
+      !normalizedStartDate ||
+      !normalizedEndDate ||
+      normalizedStartDate > normalizedEndDate ||
+      scope.scopedDepartmentIds.length === 0
+    ) {
+      return emptyPayload
+    }
+
+    const memberRows = await listMorningStandupMemberRows(scope.scopedDepartmentIds)
+    const memberNameMap = new Map(
+      memberRows.map((row) => [Number(row.user_id), String(row.username || `用户${Number(row.user_id)}`).trim()]),
+    )
+    const userIds = [...memberNameMap.keys()].filter((id) => Number.isInteger(id) && id > 0)
+    if (userIds.length === 0) return emptyPayload
+
+    const [rows] = await pool.query(
+      `SELECT
+         l.id,
+         l.user_id,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+         COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+         l.description,
+         l.demand_id,
+         d.name AS demand_name,
+         l.phase_key,
+         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
+         DATE_FORMAT(DATE(COALESCE(l.log_completed_at, l.updated_at)), '%Y-%m-%d') AS completed_date,
+         DATE_FORMAT(COALESCE(l.log_completed_at, l.updated_at), '%Y-%m-%d %H:%i:%s') AS completed_at
+       FROM work_logs l
+       INNER JOIN users u ON u.id = l.user_id
+       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+       LEFT JOIN work_demands d ON d.id = l.demand_id
+       LEFT JOIN config_dict_items pdi
+         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+        AND pdi.item_code = l.phase_key
+       WHERE l.user_id IN (?)
+         AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'
+         AND DATE(COALESCE(l.log_completed_at, l.updated_at)) BETWEEN ? AND ?
+       ORDER BY u.id ASC, completed_date DESC, completed_at DESC, l.id DESC
+       LIMIT 5000`,
+      [userIds, normalizedStartDate, normalizedEndDate],
+    )
+
+    const memberTreeMap = new Map()
+    const daySet = new Set()
+    let doneItemCount = 0
+
+    ;(rows || []).forEach((row) => {
+      const userId = Number(row.user_id)
+      if (!Number.isInteger(userId) || userId <= 0) return
+      const username = memberNameMap.get(userId) || String(row.username || `用户${userId}`).trim()
+      const completedDate = normalizeDateOnly(row.completed_date)
+      if (!completedDate) return
+      doneItemCount += 1
+      daySet.add(`${userId}|${completedDate}`)
+
+      if (!memberTreeMap.has(userId)) {
+        memberTreeMap.set(userId, {
+          key: `user-${userId}`,
+          row_type: 'member',
+          user_id: userId,
+          username,
+          done_count: 0,
+          children: [],
+          _dayMap: new Map(),
+        })
+      }
+
+      const memberEntry = memberTreeMap.get(userId)
+      if (!memberEntry) return
+      memberEntry.done_count += 1
+
+      if (!memberEntry._dayMap.has(completedDate)) {
+        const dayEntry = {
+          key: `user-${userId}-day-${completedDate}`,
+          row_type: 'day',
+          completed_date: completedDate,
+          done_count: 0,
+          children: [],
+        }
+        memberEntry._dayMap.set(completedDate, dayEntry)
+        memberEntry.children.push(dayEntry)
+      }
+
+      const dayEntry = memberEntry._dayMap.get(completedDate)
+      if (!dayEntry) return
+      dayEntry.done_count += 1
+      dayEntry.children.push({
+        key: `log-${Number(row.id)}`,
+        row_type: 'item',
+        id: Number(row.id),
+        user_id: userId,
+        username,
+        item_type_name: row.item_type_name || '-',
+        description: row.description || '',
+        demand_id: row.demand_id || null,
+        demand_name: row.demand_name || row.demand_id || '-',
+        phase_name: row.phase_name || row.phase_key || '-',
+        completed_date: completedDate,
+        completed_at: String(row.completed_at || '').trim() || null,
+      })
+    })
+
+    const memberTree = [...memberTreeMap.values()]
+      .map((member) => ({
+        key: member.key,
+        row_type: member.row_type,
+        user_id: member.user_id,
+        username: member.username,
+        done_count: member.done_count,
+        children: member.children
+          .map((day) => ({
+            ...day,
+            children: [...(day.children || [])].sort((a, b) => {
+              const timeA = String(a.completed_at || '')
+              const timeB = String(b.completed_at || '')
+              if (timeA !== timeB) return timeB.localeCompare(timeA)
+              return Number(b.id || 0) - Number(a.id || 0)
+            }),
+          }))
+          .sort((a, b) => String(b.completed_date || '').localeCompare(String(a.completed_date || ''))),
+      }))
+      .sort((a, b) => {
+        const diff = Number(b.done_count || 0) - Number(a.done_count || 0)
+        if (diff !== 0) return diff
+        return String(a.username || '').localeCompare(String(b.username || ''), 'zh-Hans-CN')
+      })
+
+    return {
+      ...buildMorningStandupScopePayload(scope),
+      range: {
+        start_date: normalizedStartDate,
+        end_date: normalizedEndDate,
+        total_days: buildDateRange(normalizedStartDate, normalizedEndDate).length,
+      },
+      summary: {
+        member_count: memberTree.length,
+        day_count: daySet.size,
+        done_item_count: doneItemCount,
+      },
+      member_tree: memberTree,
     }
   },
 
@@ -6042,16 +6602,16 @@ const Work = {
           AND l.log_date >= ?
           AND l.log_date <= ?
           ${normalizedCompletedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
+         LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
          LEFT JOIN efficiency_factor_settings tdw
            ON tdw.factor_type = '${EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT}'
           AND CONVERT(tdw.item_code USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-              CONVERT(COALESCE(NULLIF(l.task_difficulty_code, ''), '${DEFAULT_TASK_DIFFICULTY_CODE}') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+              CONVERT(${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL} USING utf8mb4) COLLATE utf8mb4_unicode_ci
           AND tdw.enabled = 1
          LEFT JOIN work_demands d ON d.id = l.demand_id
          LEFT JOIN config_dict_items pdi
            ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
           AND pdi.item_code = l.phase_key
-         LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
          WHERE COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'
            AND COALESCE(u.include_in_metrics, 1) = 1
            ${departmentScopeConditionSql}
@@ -6481,6 +7041,11 @@ const Work = {
     keyword = '',
     completedOnly = false,
   } = {}) {
+    const calendarRange = buildChinaBusinessCalendarRange(startDate, endDate)
+    const calendarDates = Array.isArray(calendarRange?.dates) ? calendarRange.dates : []
+    const workdayCountPerMember = Number(calendarRange?.workday_count || 0)
+    const calendarDateMap = new Map(calendarDates.map((item) => [String(item.date), item]))
+
     const userConditions = [
       `COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'`,
       'COALESCE(u.include_in_metrics, 1) = 1',
@@ -6528,6 +7093,10 @@ const Work = {
         summary: {
           member_count: 0,
           total_filled_days: 0,
+          total_recorded_days: 0,
+          total_workday_count: 0,
+          workday_count: workdayCountPerMember,
+          calendar_day_count: Number(calendarRange?.calendar_day_count || 0),
           total_owner_estimate_hours: 0,
           total_personal_estimate_hours: 0,
           total_actual_hours: 0,
@@ -6542,6 +7111,7 @@ const Work = {
           overload_day_count: 0,
           low_load_day_count: 0,
         },
+        calendar_dates: calendarDates,
         member_list: [],
       }
     }
@@ -6694,7 +7264,10 @@ const Work = {
       return target
     }
 
-    ;(entryRows || []).forEach((row) => {
+    const normalizedEntryRows = entryRows || []
+    const normalizedLogRows = logRows || []
+
+    normalizedEntryRows.forEach((row) => {
       const userId = Number(row.user_id)
       const logId = Number(row.log_id)
       const entryDate = normalizeDateOnly(row.entry_date)
@@ -6706,7 +7279,7 @@ const Work = {
       explicitEntryCountByLog.set(logId, Number(explicitEntryCountByLog.get(logId) || 0) + Number(row.entry_count || 0))
     })
 
-    ;(logRows || []).forEach((row) => {
+    normalizedLogRows.forEach((row) => {
       const userId = Number(row.user_id)
       const logId = Number(row.id)
       const logDate = normalizeDateOnly(row.log_date)
@@ -6737,13 +7310,13 @@ const Work = {
       memberAgg.unestimated_item_count += Number(row.owner_pending || 0)
     })
 
-    ;(entryRows || []).forEach((row) => {
+    normalizedEntryRows.forEach((row) => {
       const userId = Number(row.user_id)
       const logId = Number(row.log_id)
       const entryDate = normalizeDateOnly(row.entry_date)
       if (!userId || !logId || !entryDate) return
 
-      const sourceLog = (logRows || []).find((item) => Number(item.id) === logId)
+      const sourceLog = normalizedLogRows.find((item) => Number(item.id) === logId)
       if (!sourceLog) return
 
       const memberAgg = ensureMemberAgg(userId)
@@ -6757,7 +7330,7 @@ const Work = {
       actualItem.actual_hours = toDecimal1(Number(actualItem.actual_hours || 0) + actualHours)
     })
 
-    ;(logRows || []).forEach((row) => {
+    normalizedLogRows.forEach((row) => {
       const userId = Number(row.user_id)
       const logId = Number(row.id)
       const logDate = normalizeDateOnly(row.log_date)
@@ -6825,23 +7398,53 @@ const Work = {
     const memberListBase = scopedUserRows.map((userRow) => {
       const userId = Number(userRow.user_id)
       const aggRow = memberAggByUser.get(userId) || {}
-      const filledDays = Number((aggRow.filled_days_set && aggRow.filled_days_set.size) || 0)
+      const recordedDays = Number((aggRow.filled_days_set && aggRow.filled_days_set.size) || 0)
       const totalOwner = Number(aggRow.total_owner_estimate_hours || 0)
       const totalPersonal = Number(aggRow.total_personal_estimate_hours || 0)
       const totalActual = Number(aggRow.total_actual_hours || 0)
-      const capacityHours = filledDays * DEFAULT_DAILY_CAPACITY_HOURS
-      const avgActualPerDay = filledDays > 0 ? totalActual / filledDays : 0
-      const avgSaturationRate = filledDays > 0 ? (totalActual / capacityHours) * 100 : 0
-      const dailyStats = dailyByUser.get(userId) || []
-      const overloadDays = dailyStats.filter((item) => Number(item.saturation_rate || 0) > 100).length
-      const lowLoadDays = dailyStats.filter((item) => Number(item.saturation_rate || 0) < 60).length
+      const capacityHours = workdayCountPerMember * DEFAULT_DAILY_CAPACITY_HOURS
+      const avgActualPerDay = workdayCountPerMember > 0 ? totalActual / workdayCountPerMember : 0
+      const avgSaturationRate = workdayCountPerMember > 0 ? (totalActual / capacityHours) * 100 : 0
+      const sparseDailyStats = dailyByUser.get(userId) || []
+      const sparseDailyMap = new Map(sparseDailyStats.map((item) => [String(item.log_date || ''), item]))
+      let overloadDays = 0
+      let lowLoadDays = 0
+
+      calendarDates.forEach((calendarDay) => {
+        if (!calendarDay?.is_workday) return
+        const matchedDaily = sparseDailyMap.get(String(calendarDay.date || ''))
+        const actualHours = Number(matchedDaily?.actual_hours || 0)
+        const saturationRate = (actualHours / DEFAULT_DAILY_CAPACITY_HOURS) * 100
+        if (saturationRate > 100) {
+          overloadDays += 1
+        } else if (saturationRate < 60) {
+          lowLoadDays += 1
+        }
+      })
+
+      const dailyStats = sparseDailyStats.map((item) => {
+        const calendarDay = calendarDateMap.get(String(item.log_date || '')) || {}
+        return {
+          ...item,
+          is_workday: Boolean(calendarDay.is_workday),
+          is_weekend: Boolean(calendarDay.is_weekend),
+          is_holiday: Boolean(calendarDay.is_holiday),
+          is_adjusted_workday: Boolean(calendarDay.is_adjusted_workday),
+          day_type: calendarDay.day_type || 'WORKDAY',
+          day_label: calendarDay.day_label || '工作日',
+          holiday_name: calendarDay.holiday_name || null,
+          note: calendarDay.note || null,
+        }
+      })
 
       return {
         user_id: userId,
         username: userRow.username || `用户${userId}`,
         department_id: toPositiveInt(userRow.department_id),
         department_name: userRow.department_name || '-',
-        filled_days: filledDays,
+        filled_days: recordedDays,
+        recorded_days: recordedDays,
+        workday_count: workdayCountPerMember,
         demand_count: Number((aggRow.demand_ids && aggRow.demand_ids.size) || 0),
         item_scope_count: Number((aggRow.item_scope_keys && aggRow.item_scope_keys.size) || 0),
         total_owner_estimate_hours: toDecimal1(totalOwner),
@@ -6863,18 +7466,19 @@ const Work = {
 
     let memberList = memberListBase
     if (hasLogDimensionFilter) {
-      memberList = memberList.filter((item) => Number(item.filled_days || 0) > 0)
+      memberList = memberList.filter((item) => Number(item.recorded_days || 0) > 0)
     }
     if (normalizedKeyword) {
       memberList = memberList.filter((item) => {
         const usernameHit = String(item.username || '').toLowerCase().includes(normalizedKeyword)
         const departmentHit = String(item.department_name || '').toLowerCase().includes(normalizedKeyword)
-        const hasLogMatch = Number(item.filled_days || 0) > 0
+        const hasLogMatch = Number(item.recorded_days || 0) > 0
         return usernameHit || departmentHit || hasLogMatch
       })
     }
 
-    const totalFilledDays = memberList.reduce((sum, item) => sum + Number(item.filled_days || 0), 0)
+    const totalRecordedDays = memberList.reduce((sum, item) => sum + Number(item.recorded_days || 0), 0)
+    const totalWorkdayCount = memberList.reduce((sum, item) => sum + Number(item.workday_count || 0), 0)
     const totalOwnerEstimateHours = toDecimal1(
       memberList.reduce((sum, item) => sum + Number(item.total_owner_estimate_hours || 0), 0),
     )
@@ -6902,7 +7506,11 @@ const Work = {
       },
       summary: {
         member_count: memberList.length,
-        total_filled_days: totalFilledDays,
+        total_filled_days: totalRecordedDays,
+        total_recorded_days: totalRecordedDays,
+        total_workday_count: totalWorkdayCount,
+        workday_count: workdayCountPerMember,
+        calendar_day_count: Number(calendarRange?.calendar_day_count || 0),
         total_owner_estimate_hours: totalOwnerEstimateHours,
         total_personal_estimate_hours: totalPersonalEstimateHours,
         total_actual_hours: totalActualHours,
@@ -6911,14 +7519,17 @@ const Work = {
         variance_owner_rate: calcVarianceRate(totalActualHours, totalOwnerEstimateHours),
         variance_personal_rate: calcVarianceRate(totalActualHours, totalPersonalEstimateHours),
         avg_actual_hours_per_day:
-          totalFilledDays > 0 ? toDecimal1(totalActualHours / totalFilledDays) : 0,
+          totalWorkdayCount > 0 ? toDecimal1(totalActualHours / totalWorkdayCount) : 0,
         avg_saturation_rate:
-          totalFilledDays > 0 ? toPercent2((totalActualHours / (totalFilledDays * 8)) * 100) : 0,
+          totalWorkdayCount > 0
+            ? toPercent2((totalActualHours / (totalWorkdayCount * DEFAULT_DAILY_CAPACITY_HOURS)) * 100)
+            : 0,
         overload_member_count: overloadMemberCount,
         low_load_member_count: lowLoadMemberCount,
         overload_day_count: overloadDayCount,
         low_load_day_count: lowLoadDayCount,
       },
+      calendar_dates: calendarDates,
       member_list: memberList,
     }
   },
@@ -7245,6 +7856,8 @@ const Work = {
              COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
              l.self_task_difficulty_code,
              COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
+             ${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL} AS effective_task_difficulty_code,
+             COALESCE(etd.item_name, ${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL}, NULL) AS effective_task_difficulty_name,
              COALESCE(tdf.coefficient, 1) AS task_difficulty_coefficient,
              ROUND(COALESCE(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}, 0), 1) AS owner_estimate_hours,
              ROUND(COALESCE(l.personal_estimate_hours, 0), 1) AS personal_estimate_hours,
@@ -7257,18 +7870,21 @@ const Work = {
            LEFT JOIN config_dict_items pdi
              ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
             AND pdi.item_code = l.phase_key
+           LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
            LEFT JOIN config_dict_items td
              ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
             AND td.item_code = l.task_difficulty_code
            LEFT JOIN config_dict_items std
              ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
             AND std.item_code = l.self_task_difficulty_code
+           LEFT JOIN config_dict_items etd
+             ON etd.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+            AND etd.item_code = ${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL}
            LEFT JOIN efficiency_factor_settings tdf
              ON tdf.factor_type = '${EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT}'
             AND CONVERT(tdf.item_code USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                CONVERT(COALESCE(NULLIF(l.task_difficulty_code, ''), '${DEFAULT_TASK_DIFFICULTY_CODE}') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                CONVERT(${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL} USING utf8mb4) COLLATE utf8mb4_unicode_ci
             AND tdf.enabled = 1
-           LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
            WHERE l.user_id = ?
              AND l.log_date >= ?
              AND l.log_date <= ?
@@ -7339,10 +7955,11 @@ const Work = {
             AND l.log_date >= ?
             AND l.log_date <= ?
             ${completedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
+           LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
            LEFT JOIN efficiency_factor_settings tdw
              ON tdw.factor_type = '${EFFICIENCY_FACTOR_TYPES.TASK_DIFFICULTY_WEIGHT}'
             AND CONVERT(tdw.item_code USING utf8mb4) COLLATE utf8mb4_unicode_ci =
-                CONVERT(COALESCE(NULLIF(l.task_difficulty_code, ''), '${DEFAULT_TASK_DIFFICULTY_CODE}') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                CONVERT(${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL} USING utf8mb4) COLLATE utf8mb4_unicode_ci
             AND tdw.enabled = 1
            WHERE u.id = ?
            GROUP BY u.id
@@ -7447,6 +8064,9 @@ const Work = {
         task_difficulty_name: row.task_difficulty_name || row.task_difficulty_code || null,
         self_task_difficulty_code: row.self_task_difficulty_code || null,
         self_task_difficulty_name: row.self_task_difficulty_name || row.self_task_difficulty_code || null,
+        effective_task_difficulty_code: row.effective_task_difficulty_code || DEFAULT_TASK_DIFFICULTY_CODE,
+        effective_task_difficulty_name:
+          row.effective_task_difficulty_name || row.effective_task_difficulty_code || DEFAULT_TASK_DIFFICULTY_CODE,
         task_difficulty_coefficient: toDecimal4(row.task_difficulty_coefficient || 1),
         demand_id: row.demand_id || null,
         demand_name: row.demand_name || null,

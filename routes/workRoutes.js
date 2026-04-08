@@ -88,6 +88,8 @@ const {
   updateAssignedLog,
   getOwnerWorkbench,
   getMorningStandupBoard,
+  getMorningStandupWeeklyProgress,
+  getMorningStandupWeeklyCompletedSummary,
   sendNoFillReminders,
 } = require('../controllers/workController')
 
@@ -288,6 +290,8 @@ router.get('/workbench/me/weekly-report', authMiddleware.requirePermission('work
 router.get('/my-assigned-items', authMiddleware.requirePermission('worklog.view.self'), getMyAssignedItems)
 router.put('/my-assigned-items/:id', authMiddleware.requirePermission('worklog.view.self'), updateAssignedLog)
 router.get('/workbench/morning', getMorningStandupBoard)
+router.get('/workbench/morning/weekly-progress', getMorningStandupWeeklyProgress)
+router.get('/workbench/morning/weekly-completed', getMorningStandupWeeklyCompletedSummary)
 router.get(
   '/workbench/owner',
   authMiddleware.requireAnyPermission(['workbench.view.owner', 'workbench.view.self']),

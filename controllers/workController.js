@@ -66,6 +66,7 @@ const QUICK_ADD_DEFAULT_ITEM_TYPE_KEYS = Array.from(
       .filter(Boolean),
   ),
 )
+const DAILY_ACTUAL_MAX_LIMIT_HOURS = 8.5
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -406,6 +407,10 @@ function normalizeHours(value, fallback = null) {
   const num = Number(value)
   if (!Number.isFinite(num)) return fallback
   return Number(num.toFixed(1))
+}
+
+function buildDailyActualLimitExceededMessage(projectedHours) {
+  return `当日实际用时不能超过 ${DAILY_ACTUAL_MAX_LIMIT_HOURS} 小时（当前将达到 ${Number(projectedHours || 0).toFixed(1)} 小时）`
 }
 
 function parseOptionalNonNegativeNumber(value, { scale = 2 } = {}) {
@@ -3064,6 +3069,28 @@ const createLogDailyEntry = async (req, res) => {
       return res.status(403).json({ success: false, message: '仅可登记自己的事项投入记录' })
     }
 
+    const todayDate = formatDate(new Date())
+    if (entryDate === todayDate) {
+      const [workbenchData, todayEntryRows] = await Promise.all([
+        Work.getMyWorkbench(req.user.id),
+        Work.listDailyEntriesForLog(id, {
+          startDate: todayDate,
+          endDate: todayDate,
+        }),
+      ])
+      const currentTodayActualHours = Number(workbenchData?.today?.actual_hours_today || 0)
+      const existingTodayEntryHours = Number(
+        (todayEntryRows || []).find((item) => String(item?.entry_date || '').trim() === todayDate)?.actual_hours || 0,
+      )
+      const projectedHours = currentTodayActualHours - existingTodayEntryHours + Number(actualHours || 0)
+      if (projectedHours > DAILY_ACTUAL_MAX_LIMIT_HOURS) {
+        return res.status(400).json({
+          success: false,
+          message: buildDailyActualLimitExceededMessage(projectedHours),
+        })
+      }
+    }
+
     const entryId = await Work.createDailyEntryForLog(id, {
       userId: req.user.id,
       entryDate,
@@ -3129,6 +3156,26 @@ const updateLogDailyEntry = async (req, res) => {
     }
     if (Number(existing.user_id) !== Number(req.user.id)) {
       return res.status(403).json({ success: false, message: '仅可调整自己的事项投入记录' })
+    }
+
+    const todayDate = formatDate(new Date())
+    const entryRows = await Work.listDailyEntriesForLog(id)
+    const editingEntry = (entryRows || []).find((item) => Number(item?.id) === entryId) || null
+    const originalEntryDate = normalizeDate(editingEntry?.entry_date) || ''
+    const originalEntryHours = Number(editingEntry?.actual_hours || 0)
+    const affectsToday = entryDate === todayDate || originalEntryDate === todayDate
+    if (affectsToday) {
+      const workbenchData = await Work.getMyWorkbench(req.user.id)
+      const currentTodayActualHours = Number(workbenchData?.today?.actual_hours_today || 0)
+      let projectedHours = currentTodayActualHours
+      if (originalEntryDate === todayDate) projectedHours -= originalEntryHours
+      if (entryDate === todayDate) projectedHours += Number(actualHours || 0)
+      if (projectedHours > DAILY_ACTUAL_MAX_LIMIT_HOURS) {
+        return res.status(400).json({
+          success: false,
+          message: buildDailyActualLimitExceededMessage(projectedHours),
+        })
+      }
     }
 
     const savedEntryId = await Work.updateDailyEntryForLog(id, entryId, {
@@ -4530,6 +4577,60 @@ const getMorningStandupBoard = async (req, res) => {
   }
 }
 
+const getMorningStandupWeeklyProgress = async (req, res) => {
+  const { startDate, endDate, error } = resolveWeeklyReportDateRange(req.query.start_date, req.query.end_date)
+  if (error) {
+    return res.status(400).json({ success: false, message: error })
+  }
+
+  try {
+    const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    const isAdmin = hasRole(req, 'ADMIN')
+    const canViewAll = isSuperAdmin || isAdmin
+    const targetDepartmentId = toPositiveInt(req.query.department_id)
+    const tabKey = normalizeText(req.query.tab_key, 32)
+
+    const data = await Work.getMorningStandupWeeklyProgress(req.user.id, {
+      canViewAll,
+      targetDepartmentId,
+      tabKey,
+      startDate,
+      endDate,
+    })
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取晨会本周进展失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getMorningStandupWeeklyCompletedSummary = async (req, res) => {
+  const { startDate, endDate, error } = resolveWeeklyReportDateRange(req.query.start_date, req.query.end_date)
+  if (error) {
+    return res.status(400).json({ success: false, message: error })
+  }
+
+  try {
+    const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    const isAdmin = hasRole(req, 'ADMIN')
+    const canViewAll = isSuperAdmin || isAdmin
+    const targetDepartmentId = toPositiveInt(req.query.department_id)
+    const tabKey = normalizeText(req.query.tab_key, 32)
+
+    const data = await Work.getMorningStandupWeeklyCompletedSummary(req.user.id, {
+      canViewAll,
+      targetDepartmentId,
+      tabKey,
+      startDate,
+      endDate,
+    })
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('获取晨会本周已完成事项汇总失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const sendNoFillReminders = async (req, res) => {
   try {
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
@@ -4620,6 +4721,8 @@ module.exports = {
   getMyWeeklyReport,
   getOwnerWorkbench,
   getMorningStandupBoard,
+  getMorningStandupWeeklyProgress,
+  getMorningStandupWeeklyCompletedSummary,
   sendNoFillReminders,
   getMyAssignedItems,
   updateAssignedLog,
