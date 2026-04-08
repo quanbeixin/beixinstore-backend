@@ -551,6 +551,13 @@ async function refreshInstanceProgressState(conn, instance, demandId, instanceRo
        WHERE id = ?`,
       [activeRows[0].node_key, INSTANCE_STATUS.IN_PROGRESS, instance.id],
     )
+    await conn.query(
+      `UPDATE work_demands
+       SET status = CASE WHEN status = 'CANCELLED' THEN status ELSE 'IN_PROGRESS' END,
+           completed_at = CASE WHEN status = 'CANCELLED' THEN completed_at ELSE NULL END
+       WHERE id = ?`,
+      [demandId],
+    )
     return {
       status: INSTANCE_STATUS.IN_PROGRESS,
       currentNodeKey: activeRows[0].node_key,
@@ -568,6 +575,13 @@ async function refreshInstanceProgressState(conn, instance, demandId, instanceRo
        SET current_node_key = NULL, status = ?, updated_at = NOW()
        WHERE id = ?`,
       [INSTANCE_STATUS.IN_PROGRESS, instance.id],
+    )
+    await conn.query(
+      `UPDATE work_demands
+       SET status = CASE WHEN status = 'CANCELLED' THEN status ELSE 'IN_PROGRESS' END,
+           completed_at = CASE WHEN status = 'CANCELLED' THEN completed_at ELSE NULL END
+       WHERE id = ?`,
+      [demandId],
     )
     return {
       status: INSTANCE_STATUS.IN_PROGRESS,
@@ -4016,7 +4030,6 @@ const Workflow = {
     const normalizedPrevStatus = normalizeStatus(previousStatus, '')
     const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
     const normalizedPhaseKey = normalizeText(phaseKey, 64).toUpperCase()
-    const normalizedItemTypeKey = normalizeText(itemTypeKey, 64).toUpperCase()
     const normalizedTaskSource = normalizeText(taskSource, 32).toUpperCase() || 'SELF'
     const normalizedOperatorUserId = toPositiveInt(operatorUserId)
     const normalizedLogId = toPositiveInt(logId)
@@ -4029,12 +4042,6 @@ const Workflow = {
     }
     if (!normalizedDemandId || !normalizedPhaseKey) {
       return { triggered: false, reason: 'DEMAND_OR_PHASE_MISSING' }
-    }
-    if (!normalizedItemTypeKey || !TRACK_ITEM_TYPE_KEYS.has(normalizedItemTypeKey)) {
-      return { triggered: false, reason: 'ITEM_TYPE_NOT_TRACKED' }
-    }
-    if (normalizedTaskSource === 'OWNER_ASSIGN') {
-      return { triggered: false, reason: 'OWNER_ASSIGN_SKIP_SYNC' }
     }
     if (!normalizedOperatorUserId) {
       return { triggered: false, reason: 'OPERATOR_INVALID' }
@@ -4053,83 +4060,110 @@ const Workflow = {
       const instanceRows = await listInstanceNodesForUpdate(conn, instance.id)
       const activeCandidates = instanceRows.filter((row) => {
         if (row.status !== NODE_STATUS.IN_PROGRESS) return false
-        if (normalizeText(row.phase_key, 64).toUpperCase() !== normalizedPhaseKey) return false
-        if (!toPositiveInt(row.assignee_user_id)) return false
-        return Number(row.assignee_user_id) === Number(normalizedOperatorUserId)
+        const normalizedRowPhaseKey = normalizeText(row.phase_key, 64).toUpperCase()
+        const normalizedRowNodeKey = normalizeText(row.node_key, 64).toUpperCase()
+        return normalizedPhaseKey === normalizedRowPhaseKey || normalizedPhaseKey === normalizedRowNodeKey
       })
 
       if (activeCandidates.length === 0) {
         await conn.commit()
-        return { triggered: false, reason: 'PHASE_NOT_ACTIVE_OR_ASSIGNEE_MISMATCH' }
+        return { triggered: false, reason: 'PHASE_NOT_ACTIVE_OR_NODE_MISMATCH' }
       }
-
-      const openTaskMap = new Map()
-      for (const candidate of activeCandidates) {
-        const [taskRows] = await conn.query(
-          `SELECT
-             t.id
-           FROM wf_process_tasks t
-           WHERE t.instance_node_id = ?
-             AND t.assignee_user_id = ?
-             AND t.status IN (?, ?)
-           ORDER BY t.id DESC
-           LIMIT 2
-           FOR UPDATE`,
-          [candidate.id, normalizedOperatorUserId, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
-        )
-        openTaskMap.set(candidate.id, taskRows || [])
-      }
-
-      const uniqueCandidates = activeCandidates.filter(
-        (candidate) => (openTaskMap.get(candidate.id) || []).length === 1,
-      )
-
-      if (uniqueCandidates.length !== 1) {
+      if (activeCandidates.length > 1) {
         await conn.commit()
         return {
           triggered: false,
-          reason: uniqueCandidates.length === 0 ? 'TASK_NOT_UNIQUE' : 'MULTIPLE_ACTIVE_NODES_MATCHED',
+          reason: 'MULTIPLE_ACTIVE_NODES_MATCHED',
         }
       }
+      const currentNode = activeCandidates[0]
 
-      const currentNode = uniqueCandidates[0]
-      const targetTaskId = Number((openTaskMap.get(currentNode.id) || [])[0].id)
-
-      await conn.query(
-        `UPDATE wf_process_tasks
-         SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-         WHERE id = ?`,
-        [TASK_STATUS.DONE, targetTaskId],
+      const [openTaskRows] = await conn.query(
+        `SELECT
+           t.id
+         FROM wf_process_tasks t
+         WHERE t.instance_node_id = ?
+           AND t.assignee_user_id = ?
+           AND t.status IN (?, ?)
+         ORDER BY t.id DESC
+         LIMIT 2
+         FOR UPDATE`,
+        [currentNode.id, normalizedOperatorUserId, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
       )
 
-      await insertAction(conn, {
-        instanceId: instance.id,
-        instanceNodeId: currentNode.id,
-        actionType: 'AUTO_TASK_DONE_BY_WORKLOG',
-        fromNodeKey: currentNode.node_key,
-        toNodeKey: currentNode.node_key,
-        operatorUserId: normalizedOperatorUserId,
-        comment: '工作台事项置为已完成，自动完成当前待办',
-        sourceType: 'WORK_LOG',
-        sourceId: normalizedLogId || null,
-      })
+      if ((openTaskRows || []).length === 1) {
+        const targetTaskId = Number(openTaskRows[0].id)
+        await conn.query(
+          `UPDATE wf_process_tasks
+           SET status = ?, completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
+           WHERE id = ?`,
+          [TASK_STATUS.DONE, targetTaskId],
+        )
 
-      const [[remainingRow]] = await conn.query(
-        `SELECT COUNT(*) AS total
+        await insertAction(conn, {
+          instanceId: instance.id,
+          instanceNodeId: currentNode.id,
+          actionType: 'AUTO_TASK_DONE_BY_WORKLOG',
+          fromNodeKey: currentNode.node_key,
+          toNodeKey: currentNode.node_key,
+          operatorUserId: normalizedOperatorUserId,
+          comment: '工作台事项置为已完成，自动完成当前待办',
+          sourceType: 'WORK_LOG',
+          sourceId: normalizedLogId || null,
+        })
+      }
+
+      const [[taskSummaryRow]] = await conn.query(
+        `SELECT
+           SUM(CASE WHEN status <> ? THEN 1 ELSE 0 END) AS active_tasks,
+           SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS done_tasks
          FROM wf_process_tasks
-         WHERE instance_node_id = ?
-           AND status IN (?, ?)`,
-        [currentNode.id, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
+         WHERE instance_node_id = ?`,
+        [TASK_STATUS.CANCELLED, TASK_STATUS.DONE, currentNode.id],
       )
+      const activeTasks = Number(taskSummaryRow?.active_tasks || 0)
+      const doneTasks = Number(taskSummaryRow?.done_tasks || 0)
+      const relatedNodeKey = normalizeText(currentNode?.node_key, 64).toUpperCase()
+      const relatedPhaseKey = normalizeText(currentNode?.phase_key, 64).toUpperCase()
+      const fallbackPhaseKey = normalizedPhaseKey || relatedNodeKey || relatedPhaseKey
+      const primaryPhaseKey = relatedNodeKey || relatedPhaseKey || fallbackPhaseKey
+      const secondaryPhaseKey = relatedPhaseKey || relatedNodeKey || fallbackPhaseKey
 
-      if (Number(remainingRow?.total || 0) > 0) {
+      const [[manualLogSummaryRow]] = await conn.query(
+        `SELECT
+           COUNT(*) AS active_logs,
+           SUM(CASE WHEN COALESCE(log_status, 'IN_PROGRESS') = ? THEN 1 ELSE 0 END) AS done_logs
+         FROM work_logs
+         WHERE demand_id = ?
+           AND COALESCE(log_status, 'IN_PROGRESS') <> 'CANCELLED'
+           AND COALESCE(task_source, 'SELF') <> 'WORKFLOW_AUTO'
+           AND UPPER(TRIM(COALESCE(phase_key, ''))) IN (?, ?)`,
+        [TASK_STATUS.DONE, normalizedDemandId, primaryPhaseKey, secondaryPhaseKey],
+      )
+      const activeManualLogs = Number(manualLogSummaryRow?.active_logs || 0)
+      const doneManualLogs = Number(manualLogSummaryRow?.done_logs || 0)
+      const activeChildTasks = activeTasks + activeManualLogs
+      const doneChildTasks = doneTasks + doneManualLogs
+
+      // 仅在“存在有效子任务(非 CANCELLED)”且“有效子任务均为 DONE”时，自动推进节点。
+      if (activeChildTasks <= 0) {
         await conn.commit()
         return {
           triggered: true,
           node_completed: false,
           instance_id: instance.id,
           node_key: currentNode.node_key,
-          reason: 'NODE_HAS_REMAINING_OPEN_TASKS',
+          reason: 'NODE_HAS_NO_ACTIVE_TASKS',
+        }
+      }
+      if (doneChildTasks < activeChildTasks) {
+        await conn.commit()
+        return {
+          triggered: true,
+          node_completed: false,
+          instance_id: instance.id,
+          node_key: currentNode.node_key,
+          reason: 'NODE_HAS_NON_DONE_TASKS',
         }
       }
 

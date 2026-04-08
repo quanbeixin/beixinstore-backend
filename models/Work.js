@@ -6745,6 +6745,42 @@ const Work = {
       completedOnly,
     })
 
+    const demandInsightFallbackByLogSql = `CASE
+      WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1
+       AND (l.owner_estimate_hours IS NULL OR COALESCE(l.owner_estimate_hours, 0) <= 0)
+        THEN 1
+      ELSE 0
+    END`
+
+    const demandInsightNonOwnerByLogSql = `CASE
+      WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 0 THEN 1
+      ELSE 0
+    END`
+
+    const demandInsightEffectiveOwnerEstimateHoursSql = `CASE
+      WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 THEN
+        CASE
+          WHEN l.owner_estimate_hours IS NULL OR COALESCE(l.owner_estimate_hours, 0) <= 0
+            THEN COALESCE(l.actual_hours, 0)
+          ELSE COALESCE(l.owner_estimate_hours, 0)
+        END
+      ELSE COALESCE(l.actual_hours, 0)
+    END`
+
+    const demandInsightWorkflowNodeNameByPhaseSql = `(
+      SELECT n.node_name_snapshot
+      FROM wf_process_instances i
+      INNER JOIN wf_process_instance_nodes n ON n.instance_id = i.id
+      WHERE i.biz_type = 'DEMAND'
+        AND i.biz_id = l.demand_id
+        AND n.phase_key = l.phase_key
+      ORDER BY
+        CASE i.status WHEN 'IN_PROGRESS' THEN 0 WHEN 'NOT_STARTED' THEN 1 ELSE 2 END ASC,
+        i.id DESC,
+        n.id DESC
+      LIMIT 1
+    )`
+
     const demandSql = `
       SELECT
         l.demand_id,
@@ -6756,12 +6792,14 @@ const Work = {
         bg.item_name AS business_group_name,
         COUNT(DISTINCT l.user_id) AS member_count,
         COUNT(DISTINCT COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__')) AS phase_count,
-        ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS total_owner_estimate_hours,
+        ROUND(COALESCE(SUM(${demandInsightEffectiveOwnerEstimateHoursSql}), 0), 1) AS total_owner_estimate_hours,
         ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
-        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - (${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL})), 0), 1) AS variance_owner_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - (${demandInsightEffectiveOwnerEstimateHoursSql})), 0), 1) AS variance_owner_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS variance_personal_hours,
         SUM(CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND l.owner_estimate_hours IS NULL THEN 1 ELSE 0 END) AS unestimated_item_count,
+        SUM(${demandInsightFallbackByLogSql}) AS owner_estimate_fallback_item_count,
+        SUM(${demandInsightNonOwnerByLogSql}) AS owner_estimate_non_owner_item_count,
         DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
@@ -6790,13 +6828,21 @@ const Work = {
       SELECT
         l.demand_id,
         COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__') AS phase_key,
-        COALESCE(pdi.item_name, NULLIF(l.phase_key, ''), '未分阶段') AS phase_name,
+        COALESCE(
+          MAX(${buildWorkflowNodeNameSql('l')}),
+          MAX(${demandInsightWorkflowNodeNameByPhaseSql}),
+          MAX(pdi.item_name),
+          NULLIF(MAX(l.phase_key), ''),
+          '未分阶段'
+        ) AS phase_name,
         COUNT(DISTINCT l.user_id) AS member_count,
-        ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS total_owner_estimate_hours,
+        ROUND(COALESCE(SUM(${demandInsightEffectiveOwnerEstimateHoursSql}), 0), 1) AS total_owner_estimate_hours,
         ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
-        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - (${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL})), 0), 1) AS variance_owner_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - (${demandInsightEffectiveOwnerEstimateHoursSql})), 0), 1) AS variance_owner_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS variance_personal_hours,
+        SUM(${demandInsightFallbackByLogSql}) AS owner_estimate_fallback_item_count,
+        SUM(${demandInsightNonOwnerByLogSql}) AS owner_estimate_non_owner_item_count,
         DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
@@ -6808,8 +6854,7 @@ const Work = {
       WHERE ${whereSql}
       GROUP BY
         l.demand_id,
-        COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__'),
-        COALESCE(pdi.item_name, NULLIF(l.phase_key, ''), '未分阶段')
+        COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__')
       ORDER BY l.demand_id ASC, total_actual_hours DESC
       LIMIT 4000`
 
@@ -6819,9 +6864,11 @@ const Work = {
         COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__') AS phase_key,
         l.user_id,
         COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
-        ROUND(COALESCE(SUM(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}), 0), 1) AS owner_estimate_hours,
+        ROUND(COALESCE(SUM(${demandInsightEffectiveOwnerEstimateHoursSql}), 0), 1) AS owner_estimate_hours,
         ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS personal_estimate_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS actual_hours,
+        SUM(${demandInsightFallbackByLogSql}) AS owner_estimate_fallback_item_count,
+        SUM(${demandInsightNonOwnerByLogSql}) AS owner_estimate_non_owner_item_count,
         DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
@@ -6860,6 +6907,8 @@ const Work = {
         total_actual_hours: toDecimal1(row.total_actual_hours),
         variance_owner_hours: toDecimal1(row.variance_owner_hours),
         variance_personal_hours: toDecimal1(row.variance_personal_hours),
+        owner_estimate_fallback_item_count: Number(row.owner_estimate_fallback_item_count || 0),
+        owner_estimate_non_owner_item_count: Number(row.owner_estimate_non_owner_item_count || 0),
         variance_owner_rate: calcVarianceRate(row.total_actual_hours, row.total_owner_estimate_hours),
         variance_personal_rate: calcVarianceRate(row.total_actual_hours, row.total_personal_estimate_hours),
         last_log_date: row.last_log_date || null,
@@ -6876,6 +6925,8 @@ const Work = {
         owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
         personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
         actual_hours: toDecimal1(row.actual_hours),
+        owner_estimate_fallback_item_count: Number(row.owner_estimate_fallback_item_count || 0),
+        owner_estimate_non_owner_item_count: Number(row.owner_estimate_non_owner_item_count || 0),
         variance_owner_hours: toDecimal1(
           Number(row.actual_hours || 0) - Number(row.owner_estimate_hours || 0),
         ),
@@ -6914,6 +6965,8 @@ const Work = {
         total_actual_hours: toDecimal1(row.total_actual_hours),
         variance_owner_hours: toDecimal1(row.variance_owner_hours),
         variance_personal_hours: toDecimal1(row.variance_personal_hours),
+        owner_estimate_fallback_item_count: Number(row.owner_estimate_fallback_item_count || 0),
+        owner_estimate_non_owner_item_count: Number(row.owner_estimate_non_owner_item_count || 0),
         variance_owner_rate: calcVarianceRate(row.total_actual_hours, row.total_owner_estimate_hours),
         variance_personal_rate: calcVarianceRate(row.total_actual_hours, row.total_personal_estimate_hours),
         unestimated_item_count: Number(row.unestimated_item_count || 0),
@@ -6943,6 +6996,14 @@ const Work = {
       (sum, item) => sum + Number(item.unestimated_item_count || 0),
       0,
     )
+    const totalOwnerEstimateFallbackItems = demandList.reduce(
+      (sum, item) => sum + Number(item.owner_estimate_fallback_item_count || 0),
+      0,
+    )
+    const totalOwnerEstimateNonOwnerItems = demandList.reduce(
+      (sum, item) => sum + Number(item.owner_estimate_non_owner_item_count || 0),
+      0,
+    )
 
     return {
       filters: {
@@ -6967,6 +7028,8 @@ const Work = {
         variance_owner_rate: calcVarianceRate(totalActualHours, totalOwnerEstimateHours),
         variance_personal_rate: calcVarianceRate(totalActualHours, totalPersonalEstimateHours),
         unestimated_item_count: totalUnestimatedItems,
+        owner_estimate_fallback_item_count: totalOwnerEstimateFallbackItems,
+        owner_estimate_non_owner_item_count: totalOwnerEstimateNonOwnerItems,
       },
       demand_list: demandList,
     }

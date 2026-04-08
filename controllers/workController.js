@@ -3002,6 +3002,24 @@ const createOwnerAssignedLog = async (req, res) => {
       throw ownerEstimateErr
     }
 
+    let workflowSync = null
+    try {
+      workflowSync = await Workflow.syncFromWorkLogStatusChange({
+        logId: id,
+        demandId,
+        phaseKey,
+        itemTypeKey: String(itemType.type_key || '').toUpperCase(),
+        taskSource: 'OWNER_ASSIGN',
+        operatorUserId: req.user.id,
+        previousStatus: null,
+        nextStatus: logStatus,
+      })
+    } catch (workflowErr) {
+      if (!isWorkflowTablesMissing(workflowErr)) {
+        console.error('创建 Owner 指派事项后同步流程状态失败:', workflowErr)
+      }
+    }
+
     await refreshDemandHourSummaryQuietly(demandId)
     const created = await Work.findLogById(id)
     await emitWorklogNotificationEvent({
@@ -3023,7 +3041,10 @@ const createOwnerAssignedLog = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: isDemandNodeQuickAdd ? '任务创建成功' : 'Owner 指派事项创建成功',
-      data: created,
+      data: {
+        ...created,
+        workflow_sync: workflowSync,
+      },
     })
   } catch (err) {
     console.error('创建 Owner 指派事项失败:', err)
@@ -4231,6 +4252,7 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
   }
 
   const comment = normalizeText(req.body.comment, 500)
+  const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
 
   try {
     const demand = await Work.findDemandById(demandId)
@@ -4247,6 +4269,7 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
       operatorUserId: req.user.id,
       comment,
       sourceType: 'MANUAL',
+      skipAssigneeCheck: isSuperAdmin,
     })
     await refreshDemandHourSummaryQuietly(demandId)
 
@@ -4323,6 +4346,7 @@ const submitDemandWorkflowNode = async (req, res) => {
   }
 
   const comment = normalizeText(req.body.comment, 500)
+  const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
 
   try {
     const demand = await Work.findDemandById(demandId)
@@ -4340,6 +4364,7 @@ const submitDemandWorkflowNode = async (req, res) => {
       operatorUserId: req.user.id,
       comment,
       sourceType: 'MANUAL',
+      skipAssigneeCheck: isSuperAdmin,
     })
     await refreshDemandHourSummaryQuietly(demandId)
 
@@ -4498,11 +4523,9 @@ const rejectDemandWorkflowNode = async (req, res) => {
     return res.status(400).json({ success: false, message: '节点标识无效' })
   }
 
-  const rejectReason = normalizeText(req.body.reject_reason, 2000)
+  const rejectReasonInput = normalizeText(req.body.reject_reason, 2000)
   const comment = normalizeText(req.body.comment, 500)
-  if (!rejectReason) {
-    return res.status(400).json({ success: false, message: '驳回原因不能为空' })
-  }
+  const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
 
   try {
     const demand = await Work.findDemandById(demandId)
@@ -4511,6 +4534,21 @@ const rejectDemandWorkflowNode = async (req, res) => {
     }
 
     const workflowBefore = await safeGetDemandWorkflowSnapshot(demandId)
+    const targetNode = (Array.isArray(workflowBefore?.nodes) ? workflowBefore.nodes : []).find(
+      (item) => normalizePhaseKey(item?.node_key) === nodeKey,
+    )
+    const targetNodeStatus = String(targetNode?.status || '').trim().toUpperCase()
+    const isRollbackDoneNode = targetNodeStatus === 'DONE'
+    if (isRollbackDoneNode && !isSuperAdmin) {
+      return res.status(403).json({ success: false, message: '仅超级管理员可回退已完成节点' })
+    }
+
+    const rejectReason =
+      rejectReasonInput || (isRollbackDoneNode && isSuperAdmin ? '超级管理员执行节点回退' : '')
+    if (!rejectReason) {
+      return res.status(400).json({ success: false, message: '驳回原因不能为空' })
+    }
+
     const fromNodeKey = normalizePhaseKey(nodeKey)
     const beforeTaskMap = buildOpenTaskMap(workflowBefore)
 
@@ -4549,7 +4587,7 @@ const rejectDemandWorkflowNode = async (req, res) => {
 
     return res.json({
       success: true,
-      message: '节点已驳回到上一可执行节点',
+      message: isRollbackDoneNode ? '节点已回退为未完成状态' : '节点已驳回到上一可执行节点',
       data: workflow,
     })
   } catch (err) {
@@ -5666,6 +5704,27 @@ async function updateAssignedLog(req, res) {
       ownerEstimateRequired: null,
     })
 
+    let workflowSync = null
+    try {
+      const itemType = await Work.findItemTypeById(existing.item_type_id)
+      workflowSync = await Workflow.syncFromWorkLogStatusChange({
+        logId: id,
+        demandId: existing.demand_id,
+        phaseKey: existing.phase_key,
+        itemTypeKey: String(itemType?.type_key || '').toUpperCase(),
+        taskSource: existing.task_source || 'OWNER_ASSIGN',
+        operatorUserId: req.user.id,
+        previousStatus: existing.log_status,
+        nextStatus: logStatus,
+      })
+    } catch (workflowErr) {
+      if (!isWorkflowTablesMissing(workflowErr)) {
+        console.error('更新指派事项后同步流程状态失败:', workflowErr)
+      }
+    }
+
+    await refreshDemandHourSummaryQuietly(existing.demand_id)
+
     const updated = await Work.findLogById(id)
     const prevStatus = normalizeText(existing?.log_status, 64) || ''
     const nextStatus = normalizeText(updated?.log_status, 64) || ''
@@ -5681,7 +5740,7 @@ async function updateAssignedLog(req, res) {
       })
     }
 
-    return res.json({ success: true })
+    return res.json({ success: true, data: { workflow_sync: workflowSync } })
   } catch (error) {
     console.error('updateAssignedLog error:', error)
     return res.status(500).json({ success: false, message: error.message || '更新指派事项失败' })
