@@ -3242,6 +3242,20 @@ const updateLog = async (req, res) => {
       ownerEstimateRequired,
     })
 
+    if (req.body.actual_hours !== undefined) {
+      const preferredEntryDate =
+        (logStatus === 'DONE' && logCompletedAt ? String(logCompletedAt).slice(0, 10) : null) || logDate
+      try {
+        await Work.syncDailyEntriesFromLogActualHours(id, {
+          userId: existing.user_id,
+          entryDate: preferredEntryDate,
+          createdBy: req.user.id,
+        })
+      } catch (dailyEntrySyncErr) {
+        console.error('更新工作记录后同步日实际填报失败:', dailyEntrySyncErr)
+      }
+    }
+
     try {
       const { startDate, endDate } = resolveDailyPlanRange(
         expectedStartDate,

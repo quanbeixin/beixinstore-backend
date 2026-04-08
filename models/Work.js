@@ -4136,6 +4136,133 @@ const Work = {
     return Number(result?.affectedRows || 0)
   },
 
+  async syncDailyEntriesFromLogActualHours(
+    logId,
+    {
+      userId = null,
+      entryDate = null,
+      createdBy = null,
+    } = {},
+  ) {
+    const normalizedLogId = toPositiveInt(logId)
+    if (!normalizedLogId) return 0
+    await ensureDailyTables()
+
+    const [logRows] = await pool.query(
+      `SELECT
+         id,
+         user_id,
+         DATE_FORMAT(log_date, '%Y-%m-%d') AS log_date,
+         ROUND(COALESCE(actual_hours, 0), 1) AS actual_hours,
+         DATE_FORMAT(log_completed_at, '%Y-%m-%d') AS completed_date
+       FROM work_logs
+       WHERE id = ?
+       LIMIT 1`,
+      [normalizedLogId],
+    )
+    const logRow = Array.isArray(logRows) && logRows.length > 0 ? logRows[0] : null
+    if (!logRow) return 0
+
+    const normalizedUserId = toPositiveInt(userId) || toPositiveInt(logRow.user_id)
+    if (!normalizedUserId) return 0
+    const normalizedCreatedBy = toPositiveInt(createdBy)
+    const targetActualHours = toDecimal1(logRow.actual_hours)
+    const now = new Date()
+    const todayDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+      now.getDate(),
+    ).padStart(2, '0')}`
+    const preferredDate =
+      normalizeDateOnly(entryDate) ||
+      normalizeDateOnly(logRow.completed_date) ||
+      normalizeDateOnly(logRow.log_date) ||
+      normalizeDateOnly(todayDate)
+
+    const [entryRows] = await pool.query(
+      `SELECT
+         e.id,
+         DATE_FORMAT(e.entry_date, '%Y-%m-%d') AS entry_date,
+         ROUND(COALESCE(e.actual_hours, 0), 1) AS actual_hours
+       FROM work_log_daily_entries e
+       INNER JOIN (
+         SELECT log_id, entry_date, MAX(id) AS latest_id
+         FROM work_log_daily_entries
+         WHERE log_id = ?
+         GROUP BY log_id, entry_date
+       ) le ON le.latest_id = e.id
+       ORDER BY e.entry_date ASC, e.id ASC`,
+      [normalizedLogId],
+    )
+
+    const latestEntries = Array.isArray(entryRows) ? entryRows : []
+    if (latestEntries.length === 0) {
+      await pool.query(
+        `INSERT INTO work_log_daily_entries (
+           log_id,
+           user_id,
+           entry_date,
+           actual_hours,
+           description,
+           created_by
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+        [normalizedLogId, normalizedUserId, preferredDate, targetActualHours, 'SYNC_FROM_LOG_ACTUAL', normalizedCreatedBy],
+      )
+      return 1
+    }
+
+    if (latestEntries.length === 1) {
+      const onlyEntry = latestEntries[0]
+      await pool.query(
+        `UPDATE work_log_daily_entries
+         SET actual_hours = ?,
+             created_by = ?,
+             created_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [targetActualHours, normalizedCreatedBy, Number(onlyEntry.id)],
+      )
+      return 1
+    }
+
+    const oldTotal = toDecimal1(
+      latestEntries.reduce((sum, item) => sum + Number(item.actual_hours || 0), 0),
+    )
+    const updatePairs = []
+
+    if (targetActualHours <= 0) {
+      latestEntries.forEach((item) => {
+        updatePairs.push([Number(item.id), 0])
+      })
+    } else if (oldTotal <= 0) {
+      latestEntries.forEach((item, index) => {
+        updatePairs.push([Number(item.id), index === latestEntries.length - 1 ? targetActualHours : 0])
+      })
+    } else {
+      let allocated = 0
+      latestEntries.forEach((item, index) => {
+        if (index === latestEntries.length - 1) return
+        const part = toDecimal1((Number(item.actual_hours || 0) / oldTotal) * targetActualHours)
+        const safePart = Math.max(0, part)
+        allocated = toDecimal1(allocated + safePart)
+        updatePairs.push([Number(item.id), safePart])
+      })
+      const lastEntryId = Number(latestEntries[latestEntries.length - 1].id)
+      const lastPart = toDecimal1(Math.max(0, targetActualHours - allocated))
+      updatePairs.push([lastEntryId, lastPart])
+    }
+
+    for (const [id, actualHours] of updatePairs) {
+      await pool.query(
+        `UPDATE work_log_daily_entries
+         SET actual_hours = ?,
+             created_by = ?,
+             created_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [actualHours, normalizedCreatedBy, id],
+      )
+    }
+
+    return updatePairs.length
+  },
+
   async deleteLog(id) {
     await ensureDailyTables()
     await pool.query(`DELETE FROM work_log_daily_plans WHERE log_id = ?`, [id])
