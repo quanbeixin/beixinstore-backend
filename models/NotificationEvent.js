@@ -55,6 +55,11 @@ const BUSINESS_ROLE_RECEIVER_KEYS = new Set([
   'demand_owner',
   'node_owner',
   'node_assignee',
+  'daily_report_team_all',
+  'daily_report_scheduled',
+  'daily_report_filled',
+  'daily_report_unfilled',
+  'daily_report_unscheduled',
 ])
 
 function getValueByPath(obj, path) {
@@ -160,6 +165,23 @@ function renderTemplateText(template, data) {
     if (typeof value === 'object') return JSON.stringify(value)
     return String(value)
   })
+}
+
+function extractDailyReportMembers(eventData, groupKey) {
+  if (!eventData || !groupKey) return []
+  const normalizedKey = String(groupKey || '').trim().toLowerCase()
+  const groups = eventData.member_groups
+  if (groups && Array.isArray(groups[normalizedKey])) {
+    return groups[normalizedKey]
+  }
+
+  if (normalizedKey === 'unfilled' || normalizedKey === 'unscheduled') {
+    if (String(eventData.category_key || '').toLowerCase() === normalizedKey && Array.isArray(eventData.members)) {
+      return eventData.members
+    }
+  }
+
+  return []
 }
 
 function mapRuleRowLegacy(row) {
@@ -443,6 +465,22 @@ async function resolveBusinessRoleUserIds(roleKeys, eventData) {
       if (nodeOwnerUserId) {
         userIds.push(nodeOwnerUserId)
       }
+      continue
+    }
+
+    if (key.startsWith('daily_report_')) {
+      const dailyKey = key.replace('daily_report_', '')
+      const dailyMembers = extractDailyReportMembers(eventData, dailyKey)
+      dailyMembers.forEach((member) => {
+        const memberUserId =
+          toNullableInt(member?.user_id) ||
+          toNullableInt(member?.userId) ||
+          toNullableInt(member?.id)
+        if (memberUserId) {
+          userIds.push(memberUserId)
+        }
+      })
+      continue
     }
   }
 
@@ -572,6 +610,13 @@ async function resolveTargetsFromLegacyReceivers(ruleId, eventData) {
         continue
       }
 
+      if (receiverValueRaw.startsWith('business_role:')) {
+        const roleKey = receiverValueRaw.slice('business_role:'.length)
+        const normalizedRoleKey = normalizeText(roleKey, 64).toLowerCase()
+        if (normalizedRoleKey) roleKeys.push(normalizedRoleKey)
+        continue
+      }
+
       if (receiverValueRaw.startsWith('chat_id:')) {
         const chatId = receiverValueRaw.slice('chat_id:'.length)
         if (chatId) chatIds.push(chatId)
@@ -600,10 +645,16 @@ async function resolveTargetsFromLegacyReceivers(ruleId, eventData) {
     }
   }
 
+  const businessRoleUserIds = await resolveBusinessRoleUserIds(roleKeys, eventData)
+  if (businessRoleUserIds.length > 0) {
+    userIds.push(...businessRoleUserIds)
+  }
+  const pureRoleKeys = roleKeys.filter((item) => !BUSINESS_ROLE_RECEIVER_KEYS.has(normalizeText(item, 64).toLowerCase()))
+
   const [usersById, usersByRole, usersByRoleKeys, usersByDept] = await Promise.all([
     getUsersByIds(userIds),
     getUsersByRoleIds(roleIds),
-    getUsersByRoleKeys(roleKeys),
+    getUsersByRoleKeys(pureRoleKeys),
     getUsersByDepartmentIds(deptIds),
   ])
 

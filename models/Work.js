@@ -631,6 +631,7 @@ async function listMorningStandupMemberRows(scopedDepartmentIds = []) {
     `SELECT
        u.id AS user_id,
        COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+       COALESCE(NULLIF(u.feishu_open_id, ''), '') AS feishu_open_id,
        u.department_id,
        COALESCE(d.name, CONCAT('部门#', u.department_id)) AS department_name
      FROM users u
@@ -643,6 +644,42 @@ async function listMorningStandupMemberRows(scopedDepartmentIds = []) {
   )
 
   return rows || []
+}
+
+function buildMentionBlockForMembers(members = []) {
+  return members
+    .map((member) => {
+      const openId = String(member?.feishu_open_id || '').trim()
+      if (openId) return `<at id=${openId}></at>`
+      const displayName = member?.username || `用户${Number(member?.user_id) || ''}`
+      return `@${displayName}`
+    })
+    .join(' ')
+    .trim()
+}
+
+function buildMentionPlainTextForMembers(members = []) {
+  return members
+    .map((member) => {
+      const displayName = member?.username || `用户${Number(member?.user_id) || ''}`
+      const dept = member?.department_name ? `（${member.department_name}）` : ''
+      return `@${displayName}${dept}`
+    })
+    .join(' ')
+    .trim()
+}
+
+function mapDailyReportMember(member, fallbackDepartmentName = '-') {
+  const userId = Number(member?.user_id)
+  return {
+    user_id: Number.isInteger(userId) ? userId : null,
+    username: member?.username || `用户${Number(member?.user_id) || ''}`,
+    feishu_open_id: member?.feishu_open_id || '',
+    department_id: Number(member?.department_id) || null,
+    department_name: member?.department_name || fallbackDepartmentName,
+    today_planned_hours: toDecimal1(member?.today_planned_hours),
+    today_actual_hours: toDecimal1(member?.today_actual_hours),
+  }
 }
 
 async function ensureDailyTables() {
@@ -5257,11 +5294,11 @@ const Work = {
     let totalPlannedHoursToday = 0
     let totalActualHoursToday = 0
 
-    const members = memberRows.map((row) => {
-      const userId = Number(row.user_id)
-      const activeItems = activeItemsByUser.get(userId) || []
-      const dailyAgg = dailyAggByUser.get(userId) || {}
-      const todayPlannedHours = toDecimal1(dailyAgg.today_planned_hours)
+  const members = memberRows.map((row) => {
+    const userId = Number(row.user_id)
+    const activeItems = activeItemsByUser.get(userId) || []
+    const dailyAgg = dailyAggByUser.get(userId) || {}
+    const todayPlannedHours = toDecimal1(dailyAgg.today_planned_hours)
       const todayActualHours = toDecimal1(dailyAgg.today_actual_hours)
       const todayScheduled = Number(todayPlannedHours || 0) > 0
       const todayFilled = todayScheduled && Number(todayActualHours || 0) > 0
@@ -5288,12 +5325,13 @@ const Work = {
         user_id: userId,
         username: row.username,
         department_id: Number(row.department_id),
-        department_name: row.department_name,
-        today_scheduled: todayScheduled,
-        today_filled: todayFilled,
-        today_planned_hours: todayPlannedHours,
-        today_actual_hours: todayActualHours,
-        assignable_hours: assignableHours,
+      department_name: row.department_name,
+      feishu_open_id: row.feishu_open_id || '',
+      today_scheduled: todayScheduled,
+      today_filled: todayFilled,
+      today_planned_hours: todayPlannedHours,
+      today_actual_hours: todayActualHours,
+      assignable_hours: assignableHours,
         active_item_count: activeItems.length,
         active_items: activeItems,
       }
@@ -5301,9 +5339,13 @@ const Work = {
 
     const filledUsersToday = scheduledFilledUsersToday
     const unfilledUsersToday = Math.max(scheduledUsersToday - scheduledFilledUsersToday, 0)
-    const noFillMembers = members
-      .filter((item) => item.today_scheduled && !item.today_filled)
-      .map((item) => ({ id: item.user_id, username: item.username }))
+  const noFillMembers = members
+    .filter((item) => item.today_scheduled && !item.today_filled)
+    .map((item) => ({
+      id: item.user_id,
+      username: item.username,
+      feishu_open_id: item.feishu_open_id || '',
+    }))
 
     const usernameById = new Map(
       members.map((item) => [Number(item.user_id), item.username || `用户${Number(item.user_id)}`]),
@@ -5521,6 +5563,99 @@ const Work = {
       members,
       no_fill_members: noFillMembers,
     }
+  },
+
+  async buildDailyReportNotifyEvents(
+    viewerUserId,
+    {
+      canViewAll = false,
+      targetDepartmentId = null,
+      tabKey = '',
+    } = {},
+  ) {
+    const boardData = await this.getMorningStandupBoard(viewerUserId, {
+      canViewAll,
+      targetDepartmentId,
+      tabKey,
+    })
+
+    const members = Array.isArray(boardData.members) ? boardData.members : []
+    const summary = boardData.summary || {}
+    const tabs = Array.isArray(boardData.tabs) ? boardData.tabs : []
+    const resolvedTabKey = boardData.current_tab_key || tabKey || boardData.default_tab_key || ''
+    const matchedTab = tabs.find((item) => item.key === resolvedTabKey)
+    const tabLabel = matchedTab?.label || boardData.view_scope?.department_name || '全部'
+    const todayDate = new Date().toISOString().slice(0, 10)
+    const mappedTeamMembers = members.map((member) => mapDailyReportMember(member, tabLabel))
+    const memberGroups = {
+      team_all: mappedTeamMembers,
+      scheduled: members.filter((item) => item.today_scheduled).map((item) => mapDailyReportMember(item, tabLabel)),
+      filled: members
+        .filter((item) => item.today_scheduled && item.today_filled)
+        .map((item) => mapDailyReportMember(item, tabLabel)),
+      unfilled: members
+        .filter((item) => item.today_scheduled && !item.today_filled)
+        .map((item) => mapDailyReportMember(item, tabLabel)),
+      unscheduled: members.filter((item) => !item.today_scheduled).map((item) => mapDailyReportMember(item, tabLabel)),
+    }
+
+    const basePayload = {
+      tab_key: resolvedTabKey,
+      tab_label: tabLabel,
+      department_id: boardData.view_scope?.department_id || matchedTab?.department_id || null,
+      department_name: boardData.view_scope?.department_name || tabLabel,
+      summary_team_size: Number(summary.team_size || 0),
+      summary_scheduled_users_today: Number(summary.scheduled_users_today || 0),
+      summary_filled_users_today: Number(summary.filled_users_today || 0),
+      summary_unfilled_users_today: Number(summary.unfilled_users_today || 0),
+      summary_unscheduled_users_today: Number(summary.unscheduled_users_today || 0),
+      summary_total_planned_hours_today: toDecimal1(summary.total_planned_hours_today),
+      summary_total_actual_hours_today: toDecimal1(summary.total_actual_hours_today),
+      today_date: todayDate,
+      member_groups: memberGroups,
+    }
+
+    const categories = [
+      {
+        key: 'unfilled',
+        label: '有安排待填报',
+        groupKey: 'unfilled',
+      },
+      {
+        key: 'unscheduled',
+        label: '今日未安排',
+        groupKey: 'unscheduled',
+      },
+    ]
+
+    const events = categories
+      .filter((category) => (memberGroups[category.groupKey] || []).length > 0)
+      .map((category) => {
+        const categoryMembersRaw =
+          category.groupKey && Array.isArray(memberGroups[category.groupKey]) ? memberGroups[category.groupKey] : []
+        const mentionSourceMembers =
+          category.groupKey === 'unfilled'
+            ? members.filter((item) => item.today_scheduled && !item.today_filled)
+            : category.groupKey === 'unscheduled'
+              ? members.filter((item) => !item.today_scheduled)
+              : members
+        const mentionBlock = buildMentionBlockForMembers(mentionSourceMembers)
+        const mentionPlainText = buildMentionPlainTextForMembers(mentionSourceMembers)
+
+        return {
+          event_id: `daily_report:${basePayload.tab_key || 'all'}:${category.key}:${Date.now()}`,
+          category_key: category.key,
+          category_label: category.label,
+          member_count: categoryMembersRaw.length,
+          members: categoryMembersRaw,
+          mention_block: mentionBlock,
+          mention_plain_text: mentionPlainText,
+          generated_at: new Date().toISOString(),
+          ...basePayload,
+        }
+      })
+
+    return events
   },
 
   async getMorningStandupWeeklyProgress(

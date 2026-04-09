@@ -104,6 +104,7 @@
   - `/demands/:id/workflow/current/submit`
   - `/demands/:id/workflow/current/reject`
   - `/demands/:id/workflow/current/force-complete`
+- 日报提醒能力：`POST /api/workbench/morning/daily-report/notify` 会读取晨会看板当前视图数据，按照“有安排待填报”“今日未安排”分类生成 `daily_report_notify` 事件，并在 payload 中提供可直接用于飞书 @ 的 `mention_block` / `mention_plain_text` 字段。
 
 ---
 
