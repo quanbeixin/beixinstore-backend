@@ -51,6 +51,72 @@ function normalizeDemandId(value) {
   return text || ''
 }
 
+function normalizePortalBaseUrl() {
+  const text = normalizeText(process.env.NOTIFICATION_PORTAL_BASE_URL, 500)
+  return text ? text.replace(/\/+$/g, '') : ''
+}
+
+function buildPortalUrl(pathname = '', query = {}) {
+  const baseUrl = normalizePortalBaseUrl()
+  if (!baseUrl) return ''
+  const path = String(pathname || '').trim()
+  if (!path.startsWith('/')) return ''
+  const queryEntries = Object.entries(query || {}).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  if (queryEntries.length === 0) return `${baseUrl}${path}`
+  const search = new URLSearchParams(queryEntries.map(([key, value]) => [key, String(value)])).toString()
+  return search ? `${baseUrl}${path}?${search}` : `${baseUrl}${path}`
+}
+
+function buildDemandDetailUrlFromEventData(eventData = {}) {
+  const demandId = normalizeDemandId(eventData?.demand_id)
+  if (!demandId) return ''
+  return buildPortalUrl(`/work-demands/${encodeURIComponent(demandId)}`)
+}
+
+function buildWorklogPageUrlFromEventData(eventData = {}) {
+  const query = {}
+  const demandId = normalizeDemandId(eventData?.demand_id)
+  const worklogId = toNullableInt(eventData?.worklog_id || eventData?.log_id)
+  const taskId = toNullableInt(eventData?.task_id)
+  if (demandId) query.demand_id = demandId
+  if (worklogId) query.worklog_id = worklogId
+  if (taskId) query.task_id = taskId
+  return buildPortalUrl('/work-logs', query)
+}
+
+function buildActionMetaByEventType(eventType, eventData = {}) {
+  const normalizedEventType = normalizeText(eventType, 64).toLowerCase()
+
+  const goFillReportEvents = new Set([
+    'worklog_create',
+    'worklog_assign',
+    'worklog_deadline_remind',
+    'task_assign',
+    'task_deadline',
+    'daily_report_notify',
+  ])
+
+  const viewDemandDetailEvents = new Set([
+    'worklog_status_change',
+    'task_complete',
+    'node_assign',
+    'node_reject',
+    'node_complete',
+  ])
+
+  if (goFillReportEvents.has(normalizedEventType)) {
+    const url = buildWorklogPageUrlFromEventData(eventData)
+    return url ? { detail_url: url, detail_action_text: '去填报' } : null
+  }
+
+  if (viewDemandDetailEvents.has(normalizedEventType)) {
+    const url = buildDemandDetailUrlFromEventData(eventData)
+    return url ? { detail_url: url, detail_action_text: '查看详情' } : null
+  }
+
+  return null
+}
+
 const BUSINESS_ROLE_RECEIVER_KEYS = new Set([
   'demand_owner',
   'node_owner',
@@ -734,6 +800,15 @@ const NotificationEvent = {
 
       const renderedTitle = renderTemplateText(rule.message_title || rule.rule_name || '系统通知', data)
       const renderedContent = renderTemplateText(rule.message_content || `事件 ${normalizedEventType} 已触发`, data)
+      const derivedActionMeta = buildActionMetaByEventType(normalizedEventType, data) || {}
+      const metadataDetailUrl =
+        normalizeText(data?.detail_url, 2000) ||
+        normalizeText(derivedActionMeta?.detail_url, 2000) ||
+        null
+      const metadataDetailActionText =
+        normalizeText(data?.detail_action_text, 20) ||
+        normalizeText(derivedActionMeta?.detail_action_text, 20) ||
+        '查看详情'
       let sendResponse = {
         message: 'pending',
         operator_user_id: operatorUserId,
@@ -746,9 +821,15 @@ const NotificationEvent = {
       } else {
         const targets = await resolveTargets(rule, data)
         if (targets.length === 0) {
-          status = 'failed'
-          errorCode = 'NO_RECEIVERS'
-          errorMessage = '未找到可发送接收人（缺少用户 open_id 或接收配置）'
+          if (normalizedEventType === 'daily_report_notify') {
+            status = 'skipped'
+            errorCode = 'NO_RECEIVERS_FOR_CATEGORY'
+            errorMessage = '当前提醒分类下无匹配接收人'
+          } else {
+            status = 'failed'
+            errorCode = 'NO_RECEIVERS'
+            errorMessage = '未找到可发送接收人（缺少用户 open_id 或接收配置）'
+          }
           sendResponse = {
             target_count: 0,
             success_count: 0,
@@ -765,8 +846,8 @@ const NotificationEvent = {
               rule_id: rule.id,
               rule_code: rule.rule_code,
               event_type: normalizedEventType,
-              detail_url: normalizeText(data?.detail_url, 2000) || null,
-              detail_action_text: '查看详情',
+              detail_url: metadataDetailUrl,
+              detail_action_text: metadataDetailActionText,
             },
           })
 
