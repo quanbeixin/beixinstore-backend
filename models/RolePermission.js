@@ -160,6 +160,12 @@ const RolePermission = {
   MENU_SCOPE_TYPES,
 
   async listRoles() {
+    await pool.query(
+      `UPDATE roles
+       SET role_key = CONCAT('ROLE_', id)
+       WHERE role_key IS NULL OR TRIM(role_key) = ''`,
+    )
+
     const [rows] = await pool.query(
       `SELECT id, name, role_key, role_level, enabled, is_builtin
        FROM roles
