@@ -3,6 +3,19 @@ function normalizeText(value, maxLength = 500) {
   return String(value).trim().slice(0, maxLength)
 }
 
+function normalizeHttpUrl(value, maxLength = 2000) {
+  const text = normalizeText(value, maxLength)
+  if (!text) return ''
+
+  try {
+    const parsed = new URL(text)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
+    return parsed.toString()
+  } catch {
+    return ''
+  }
+}
+
 function pickFeishuConfig() {
   const appId = normalizeText(process.env.FEISHU_APP_ID, 128)
   const appSecret = normalizeText(process.env.FEISHU_APP_SECRET, 256)
@@ -220,6 +233,11 @@ function buildTextMessage({ title, content, metadata }) {
   const lines = []
   if (title) lines.push(`【${title}】`)
   if (content) lines.push(String(content))
+  const detailUrl = normalizeHttpUrl(metadata?.detail_url)
+  if (detailUrl) {
+    lines.push('')
+    lines.push(`详情链接：${detailUrl}`)
+  }
 
   return lines.join('\n')
 }
@@ -252,7 +270,32 @@ function buildMarkdownMessage({ content }) {
   return normalizeMarkdownForFeishu(content)
 }
 
-function buildInteractiveCardPayload({ title, markdown }) {
+function buildInteractiveCardPayload({ title, markdown, actionUrl, actionText }) {
+  const elements = [
+    {
+      tag: 'markdown',
+      content: String(markdown || ''),
+    },
+  ]
+
+  const normalizedActionUrl = normalizeHttpUrl(actionUrl)
+  if (normalizedActionUrl) {
+    elements.push({
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button',
+          text: {
+            tag: 'plain_text',
+            content: normalizeText(actionText, 20) || '查看详情',
+          },
+          type: 'primary',
+          url: normalizedActionUrl,
+        },
+      ],
+    })
+  }
+
   return {
     msg_type: 'interactive',
     content: JSON.stringify({
@@ -266,12 +309,7 @@ function buildInteractiveCardPayload({ title, markdown }) {
           content: normalizeText(title, 100) || '系统通知',
         },
       },
-      elements: [
-        {
-          tag: 'markdown',
-          content: String(markdown || ''),
-        },
-      ],
+      elements,
     }),
   }
 }
@@ -690,6 +728,7 @@ async function sendByFeishuApp({ title, content, targets, metadata }) {
   const { timeoutMs } = pickFeishuConfig()
   const text = buildTextMessage({ title, content, metadata })
   const markdown = buildMarkdownMessage({ content })
+  const detailUrl = normalizeHttpUrl(metadata?.detail_url)
 
   const results = [...preSkippedResults]
   let successCount = 0
@@ -702,7 +741,12 @@ async function sendByFeishuApp({ title, content, targets, metadata }) {
         token: tokenResult.token,
         receiveIdType,
         receiveId: target.target_id,
-        messageBody: buildInteractiveCardPayload({ title, markdown }),
+        messageBody: buildInteractiveCardPayload({
+          title,
+          markdown,
+          actionUrl: detailUrl,
+          actionText: metadata?.detail_action_text || '查看详情',
+        }),
         timeoutMs,
       })
 

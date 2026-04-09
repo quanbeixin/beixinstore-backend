@@ -765,6 +765,8 @@ const NotificationEvent = {
               rule_id: rule.id,
               rule_code: rule.rule_code,
               event_type: normalizedEventType,
+              detail_url: normalizeText(data?.detail_url, 2000) || null,
+              detail_action_text: '查看详情',
             },
           })
 

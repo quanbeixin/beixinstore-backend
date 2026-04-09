@@ -38,6 +38,19 @@ function normalizeCode(value) {
   return normalized || ''
 }
 
+function normalizeNotificationPortalBaseUrl() {
+  const baseUrl = normalizeText(process.env.NOTIFICATION_PORTAL_BASE_URL, 500)
+  if (!baseUrl) return ''
+  return baseUrl.replace(/\/+$/g, '')
+}
+
+function buildBugDetailUrl(bugId) {
+  const normalizedBugId = toPositiveInt(bugId)
+  const baseUrl = normalizeNotificationPortalBaseUrl()
+  if (!baseUrl || !normalizedBugId) return null
+  return `${baseUrl}/bugs/${encodeURIComponent(String(normalizedBugId))}`
+}
+
 function normalizeDate(value) {
   const text = String(value || '').trim()
   if (!text) return ''
@@ -70,6 +83,7 @@ async function resolveBusinessLineId(demandId) {
 
 async function buildBugNotificationData({ bug, req, extra = {} }) {
   const businessLineId = await resolveBusinessLineId(bug?.demand_id)
+  const bugId = Number(bug?.id || 0) || null
   const operatorName =
     normalizeText(req?.user?.real_name || '', 100) ||
     normalizeText(req?.user?.username || '', 100) ||
@@ -77,7 +91,7 @@ async function buildBugNotificationData({ bug, req, extra = {} }) {
     '系统'
 
   return {
-    bug_id: Number(bug?.id || 0) || null,
+    bug_id: bugId,
     bug_no: normalizeText(bug?.bug_no, 64) || null,
     bug_title: normalizeText(bug?.title, 200) || '',
     bug_content: normalizeText(bug?.description, 20000) || '',
@@ -93,6 +107,9 @@ async function buildBugNotificationData({ bug, req, extra = {} }) {
     demand_id: normalizeText(bug?.demand_id, 64) || null,
     demand_name: normalizeText(bug?.demand_name, 200) || '',
     business_line_id: businessLineId,
+    detail_type: bugId ? 'bug' : null,
+    detail_id: bugId,
+    detail_url: buildBugDetailUrl(bugId),
     ...extra,
   }
 }

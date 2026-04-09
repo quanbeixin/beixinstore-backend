@@ -101,6 +101,19 @@ function normalizeDemandId(value) {
   return id || null
 }
 
+function normalizeNotificationPortalBaseUrl() {
+  const baseUrl = normalizeText(process.env.NOTIFICATION_PORTAL_BASE_URL, 500)
+  if (!baseUrl) return ''
+  return baseUrl.replace(/\/+$/g, '')
+}
+
+function buildDemandDetailUrl(demandId) {
+  const normalizedDemandId = normalizeDemandId(demandId)
+  const baseUrl = normalizeNotificationPortalBaseUrl()
+  if (!baseUrl || !normalizedDemandId) return null
+  return `${baseUrl}/work-demands/${encodeURIComponent(normalizedDemandId)}`
+}
+
 function normalizePhaseKey(value) {
   const key = String(value || '').trim().toUpperCase()
   if (!key) return ''
@@ -177,6 +190,7 @@ async function resolveDemandBusinessLineId(demandId) {
 
 async function buildDemandNotificationData({ demand, req, extra = {} }) {
   const businessLineId = await resolveDemandBusinessLineId(demand?.id)
+  const demandId = normalizeDemandId(demand?.id)
   const operatorName =
     normalizeText(req?.user?.real_name || '', 100) ||
     normalizeText(req?.user?.username || '', 100) ||
@@ -184,7 +198,7 @@ async function buildDemandNotificationData({ demand, req, extra = {} }) {
     '系统'
 
   return {
-    demand_id: normalizeDemandId(demand?.id),
+    demand_id: demandId,
     demand_name: normalizeText(demand?.name, 200) || '',
     status: normalizeText(demand?.status, 64) || '',
     priority: normalizeText(demand?.priority, 64) || '',
@@ -196,6 +210,9 @@ async function buildDemandNotificationData({ demand, req, extra = {} }) {
     operator_name: operatorName,
     business_line_id: businessLineId,
     business_line_name: normalizeText(demand?.business_group_name, 100) || '',
+    detail_type: demandId ? 'demand' : null,
+    detail_id: demandId,
+    detail_url: buildDemandDetailUrl(demandId),
     ...extra,
   }
 }
