@@ -65,6 +65,7 @@ Use environment variables:
   - `whitelist`: send only to whitelist ids
 - `NOTIFICATION_TEST_OPEN_IDS` (optional, comma-separated `open_id`)
 - `NOTIFICATION_TEST_CHAT_IDS` (optional, comma-separated `chat_id`)
+- `NOTIFICATION_PORTAL_BASE_URL` (optional, e.g. `https://admin.example.com`, used for demand/bug detail action link)
 
 Token strategy:
 
