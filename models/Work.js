@@ -367,6 +367,59 @@ function normalizeParticipantRoleUserMap(value, allowedRoles = []) {
   return result
 }
 
+function extractParticipantRoleUserIds(value, allowedRoles = []) {
+  const normalizedMap = normalizeParticipantRoleUserMap(value, allowedRoles)
+  return Array.from(
+    new Set(
+      Object.values(normalizedMap)
+        .map((item) => toPositiveInt(item))
+        .filter(Boolean),
+    ),
+  )
+}
+
+async function syncDemandMemberRowsByUserIds(
+  db,
+  demandId,
+  {
+    addUserIds = [],
+    removeUserIds = [],
+  } = {},
+) {
+  const normalizedDemandId = String(demandId || '').trim().toUpperCase()
+  if (!normalizedDemandId) return
+
+  const normalizedAddUserIds = Array.from(
+    new Set((Array.isArray(addUserIds) ? addUserIds : []).map((item) => toPositiveInt(item)).filter(Boolean)),
+  )
+  const normalizedRemoveUserIds = Array.from(
+    new Set((Array.isArray(removeUserIds) ? removeUserIds : []).map((item) => toPositiveInt(item)).filter(Boolean)),
+  )
+
+  try {
+    for (const userId of normalizedAddUserIds) {
+      await db.query(
+        `INSERT INTO project_members (demand_id, user_id)
+         VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE user_id = VALUES(user_id)`,
+        [normalizedDemandId, userId],
+      )
+    }
+
+    if (normalizedRemoveUserIds.length > 0) {
+      await db.query(
+        `DELETE FROM project_members
+         WHERE demand_id = ?
+           AND user_id IN (?)`,
+        [normalizedDemandId, normalizedRemoveUserIds],
+      )
+    }
+  } catch (err) {
+    if (isMissingTableError(err)) return
+    throw err
+  }
+}
+
 function parseRequireDemand(extraJson, fallback = 0) {
   if (!extraJson || typeof extraJson !== 'object') return fallback
 
@@ -2353,6 +2406,14 @@ const Work = {
         ],
       )
 
+      const participantRoleUserIds = extractParticipantRoleUserIds(
+        participantRoleUserMap,
+        participantRoles,
+      )
+      await syncDemandMemberRowsByUserIds(conn, finalDemandId, {
+        addUserIds: participantRoleUserIds,
+      })
+
       await conn.commit()
       return finalDemandId
     } catch (err) {
@@ -2387,64 +2448,94 @@ const Work = {
       priority,
       description,
       completedAt,
+      previousParticipantRoles = [],
+      previousParticipantRoleUserMap = {},
     },
   ) {
-    const [result] = await pool.query(
-      `UPDATE work_demands
-       SET
-         name = ?,
-         owner_user_id = ?,
-         management_mode = ?,
-         template_id = ?,
-         participant_roles_json = CAST(? AS JSON),
-         project_manager = ?,
-         health_status = ?,
-         participant_role_user_map_json = CAST(? AS JSON),
-         group_chat_mode = ?,
-         group_chat_id = ?,
-         actual_start_time = ?,
-         actual_end_time = ?,
-         doc_link = ?,
-         ui_design_link = ?,
-         test_case_link = ?,
-         business_group_code = ?,
-         expected_release_date = ?,
-         status = ?,
-         priority = ?,
-         description = ?,
-         completed_at = ?
-       WHERE id = ?`,
-      [
-        name,
-        ownerUserId,
-        normalizeManagementMode(managementMode),
-        toPositiveInt(templateId),
-        JSON.stringify(normalizeParticipantRoles(participantRoles)),
-        toPositiveInt(projectManager),
-        normalizeHealthStatus(healthStatus),
-        JSON.stringify(
-          normalizeParticipantRoleUserMap(
-            participantRoleUserMap,
-            normalizeParticipantRoles(participantRoles),
-          ),
-        ),
-        normalizeText(groupChatMode, 20) || 'none',
-        normalizeText(groupChatId, 128) || null,
-        normalizeDateTime(actualStartTime, null),
-        normalizeDateTime(actualEndTime, null),
-        normalizeText(docLink, 500) || null,
-        normalizeText(uiDesignLink, 500) || null,
-        normalizeText(testCaseLink, 500) || null,
-        businessGroupCode || null,
-        expectedReleaseDate || null,
-        normalizeStatus(status),
-        normalizePriority(priority),
-        description || null,
-        completedAt || null,
-        demandId,
-      ],
-    )
-    return result.affectedRows
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const normalizedParticipantRoles = normalizeParticipantRoles(participantRoles)
+      const normalizedParticipantRoleUserMap = normalizeParticipantRoleUserMap(
+        participantRoleUserMap,
+        normalizedParticipantRoles,
+      )
+      const previousRoleUserIds = extractParticipantRoleUserIds(
+        previousParticipantRoleUserMap,
+        previousParticipantRoles,
+      )
+      const nextRoleUserIds = extractParticipantRoleUserIds(
+        normalizedParticipantRoleUserMap,
+        normalizedParticipantRoles,
+      )
+      const userIdsToAdd = nextRoleUserIds.filter((item) => !previousRoleUserIds.includes(item))
+      const userIdsToRemove = previousRoleUserIds.filter((item) => !nextRoleUserIds.includes(item))
+
+      const [result] = await conn.query(
+        `UPDATE work_demands
+         SET
+           name = ?,
+           owner_user_id = ?,
+           management_mode = ?,
+           template_id = ?,
+           participant_roles_json = CAST(? AS JSON),
+           project_manager = ?,
+           health_status = ?,
+           participant_role_user_map_json = CAST(? AS JSON),
+           group_chat_mode = ?,
+           group_chat_id = ?,
+           actual_start_time = ?,
+           actual_end_time = ?,
+           doc_link = ?,
+           ui_design_link = ?,
+           test_case_link = ?,
+           business_group_code = ?,
+           expected_release_date = ?,
+           status = ?,
+           priority = ?,
+           description = ?,
+           completed_at = ?
+         WHERE id = ?`,
+        [
+          name,
+          ownerUserId,
+          normalizeManagementMode(managementMode),
+          toPositiveInt(templateId),
+          JSON.stringify(normalizedParticipantRoles),
+          toPositiveInt(projectManager),
+          normalizeHealthStatus(healthStatus),
+          JSON.stringify(normalizedParticipantRoleUserMap),
+          normalizeText(groupChatMode, 20) || 'none',
+          normalizeText(groupChatId, 128) || null,
+          normalizeDateTime(actualStartTime, null),
+          normalizeDateTime(actualEndTime, null),
+          normalizeText(docLink, 500) || null,
+          normalizeText(uiDesignLink, 500) || null,
+          normalizeText(testCaseLink, 500) || null,
+          businessGroupCode || null,
+          expectedReleaseDate || null,
+          normalizeStatus(status),
+          normalizePriority(priority),
+          description || null,
+          completedAt || null,
+          demandId,
+        ],
+      )
+
+      await syncDemandMemberRowsByUserIds(conn, demandId, {
+        addUserIds: userIdsToAdd,
+        removeUserIds: userIdsToRemove,
+      })
+
+      await conn.commit()
+      return result.affectedRows
+    } catch (err) {
+      await conn.rollback()
+      throw err
+    } finally {
+      conn.release()
+    }
   },
 
   async updateDemandGroupChatBinding(demandId, { groupChatMode = 'none', groupChatId = null } = {}) {

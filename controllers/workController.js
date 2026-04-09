@@ -2177,6 +2177,8 @@ const updateDemand = async (req, res) => {
       priority,
       description,
       completedAt,
+      previousParticipantRoles: existing.participant_roles || [],
+      previousParticipantRoleUserMap: existing.participant_role_user_map || {},
     })
 
     let workflowSyncNotice = ''
@@ -3581,16 +3583,36 @@ const createLogDailyEntry = async (req, res) => {
       userId: req.user.id,
       difficultyCode: DEFAULT_SELF_TASK_DIFFICULTY_CODE,
     })
+    const syncedLog = await Work.findLogById(id)
+    let workflowHoursSync = null
+    try {
+      workflowHoursSync = await Workflow.syncTaskHoursFromWorkLog({
+        demandId: syncedLog?.demand_id || existing.demand_id,
+        phaseKey: syncedLog?.phase_key || existing.phase_key,
+        assigneeUserId: syncedLog?.user_id || existing.user_id,
+        taskSource: syncedLog?.task_source || existing.task_source || 'SELF',
+        actualHours: syncedLog?.actual_hours,
+        description: syncedLog?.description || existing.description || '',
+        operatorUserId: req.user.id,
+      })
+    } catch (workflowHoursErr) {
+      if (!isWorkflowTablesMissing(workflowHoursErr)) {
+        console.error('创建事项日投入后同步流程工时失败:', workflowHoursErr)
+      }
+    }
     const rows = await Work.listDailyEntriesForLog(id, {
       startDate: entryDate,
       endDate: entryDate,
     })
-    await refreshDemandHourSummaryQuietly(existing.demand_id)
+    await refreshDemandHourSummaryQuietly(syncedLog?.demand_id || existing.demand_id)
     const created = rows.find((item) => Number(item.id) === Number(entryId)) || rows[0] || null
     return res.status(201).json({
       success: true,
       message: '日投入记录已创建',
-      data: created,
+      data: {
+        ...created,
+        workflow_hours_sync: workflowHoursSync,
+      },
     })
   } catch (err) {
     console.error('创建事项日投入失败:', err)
@@ -3665,16 +3687,36 @@ const updateLogDailyEntry = async (req, res) => {
       userId: req.user.id,
       difficultyCode: DEFAULT_SELF_TASK_DIFFICULTY_CODE,
     })
+    const syncedLog = await Work.findLogById(id)
+    let workflowHoursSync = null
+    try {
+      workflowHoursSync = await Workflow.syncTaskHoursFromWorkLog({
+        demandId: syncedLog?.demand_id || existing.demand_id,
+        phaseKey: syncedLog?.phase_key || existing.phase_key,
+        assigneeUserId: syncedLog?.user_id || existing.user_id,
+        taskSource: syncedLog?.task_source || existing.task_source || 'SELF',
+        actualHours: syncedLog?.actual_hours,
+        description: syncedLog?.description || existing.description || '',
+        operatorUserId: req.user.id,
+      })
+    } catch (workflowHoursErr) {
+      if (!isWorkflowTablesMissing(workflowHoursErr)) {
+        console.error('更新事项日投入后同步流程工时失败:', workflowHoursErr)
+      }
+    }
     const rows = await Work.listDailyEntriesForLog(id, {
       startDate: entryDate,
       endDate: entryDate,
     })
-    await refreshDemandHourSummaryQuietly(existing.demand_id)
+    await refreshDemandHourSummaryQuietly(syncedLog?.demand_id || existing.demand_id)
     const updated = rows.find((item) => Number(item.id) === Number(savedEntryId)) || rows[0] || null
     return res.json({
       success: true,
       message: '日投入记录已更新',
-      data: updated,
+      data: {
+        ...updated,
+        workflow_hours_sync: workflowHoursSync,
+      },
     })
   } catch (err) {
     if (err?.code === 'WORK_LOG_DAILY_ENTRY_NOT_FOUND') {
@@ -3766,6 +3808,7 @@ const updateLogOwnerEstimate = async (req, res) => {
     })
 
     const updated = await Work.findLogById(id)
+    await refreshDemandHourSummaryQuietly(updated?.demand_id || existing?.demand_id)
     return res.json({ success: true, message: 'Owner 预估更新成功', data: updated })
   } catch (err) {
     if (err?.code === 'OWNER_ESTIMATE_FIELDS_MISSING') {
