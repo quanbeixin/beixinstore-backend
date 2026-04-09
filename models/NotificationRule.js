@@ -123,6 +123,9 @@ async function syncLegacyRuleReceivers(ruleId, receiverConfig) {
         .filter(Boolean),
     ),
   )
+  const businessRoles = Array.isArray(normalizedConfig.business_roles)
+    ? normalizedConfig.business_roles.map((item) => normalizeText(item, 64)).filter(Boolean)
+    : []
   const dynamicFields = Array.from(
     new Set(
       [normalizedConfig.user_id_field]
@@ -135,7 +138,16 @@ async function syncLegacyRuleReceivers(ruleId, receiverConfig) {
   const userLabelMap = await getUserLabelMap(userIds)
 
   await pool.query('DELETE FROM notification_rule_receivers WHERE rule_id = ?', [ruleId])
-  if (roleIds.length === 0 && userIds.length === 0 && dynamicFields.length === 0 && chatIds.length === 0 && !useDemandBoundChat) return
+  if (
+    roleIds.length === 0 &&
+    userIds.length === 0 &&
+    dynamicFields.length === 0 &&
+    chatIds.length === 0 &&
+    businessRoles.length === 0 &&
+    !useDemandBoundChat
+  ) {
+    return
+  }
 
   const roleValues = roleIds.map((roleId) => [
     Number(ruleId),
@@ -168,6 +180,13 @@ async function syncLegacyRuleReceivers(ruleId, receiverConfig) {
     `飞书群(${chatId})`,
     1,
   ])
+  const businessRoleValues = businessRoles.map((code) => [
+    Number(ruleId),
+    'DYNAMIC',
+    `business_role:${code}`,
+    `业务角色(${code})`,
+    1,
+  ])
 
   const demandBoundChatValues = useDemandBoundChat
     ? [[
@@ -179,7 +198,7 @@ async function syncLegacyRuleReceivers(ruleId, receiverConfig) {
     ]]
     : []
 
-  const values = [...roleValues, ...userValues, ...dynamicValues, ...chatValues, ...demandBoundChatValues]
+  const values = [...roleValues, ...userValues, ...dynamicValues, ...chatValues, ...businessRoleValues, ...demandBoundChatValues]
   await pool.query(
     `INSERT INTO notification_rule_receivers (
        rule_id,
@@ -218,6 +237,7 @@ async function getLegacyRuleReceiversMap(ruleIds) {
       users: [],
       departments: [],
       dynamic: [],
+      business_roles: [],
     }
 
     const receiverType = String(row.receiver_type || '').toUpperCase()
@@ -228,7 +248,14 @@ async function getLegacyRuleReceiversMap(ruleIds) {
     if (receiverType === 'ROLE') current.roles.push(value)
     else if (receiverType === 'USER') current.users.push(value)
     else if (receiverType === 'DEPT') current.departments.push(value)
-    else if (receiverType === 'DYNAMIC') current.dynamic.push(value)
+    else if (receiverType === 'DYNAMIC') {
+      if (String(value || '').startsWith('business_role:')) {
+        const code = String(value).slice('business_role:'.length)
+        if (code) current.business_roles.push(code)
+      } else {
+        current.dynamic.push(value)
+      }
+    }
 
     map.set(ruleId, current)
   })
@@ -256,6 +283,7 @@ function inferReceiverType(receiverConfig, fallback = 'role') {
   if (Array.isArray(receiverConfig.dynamic) && receiverConfig.dynamic.length > 0) return 'field'
   if (Array.isArray(receiverConfig.users) && receiverConfig.users.length > 0) return 'user'
   if (Array.isArray(receiverConfig.user_ids) && receiverConfig.user_ids.length > 0) return 'user'
+  if (Array.isArray(receiverConfig.business_roles) && receiverConfig.business_roles.length > 0) return 'role'
   if (Array.isArray(receiverConfig.roles) && receiverConfig.roles.length > 0) return 'role'
   return fallback
 }
@@ -287,6 +315,9 @@ function mapRuleRowLegacy(row, receiverConfig = {}) {
     receiver_type: receiverType,
     receiver_config_json: {
       ...receiverConfig,
+      business_roles: Array.isArray(receiverConfig.business_roles)
+        ? receiverConfig.business_roles
+        : undefined,
       use_demand_bound_chat: useDemandBoundChat,
       chat_ids: chatIds,
       user_id_field:

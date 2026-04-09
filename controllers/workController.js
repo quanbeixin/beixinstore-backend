@@ -5565,6 +5565,61 @@ const getMorningStandupWeeklyCompletedSummary = async (req, res) => {
   }
 }
 
+const triggerMorningDailyReportNotification = async (req, res) => {
+  try {
+    const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    const isAdmin = hasRole(req, 'ADMIN')
+    const isDepartmentManager = await Work.isDepartmentManager(req.user.id)
+    if (!isSuperAdmin && !isAdmin && !isDepartmentManager) {
+      return res.status(403).json({ success: false, message: '仅管理员或部门负责人可发送日报提醒' })
+    }
+
+    const canViewAll = isSuperAdmin || isAdmin
+    const targetDepartmentId = toPositiveInt(req.body.department_id)
+    const tabKey = normalizeText(req.body.tab_key, 32)
+
+    const events = await Work.buildDailyReportNotifyEvents(req.user.id, {
+      canViewAll,
+      targetDepartmentId,
+      tabKey,
+    })
+
+    if (events.length === 0) {
+      return res.json({
+        success: true,
+        message: '当前范围暂无需要提醒的成员',
+        data: { triggered: 0, results: [] },
+      })
+    }
+
+    const results = []
+    for (const eventPayload of events) {
+      const result = await NotificationEvent.processEvent({
+        eventType: 'daily_report_notify',
+        data: eventPayload,
+        operatorUserId: req.user?.id || null,
+      })
+      results.push({
+        category_key: eventPayload.category_key,
+        member_count: eventPayload.member_count,
+        event_result: result,
+      })
+    }
+
+    return res.json({
+      success: true,
+      message: '日报提醒已发送',
+      data: {
+        triggered: results.length,
+        results,
+      },
+    })
+  } catch (err) {
+    console.error('触发日报提醒失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const sendNoFillReminders = async (req, res) => {
   try {
     const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
@@ -5656,6 +5711,7 @@ module.exports = {
   getMorningStandupBoard,
   getMorningStandupWeeklyProgress,
   getMorningStandupWeeklyCompletedSummary,
+  triggerMorningDailyReportNotification,
   sendNoFillReminders,
   getMyAssignedItems,
   updateAssignedLog,

@@ -89,6 +89,7 @@ const {
   getMorningStandupBoard,
   getMorningStandupWeeklyProgress,
   getMorningStandupWeeklyCompletedSummary,
+  triggerMorningDailyReportNotification,
   sendNoFillReminders,
 } = require('../controllers/workController')
 const { getHumanGantt } = require('../controllers/humanGanttController')
@@ -288,6 +289,7 @@ router.put('/my-assigned-items/:id', authMiddleware.requirePermission('worklog.v
 router.get('/workbench/morning', getMorningStandupBoard)
 router.get('/workbench/morning/weekly-progress', getMorningStandupWeeklyProgress)
 router.get('/workbench/morning/weekly-completed', getMorningStandupWeeklyCompletedSummary)
+router.post('/workbench/morning/daily-report/notify', triggerMorningDailyReportNotification)
 router.get(
   '/workbench/owner',
   authMiddleware.requireAnyPermission(['workbench.view.owner', 'workbench.view.self']),
