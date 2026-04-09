@@ -8,6 +8,11 @@ function normalizeName(value) {
   return (value || '').trim()
 }
 
+function normalizeRoleKeyInput(value) {
+  const raw = String(value || '').trim()
+  return raw || null
+}
+
 const getOptions = async (req, res) => {
   const { type } = req.query
 
@@ -32,6 +37,10 @@ const getOptions = async (req, res) => {
 const createOption = async (req, res) => {
   const { type } = req.params
   const name = normalizeName(req.body.name)
+  const payload = { name }
+  if (Object.prototype.hasOwnProperty.call(req.body, 'role_key')) {
+    payload.role_key = normalizeRoleKeyInput(req.body.role_key)
+  }
 
   if (!Option.isValidType(type)) {
     return res.status(400).json({ success: false, message: '不支持的选项类型' })
@@ -47,7 +56,7 @@ const createOption = async (req, res) => {
       return res.status(409).json({ success: false, message: `${normalizeTypeLabel(type)}名称已存在` })
     }
 
-    const id = await Option.create(type, name)
+    const id = await Option.create(type, payload)
     const created = await Option.findById(type, id)
 
     return res.status(201).json({
@@ -56,6 +65,10 @@ const createOption = async (req, res) => {
       data: created,
     })
   } catch (err) {
+    if (err.code === 'ROLE_KEY_EXISTS') {
+      return res.status(409).json({ success: false, message: err.message })
+    }
+
     console.error('创建选项失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
@@ -64,6 +77,10 @@ const createOption = async (req, res) => {
 const updateOption = async (req, res) => {
   const { type, id } = req.params
   const name = normalizeName(req.body.name)
+  const payload = { name }
+  if (Object.prototype.hasOwnProperty.call(req.body, 'role_key')) {
+    payload.role_key = normalizeRoleKeyInput(req.body.role_key)
+  }
 
   if (!Option.isValidType(type)) {
     return res.status(400).json({ success: false, message: '不支持的选项类型' })
@@ -84,7 +101,7 @@ const updateOption = async (req, res) => {
       return res.status(409).json({ success: false, message: `${normalizeTypeLabel(type)}名称已存在` })
     }
 
-    await Option.update(type, id, name)
+    await Option.update(type, id, payload)
     const updated = await Option.findById(type, id)
 
     return res.json({
@@ -93,6 +110,10 @@ const updateOption = async (req, res) => {
       data: updated,
     })
   } catch (err) {
+    if (err.code === 'ROLE_KEY_EXISTS') {
+      return res.status(409).json({ success: false, message: err.message })
+    }
+
     console.error('更新选项失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }

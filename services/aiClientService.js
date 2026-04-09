@@ -4,16 +4,18 @@ function normalizeText(value) {
   return String(value || '').trim()
 }
 
-function resolveApiKey() {
+function resolveApiKey(preferredApiKey = '') {
   return (
+    normalizeText(preferredApiKey) ||
     normalizeText(process.env.AGENT_AI_API_KEY) ||
     normalizeText(process.env.OPENAI_API_KEY) ||
     normalizeText(process.env.DEEPSEEK_API_KEY)
   )
 }
 
-function resolveBaseUrl() {
+function resolveBaseUrl(preferredBaseUrl = '') {
   return (
+    normalizeText(preferredBaseUrl) ||
     normalizeText(process.env.AGENT_AI_BASE_URL) ||
     normalizeText(process.env.OPENAI_BASE_URL) ||
     normalizeText(process.env.DEEPSEEK_BASE_URL) ||
@@ -26,15 +28,17 @@ function resolveDefaultModel() {
 }
 
 async function callChatCompletion({
+  apiKey,
+  baseUrl,
   model,
   systemPrompt,
   userPrompt,
   temperature = 0.7,
   maxTokens = 2000,
 }) {
-  const apiKey = resolveApiKey()
-  if (!apiKey) {
-    throw new Error('未配置 AI API Key，请先设置 AGENT_AI_API_KEY 或 OPENAI_API_KEY')
+  const resolvedApiKey = resolveApiKey(apiKey)
+  if (!resolvedApiKey) {
+    throw new Error('未配置 AI API Key，请先设置 FEEDBACK_AI_API_KEY、AGENT_AI_API_KEY 或 OPENAI_API_KEY')
   }
 
   const controller = new AbortController()
@@ -44,11 +48,11 @@ async function callChatCompletion({
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
-    const response = await fetch(`${resolveBaseUrl()}${DEFAULT_CHAT_COMPLETIONS_PATH}`, {
+    const response = await fetch(`${resolveBaseUrl(baseUrl)}${DEFAULT_CHAT_COMPLETIONS_PATH}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${resolvedApiKey}`,
       },
       body: JSON.stringify({
         model: normalizeText(model) || resolveDefaultModel(),
