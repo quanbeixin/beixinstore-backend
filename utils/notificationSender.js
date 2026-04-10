@@ -1,4 +1,5 @@
 const pool = require('./db')
+const { signNotificationLoginToken } = require('./notificationLoginToken')
 
 function normalizeText(value, maxLength = 500) {
   if (value === undefined || value === null) return ''
@@ -15,6 +16,29 @@ function normalizeHttpUrl(value, maxLength = 2000) {
     return parsed.toString()
   } catch {
     return ''
+  }
+}
+
+function buildTargetActionUrl(actionUrl, target) {
+  const normalizedActionUrl = normalizeHttpUrl(actionUrl)
+  if (!normalizedActionUrl) return ''
+  if (!target || target.target_type !== 'user') return normalizedActionUrl
+
+  const userId = Number(target?.extra?.user_id || 0)
+  if (!Number.isInteger(userId) || userId <= 0) return normalizedActionUrl
+
+  const ticket = signNotificationLoginToken({
+    userId,
+    targetPath: normalizedActionUrl,
+  })
+  if (!ticket) return normalizedActionUrl
+
+  try {
+    const url = new URL(normalizedActionUrl)
+    url.searchParams.set('nt', ticket)
+    return url.toString()
+  } catch {
+    return normalizedActionUrl
   }
 }
 
@@ -830,6 +854,7 @@ async function sendByFeishuApp({ title, content, targets, metadata }) {
     const receiveIdType = target.target_type === 'chat' ? 'chat_id' : 'open_id'
 
     try {
+      const targetActionUrl = buildTargetActionUrl(detailUrl, target)
       let sent = await sendFeishuMessage({
         token: tokenResult.token,
         receiveIdType,
@@ -837,7 +862,7 @@ async function sendByFeishuApp({ title, content, targets, metadata }) {
         messageBody: buildInteractiveCardPayload({
           title,
           markdown,
-          actionUrl: detailUrl,
+          actionUrl: targetActionUrl,
           actionText: metadata?.detail_action_text || '查看详情',
         }),
         timeoutMs,

@@ -293,13 +293,22 @@ const createBug = async (req, res) => {
       reporterId: req.user.id,
     })
     const detail = await Bug.getBugDetail(bugId)
+    const createReceiverUserId = toPositiveInt(detail?.assignee_id)
+    const assignReceiverUserId = toPositiveInt(detail?.assignee_id)
+    const shouldSkipCreateNotification =
+      createReceiverUserId &&
+      assignReceiverUserId &&
+      Number(createReceiverUserId) === Number(assignReceiverUserId)
 
     // 创建成功后触发真实业务事件（不阻塞主业务）
-    await emitBugNotificationEvent({
-      eventType: 'bug_create',
-      bug: detail,
-      req,
-    })
+    // 当创建和指派会在同一时刻通知同一接收人时，仅发送“指派通知”。
+    if (!shouldSkipCreateNotification) {
+      await emitBugNotificationEvent({
+        eventType: 'bug_create',
+        bug: detail,
+        req,
+      })
+    }
     await emitBugNotificationEvent({
       eventType: 'bug_assign',
       bug: detail,
