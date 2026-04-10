@@ -4,6 +4,7 @@ const router = express.Router()
 const {
   register,
   login,
+  notificationLogin,
   getProfile,
   updateProfile,
   updatePassword,
@@ -15,6 +16,7 @@ const authMiddleware = require('../middleware/auth')
 
 router.post('/register', register)
 router.post('/login', login)
+router.get('/notification-login', notificationLogin)
 router.get('/profile', authMiddleware, getProfile)
 router.put('/profile', authMiddleware, updateProfile)
 router.put('/password', authMiddleware, updatePassword)

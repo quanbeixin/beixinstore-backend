@@ -4,6 +4,7 @@ const Permission = require('../models/Permission')
 const UserPreference = require('../models/UserPreference')
 const UserChangeLog = require('../models/UserChangeLog')
 const { generateToken } = require('../utils/jwt')
+const { verifyNotificationLoginToken } = require('../utils/notificationLoginToken')
 
 function normalizeStatusCode(value) {
   const code = typeof value === 'string' ? value.trim().toUpperCase() : ''
@@ -236,6 +237,61 @@ const login = async (req, res) => {
   }
 }
 
+const notificationLogin = async (req, res) => {
+  const ticket = normalizeText(req.query?.nt, 4000)
+  if (!ticket) {
+    return res.status(400).json({ success: false, message: '缺少免登票据' })
+  }
+
+  const verified = verifyNotificationLoginToken(ticket)
+  if (!verified.ok) {
+    const message = verified.code === 'TOKEN_EXPIRED' ? '免登票据已过期，请重新点击通知' : '免登票据无效'
+    return res.status(401).json({ success: false, message })
+  }
+
+  try {
+    const user = await User.findById(verified.userId)
+    if (!user) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+
+    const statusCode = normalizeStatusCode(user.status_code)
+    if (statusCode !== 'ACTIVE') {
+      return res.status(403).json({
+        success: false,
+        message: getStatusBlockMessage(statusCode) || '账号状态异常，禁止登录',
+        data: { status_code: statusCode },
+      })
+    }
+
+    await User.updateLastLoginById(user.id)
+
+    const token = generateToken({
+      id: user.id,
+      username: user.username,
+      role: user.role || '',
+    })
+
+    return res.json({
+      success: true,
+      message: '免登成功',
+      data: {
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          real_name: user.real_name || '',
+          role: user.role || '',
+          status_code: statusCode,
+        },
+      },
+    })
+  } catch (error) {
+    console.error('通知免登失败:', error)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getProfile = async (req, res) => {
   try {
     const user = await User.findById(req.user.id)
@@ -406,6 +462,7 @@ const getAccess = async (req, res) => {
 module.exports = {
   register,
   login,
+  notificationLogin,
   getProfile,
   updateProfile,
   updatePassword,

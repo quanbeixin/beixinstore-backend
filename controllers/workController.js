@@ -3071,11 +3071,21 @@ const createOwnerAssignedLog = async (req, res) => {
 
     await refreshDemandHourSummaryQuietly(demandId)
     const created = await Work.findLogById(id)
-    await emitWorklogNotificationEvent({
-      eventType: 'worklog_create',
-      log: created,
-      req,
-    })
+    const createReceiverUserId = toPositiveInt(created?.user_id)
+    const assignReceiverUserId = toPositiveInt(created?.user_id)
+    const shouldSkipCreateNotification =
+      createReceiverUserId &&
+      assignReceiverUserId &&
+      Number(createReceiverUserId) === Number(assignReceiverUserId)
+
+    // 当创建和指派在同一次操作中给到同一接收人时，仅发送“指派通知”，避免重复打扰。
+    if (!shouldSkipCreateNotification) {
+      await emitWorklogNotificationEvent({
+        eventType: 'worklog_create',
+        log: created,
+        req,
+      })
+    }
     await emitWorklogNotificationEvent({
       eventType: 'worklog_assign',
       log: created,
