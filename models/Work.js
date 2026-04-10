@@ -130,6 +130,122 @@ const EFFECTIVE_TASK_DIFFICULTY_CODE_SQL = `CASE
   ELSE COALESCE(NULLIF(l.self_task_difficulty_code, ''), '${DEFAULT_TASK_DIFFICULTY_CODE}')
 END`
 
+const OWNER_ESTIMATE_DUAL_RULE_FORCE_ZERO_CONDITION_SQL = `(
+  COALESCE(it.owner_estimate_rule, 'NONE') = 'NONE'
+  OR (
+    (
+      SELECT LOWER(
+        COALESCE(
+          JSON_UNQUOTE(JSON_EXTRACT(n.remark, '$.owner_estimate_required')),
+          JSON_UNQUOTE(JSON_EXTRACT(n.remark, '$.ownerEstimateRequired')),
+          ''
+        )
+      )
+      FROM wf_process_instances i
+      INNER JOIN wf_process_instance_nodes n ON n.instance_id = i.id
+      WHERE i.biz_type = 'DEMAND'
+        AND i.biz_id = l.demand_id
+        AND (
+          UPPER(TRIM(COALESCE(n.node_key, ''))) = UPPER(TRIM(COALESCE(l.phase_key, '')))
+          OR UPPER(TRIM(COALESCE(n.phase_key, ''))) = UPPER(TRIM(COALESCE(l.phase_key, '')))
+        )
+      ORDER BY
+        CASE i.status WHEN 'IN_PROGRESS' THEN 0 WHEN 'NOT_STARTED' THEN 1 ELSE 2 END ASC,
+        i.id DESC,
+        n.id DESC
+      LIMIT 1
+    ) IN ('0', 'false', 'no', 'off')
+  )
+)`
+
+const OWNER_ESTIMATE_TEMPLATE_NODE_FALSE_CONDITION_SQL = `LOWER(COALESCE(j.owner_raw1, j.owner_raw2, '')) IN ('0', 'false', 'no', 'off')`
+
+const OWNER_ESTIMATE_DUAL_RULE_PREVIEW_SQL = `
+  SELECT COUNT(*) AS total
+  FROM work_logs l
+  LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) it ON it.id = l.item_type_id
+  WHERE COALESCE(l.owner_estimate_required, -1) <> 0
+    AND ${OWNER_ESTIMATE_DUAL_RULE_FORCE_ZERO_CONDITION_SQL}
+`
+
+const OWNER_ESTIMATE_TEMPLATE_FALSE_PREVIEW_SQL = `
+  SELECT COUNT(*) AS total
+  FROM work_logs l
+  INNER JOIN work_demands d ON d.id = l.demand_id
+  INNER JOIN project_templates pt ON pt.id = d.template_id
+  INNER JOIN JSON_TABLE(
+    pt.node_config,
+    '$.nodes[*]'
+    COLUMNS (
+      node_key VARCHAR(64) PATH '$.node_key',
+      owner_raw1 VARCHAR(16) PATH '$.owner_estimate_required' NULL ON EMPTY,
+      owner_raw2 VARCHAR(16) PATH '$.ownerEstimateRequired' NULL ON EMPTY
+    )
+  ) j
+    ON BINARY UPPER(TRIM(COALESCE(j.node_key, ''))) = BINARY UPPER(TRIM(COALESCE(l.phase_key, '')))
+  WHERE COALESCE(l.owner_estimate_required, -1) <> 0
+    AND ${OWNER_ESTIMATE_TEMPLATE_NODE_FALSE_CONDITION_SQL}
+`
+
+const OWNER_ESTIMATE_TOTAL_PREVIEW_SQL = `
+  SELECT COUNT(*) AS total
+  FROM (
+    SELECT l.id
+    FROM work_logs l
+    LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) it ON it.id = l.item_type_id
+    WHERE COALESCE(l.owner_estimate_required, -1) <> 0
+      AND ${OWNER_ESTIMATE_DUAL_RULE_FORCE_ZERO_CONDITION_SQL}
+    UNION
+    SELECT l.id
+    FROM work_logs l
+    INNER JOIN work_demands d ON d.id = l.demand_id
+    INNER JOIN project_templates pt ON pt.id = d.template_id
+    INNER JOIN JSON_TABLE(
+      pt.node_config,
+      '$.nodes[*]'
+      COLUMNS (
+        node_key VARCHAR(64) PATH '$.node_key',
+        owner_raw1 VARCHAR(16) PATH '$.owner_estimate_required' NULL ON EMPTY,
+        owner_raw2 VARCHAR(16) PATH '$.ownerEstimateRequired' NULL ON EMPTY
+      )
+    ) j
+      ON BINARY UPPER(TRIM(COALESCE(j.node_key, ''))) = BINARY UPPER(TRIM(COALESCE(l.phase_key, '')))
+    WHERE COALESCE(l.owner_estimate_required, -1) <> 0
+      AND ${OWNER_ESTIMATE_TEMPLATE_NODE_FALSE_CONDITION_SQL}
+  ) c
+`
+
+const OWNER_ESTIMATE_DUAL_RULE_UPDATE_SQL = `
+  UPDATE work_logs l
+  LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) it ON it.id = l.item_type_id
+  SET
+    l.owner_estimate_required = 0,
+    l.updated_at = l.updated_at
+  WHERE COALESCE(l.owner_estimate_required, -1) <> 0
+    AND ${OWNER_ESTIMATE_DUAL_RULE_FORCE_ZERO_CONDITION_SQL}
+`
+
+const OWNER_ESTIMATE_TEMPLATE_FALSE_UPDATE_SQL = `
+  UPDATE work_logs l
+  INNER JOIN work_demands d ON d.id = l.demand_id
+  INNER JOIN project_templates pt ON pt.id = d.template_id
+  INNER JOIN JSON_TABLE(
+    pt.node_config,
+    '$.nodes[*]'
+    COLUMNS (
+      node_key VARCHAR(64) PATH '$.node_key',
+      owner_raw1 VARCHAR(16) PATH '$.owner_estimate_required' NULL ON EMPTY,
+      owner_raw2 VARCHAR(16) PATH '$.ownerEstimateRequired' NULL ON EMPTY
+    )
+  ) j
+    ON BINARY UPPER(TRIM(COALESCE(j.node_key, ''))) = BINARY UPPER(TRIM(COALESCE(l.phase_key, '')))
+  SET
+    l.owner_estimate_required = 0,
+    l.updated_at = l.updated_at
+  WHERE COALESCE(l.owner_estimate_required, -1) <> 0
+    AND ${OWNER_ESTIMATE_TEMPLATE_NODE_FALSE_CONDITION_SQL}
+`
+
 const DEFAULT_DAILY_CAPACITY_HOURS = Number.isFinite(Number(process.env.DAILY_CAPACITY_HOURS))
   ? Math.max(1, Number(process.env.DAILY_CAPACITY_HOURS))
   : 8.5
@@ -1887,6 +2003,44 @@ const Work = {
       ],
     )
     return Number(result.affectedRows || 0)
+  },
+
+  async previewOwnerEstimateRequiredCalibration() {
+    const [[[dualRow]], [[templateRow]], [[totalRow]]] = await Promise.all([
+      pool.query(OWNER_ESTIMATE_DUAL_RULE_PREVIEW_SQL),
+      pool.query(OWNER_ESTIMATE_TEMPLATE_FALSE_PREVIEW_SQL),
+      pool.query(OWNER_ESTIMATE_TOTAL_PREVIEW_SQL),
+    ])
+
+    return {
+      dual_rule_would_change_count: Number(dualRow?.total || 0),
+      template_node_would_change_count: Number(templateRow?.total || 0),
+      total_would_change_count: Number(totalRow?.total || 0),
+    }
+  },
+
+  async runOwnerEstimateRequiredCalibration() {
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const [dualUpdateResult] = await conn.query(OWNER_ESTIMATE_DUAL_RULE_UPDATE_SQL)
+      const [templateUpdateResult] = await conn.query(OWNER_ESTIMATE_TEMPLATE_FALSE_UPDATE_SQL)
+      await conn.commit()
+
+      const dualRuleChangedCount = Number(dualUpdateResult?.affectedRows || 0)
+      const templateNodeChangedCount = Number(templateUpdateResult?.affectedRows || 0)
+
+      return {
+        dual_rule_changed_count: dualRuleChangedCount,
+        template_node_changed_count: templateNodeChangedCount,
+        total_changed_count: dualRuleChangedCount + templateNodeChangedCount,
+      }
+    } catch (error) {
+      await conn.rollback()
+      throw error
+    } finally {
+      conn.release()
+    }
   },
 
   async listEfficiencyFactorSettings() {

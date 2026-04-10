@@ -31,6 +31,8 @@ const {
   getProjectTemplateById,
   createProjectTemplate,
   updateProjectTemplate,
+  previewOwnerEstimateRequiredCalibration,
+  runOwnerEstimateRequiredCalibration,
   getEfficiencyFactorSettings,
   updateEfficiencyFactorSettings,
   listDemands,
@@ -149,6 +151,16 @@ router.get(
 )
 router.post('/project-templates', authMiddleware.requirePermission('project.template.manage'), createProjectTemplate)
 router.put('/project-templates/:id', authMiddleware.requirePermission('project.template.manage'), updateProjectTemplate)
+router.post(
+  '/project-templates/owner-estimate-calibration/preview',
+  authMiddleware.requirePermission('project.template.manage'),
+  previewOwnerEstimateRequiredCalibration,
+)
+router.post(
+  '/project-templates/owner-estimate-calibration/run',
+  authMiddleware.requirePermission('project.template.manage'),
+  runOwnerEstimateRequiredCalibration,
+)
 router.get('/efficiency-factor-settings', getEfficiencyFactorSettings)
 router.put('/efficiency-factor-settings', updateEfficiencyFactorSettings)
 

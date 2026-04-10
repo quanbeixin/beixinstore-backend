@@ -1195,6 +1195,33 @@ const updateProjectTemplate = async (req, res) => {
   }
 }
 
+const previewOwnerEstimateRequiredCalibration = async (req, res) => {
+  try {
+    const data = await Work.previewOwnerEstimateRequiredCalibration()
+    return res.json({
+      success: true,
+      data,
+    })
+  } catch (err) {
+    console.error('预览 Owner 评估校准失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const runOwnerEstimateRequiredCalibration = async (req, res) => {
+  try {
+    const data = await Work.runOwnerEstimateRequiredCalibration()
+    return res.json({
+      success: true,
+      message: `Owner 评估校准完成，共处理 ${Number(data?.total_changed_count || 0)} 条`,
+      data,
+    })
+  } catch (err) {
+    console.error('执行 Owner 评估校准失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getEfficiencyFactorSettings = async (req, res) => {
   if (!ensureEfficiencyFactorSettingsAccess(req, res)) return
 
@@ -3090,6 +3117,12 @@ const updateLog = async (req, res) => {
     req.body.task_source !== undefined
   ) {
     return res.status(400).json({ success: false, message: '个人更新接口不允许写入负责人预估字段' })
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'actual_hours')) {
+    return res.status(400).json({
+      success: false,
+      message: 'actual_hours 不允许直接修改，请通过事项日投入明细维护实际用时',
+    })
   }
 
   try {
@@ -5741,6 +5774,8 @@ module.exports = {
   getProjectTemplateById,
   createProjectTemplate,
   updateProjectTemplate,
+  previewOwnerEstimateRequiredCalibration,
+  runOwnerEstimateRequiredCalibration,
   getEfficiencyFactorSettings,
   updateEfficiencyFactorSettings,
   listDemands,
