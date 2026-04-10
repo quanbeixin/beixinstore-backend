@@ -2473,6 +2473,8 @@ const listLogs = async (req, res) => {
     unifiedStatusRaw === undefined || unifiedStatusRaw === null || String(unifiedStatusRaw).trim() === ''
       ? ''
       : String(unifiedStatusRaw).trim().toUpperCase()
+  const dateDimensionRaw = req.query.date_dimension
+  const dateDimension = String(dateDimensionRaw || '').trim().toUpperCase() === 'ENTRY' ? 'ENTRY' : ''
   const requestedUserId = toPositiveInt(req.query.user_id)
   const requestedScope = String(req.query.scope || '').trim().toLowerCase()
   const teamScope = requestedScope === 'team'
@@ -2526,6 +2528,7 @@ const listLogs = async (req, res) => {
       logStatus,
       unifiedStatus,
       teamScopeUserId,
+      dateDimension,
     })
 
     return res.json({
@@ -3746,6 +3749,72 @@ const updateLogDailyEntry = async (req, res) => {
       return res.status(400).json({ success: false, message: '目标日期已存在投入记录，请直接编辑该日期记录' })
     }
     console.error('更新事项日投入失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const deleteLogDailyEntry = async (req, res) => {
+  const id = toPositiveInt(req.params.id)
+  const entryId = toPositiveInt(req.params.entryId)
+  if (!id) {
+    return res.status(400).json({ success: false, message: '工作记录 ID 无效' })
+  }
+  if (!entryId) {
+    return res.status(400).json({ success: false, message: '日投入记录 ID 无效' })
+  }
+
+  try {
+    const existing = await Work.findLogById(id)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '工作记录不存在' })
+    }
+    if (Number(existing.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可删除自己的事项投入记录' })
+    }
+
+    const affectedRows = await Work.deleteDailyEntryForLog(id, entryId, {
+      userId: req.user.id,
+    })
+    if (!affectedRows) {
+      return res.status(404).json({ success: false, message: '日投入记录不存在' })
+    }
+
+    const syncedLog = await Work.findLogById(id)
+    let workflowHoursSync = null
+    try {
+      workflowHoursSync = await Workflow.syncTaskHoursFromWorkLog({
+        demandId: syncedLog?.demand_id || existing.demand_id,
+        phaseKey: syncedLog?.phase_key || existing.phase_key,
+        assigneeUserId: syncedLog?.user_id || existing.user_id,
+        taskSource: syncedLog?.task_source || existing.task_source || 'SELF',
+        actualHours: syncedLog?.actual_hours,
+        description: syncedLog?.description || existing.description || '',
+        operatorUserId: req.user.id,
+      })
+    } catch (workflowHoursErr) {
+      if (!isWorkflowTablesMissing(workflowHoursErr)) {
+        console.error('删除事项日投入后同步流程工时失败:', workflowHoursErr)
+      }
+    }
+    await refreshDemandHourSummaryQuietly(syncedLog?.demand_id || existing.demand_id)
+
+    return res.json({
+      success: true,
+      message: '日投入记录已删除',
+      data: {
+        log_id: id,
+        entry_id: entryId,
+        workflow_hours_sync: workflowHoursSync,
+      },
+    })
+  } catch (err) {
+    if (err?.code === 'WORK_LOG_DAILY_ENTRY_NOT_FOUND') {
+      return res.status(404).json({ success: false, message: '日投入记录不存在' })
+    }
+    if (err?.code === 'WORK_LOG_DAILY_ENTRY_FORBIDDEN') {
+      return res.status(403).json({ success: false, message: '仅可删除自己的事项投入记录' })
+    }
+    console.error('删除事项日投入失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -5698,6 +5767,7 @@ module.exports = {
   listLogDailyEntries,
   createLogDailyEntry,
   updateLogDailyEntry,
+  deleteLogDailyEntry,
   updateLogOwnerEstimate,
   getInsightFilterOptions,
   getDepartmentEfficiencyRanking,

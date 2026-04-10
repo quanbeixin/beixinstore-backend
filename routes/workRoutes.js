@@ -57,6 +57,7 @@ const {
   listLogDailyEntries,
   createLogDailyEntry,
   updateLogDailyEntry,
+  deleteLogDailyEntry,
   updateLogOwnerEstimate,
   getInsightFilterOptions,
   getDepartmentEfficiencyRanking,
@@ -266,6 +267,11 @@ router.put(
   '/logs/:id/daily-entries/:entryId',
   authMiddleware.requirePermission('worklog.update.self'),
   updateLogDailyEntry,
+)
+router.delete(
+  '/logs/:id/daily-entries/:entryId',
+  authMiddleware.requirePermission('worklog.update.self'),
+  deleteLogDailyEntry,
 )
 router.put(
   '/logs/:id/owner-estimate',
