@@ -226,11 +226,106 @@ function evaluateRuleCondition(conditionConfig, eventData) {
 function renderTemplateText(template, data) {
   const source = String(template || '')
   return source.replace(/\$\{([a-zA-Z0-9_.]+)\}/g, (_full, keyPath) => {
-    const value = getValueByPath(data, keyPath)
-    if (value === undefined || value === null) return ''
-    if (typeof value === 'object') return JSON.stringify(value)
-    return String(value)
+    const rawValue = getValueByPath(data, keyPath)
+    if (rawValue === undefined || rawValue === null) return ''
+
+    const localizedValue = localizeTemplateValueByKeyPath(keyPath, rawValue)
+    if (localizedValue === undefined || localizedValue === null) return ''
+    if (typeof localizedValue === 'object') return JSON.stringify(localizedValue)
+    return String(localizedValue)
   })
+}
+
+const STATUS_CN_MAP = Object.freeze({
+  TODO: '待处理',
+  NOT_STARTED: '未开始',
+  IN_PROGRESS: '进行中',
+  DONE: '已完成',
+  CANCELLED: '已取消',
+  RETURNED: '已退回',
+  REJECTED: '已驳回',
+  TERMINATED: '已终止',
+  NEW: '新建',
+  OPEN: '待处理',
+  PROCESSING: '处理中',
+  FIXED: '已修复',
+  CLOSED: '已关闭',
+  REOPENED: '已重开',
+  VERIFIED: '已验证',
+  RESOLVED: '已解决',
+  BLOCKED: '已阻塞',
+  ACTIVE: '活跃',
+  PENDING: '待定',
+})
+
+const SEVERITY_CN_MAP = Object.freeze({
+  CRITICAL: '严重',
+  HIGH: '高',
+  MEDIUM: '中',
+  LOW: '低',
+})
+
+const PRIORITY_CN_MAP = Object.freeze({
+  P0: '最高',
+  P1: '高',
+  P2: '中',
+  P3: '低',
+  P4: '最低',
+  HIGHEST: '最高',
+  HIGH: '高',
+  MEDIUM: '中',
+  LOW: '低',
+  LOWEST: '最低',
+})
+
+const STATUS_TEMPLATE_KEYS = new Set([
+  'status',
+  'from_status',
+  'to_status',
+  'log_status',
+  'node_status',
+  'task_status',
+  'workflow_status',
+  'demand_status',
+  'bug_status',
+])
+
+const SEVERITY_TEMPLATE_KEYS = new Set(['severity', 'severity_code'])
+const PRIORITY_TEMPLATE_KEYS = new Set(['priority', 'priority_code'])
+
+function normalizeEnumCode(value) {
+  return normalizeText(value, 64).replace(/[\s-]+/g, '_').toUpperCase()
+}
+
+function localizeEnumValue(value, map) {
+  if (typeof value !== 'string' && typeof value !== 'number') return value
+  const text = String(value).trim()
+  if (!text) return value
+
+  const exact = map[text]
+  if (exact) return exact
+
+  const normalized = normalizeEnumCode(text)
+  return map[normalized] || value
+}
+
+function localizeTemplateValueByKeyPath(keyPath, value) {
+  const leafKey = normalizeText(String(keyPath || '').split('.').pop(), 64).toLowerCase()
+  if (!leafKey) return value
+
+  if (STATUS_TEMPLATE_KEYS.has(leafKey)) {
+    return localizeEnumValue(value, STATUS_CN_MAP)
+  }
+
+  if (SEVERITY_TEMPLATE_KEYS.has(leafKey)) {
+    return localizeEnumValue(value, SEVERITY_CN_MAP)
+  }
+
+  if (PRIORITY_TEMPLATE_KEYS.has(leafKey)) {
+    return localizeEnumValue(value, PRIORITY_CN_MAP)
+  }
+
+  return value
 }
 
 function extractDailyReportMembers(eventData, groupKey) {
