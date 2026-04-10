@@ -1,5 +1,6 @@
 const pool = require('../utils/db')
 const NotificationEvent = require('../models/NotificationEvent')
+const Work = require('../models/Work')
 
 const SCHEDULE_EVENT_TYPES = new Set(['schedule_hourly', 'schedule_daily', 'schedule_weekly', 'schedule_monthly'])
 const DEADLINE_EVENT_TYPES = new Set(['worklog_deadline_remind'])
@@ -7,6 +8,7 @@ const DEFAULT_TIMEZONE = 'Asia/Shanghai'
 
 let timer = null
 let running = false
+let schedulerViewerUserIdCache = null
 
 function toInt(value, fallback = 0) {
   const num = Number(value)
@@ -96,6 +98,33 @@ function getCurrentWeekRange(timeZone = DEFAULT_TIMEZONE) {
     startDate: formatDate(monday || localToday),
     endDate: formatDate(localToday),
   }
+}
+
+async function resolveSchedulerViewerUserId() {
+  const envUserId = toInt(process.env.NOTIFICATION_SCHEDULER_VIEWER_USER_ID, 0)
+  if (envUserId > 0) return envUserId
+  if (schedulerViewerUserIdCache && schedulerViewerUserIdCache > 0) return schedulerViewerUserIdCache
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT u.id
+       FROM users u
+       INNER JOIN user_roles ur ON ur.user_id = u.id
+       INNER JOIN roles r ON r.id = ur.role_id
+       WHERE UPPER(COALESCE(r.role_key, '')) IN ('SUPER_ADMIN', 'ADMIN')
+       ORDER BY u.id ASC
+       LIMIT 1`,
+    )
+    const userId = Number(rows?.[0]?.id || 0)
+    if (Number.isInteger(userId) && userId > 0) {
+      schedulerViewerUserIdCache = userId
+      return userId
+    }
+  } catch (error) {
+    console.warn('解析通知调度查看用户失败:', error?.message || error)
+  }
+
+  return 0
 }
 
 function getScheduleBucketKey(eventType, nowParts) {
@@ -197,7 +226,39 @@ async function listEnabledRulesForScheduler() {
   return rows || []
 }
 
+async function listDailyReportRoleMap(ruleIds = []) {
+  const ids = Array.from(
+    new Set(
+      (Array.isArray(ruleIds) ? ruleIds : [])
+        .map((item) => Number(item))
+        .filter((item) => Number.isInteger(item) && item > 0),
+    ),
+  )
+  if (ids.length === 0) return new Map()
+
+  const placeholders = ids.map(() => '?').join(', ')
+  const [rows] = await pool.query(
+    `SELECT rule_id, receiver_value
+     FROM notification_rule_receivers
+     WHERE enabled = 1
+       AND rule_id IN (${placeholders})
+       AND receiver_type = 'DYNAMIC'
+       AND receiver_value LIKE 'business_role:daily_report_%'`,
+    ids,
+  )
+
+  const map = new Map()
+  for (const row of rows || []) {
+    const ruleId = Number(row.rule_id)
+    if (!map.has(ruleId)) map.set(ruleId, new Set())
+    map.get(ruleId).add(String(row.receiver_value || '').trim().toLowerCase())
+  }
+  return map
+}
+
 async function dispatchScheduleRules(rules) {
+  const roleMap = await listDailyReportRoleMap(rules.map((rule) => Number(rule?.id || 0)))
+
   for (const rule of rules) {
     const scheduleSceneCode = String(rule?.event_type || '').toLowerCase()
     if (!SCHEDULE_EVENT_TYPES.has(scheduleSceneCode)) continue
@@ -218,6 +279,53 @@ async function dispatchScheduleRules(rules) {
     const acquired = await acquireTriggerCursor(rule.id, triggerKey, { expireHours: 240 })
     if (!acquired) continue
 
+    const scheduleContext = {
+      matched: true,
+      trigger_key: triggerKey,
+      trigger_time: nowParts.nowIso,
+    }
+
+    if (dispatchEventType === 'daily_report_notify') {
+      const viewerUserId = await resolveSchedulerViewerUserId()
+      if (!viewerUserId) {
+        console.warn('跳过 daily_report_notify 定时通知：未找到可用管理员账号作为查看上下文')
+        continue
+      }
+
+      const events = await Work.buildDailyReportNotifyEvents(viewerUserId, {
+        canViewAll: true,
+      })
+
+      if (!Array.isArray(events) || events.length === 0) {
+        continue
+      }
+
+      const currentRuleRoleSet = roleMap.get(Number(rule.id)) || new Set()
+      const needUnfilled = currentRuleRoleSet.has('business_role:daily_report_unfilled')
+      const needUnscheduled = currentRuleRoleSet.has('business_role:daily_report_unscheduled')
+      const needOnlySingleCategory = needUnfilled !== needUnscheduled
+
+      const filteredEvents = needOnlySingleCategory
+        ? events.filter((item) => (needUnfilled ? item?.category_key === 'unfilled' : item?.category_key === 'unscheduled'))
+        : events
+
+      for (const eventPayload of filteredEvents) {
+        await NotificationEvent.processEvent({
+          eventType: dispatchEventType,
+          data: {
+            ...eventPayload,
+            business_line_id: Number(rule?.biz_line_id || 0) || null,
+            schedule_timezone: timeZone,
+            schedule_bucket: bucketKey,
+            __schedule_context: scheduleContext,
+          },
+          operatorUserId: null,
+          targetRuleIds: [Number(rule.id)],
+        })
+      }
+      continue
+    }
+
     const weeklyRange = getCurrentWeekRange(timeZone)
     const weekRangeText = `${weeklyRange.startDate} ~ ${weeklyRange.endDate}`
 
@@ -229,11 +337,7 @@ async function dispatchScheduleRules(rules) {
         schedule_bucket: bucketKey,
         week_range: weekRangeText,
         weekly_summary_text: `【定时周报】${weekRangeText}\n本次为系统定时触发，请在模板中按需补充业务字段。`,
-        __schedule_context: {
-          matched: true,
-          trigger_key: triggerKey,
-          trigger_time: nowParts.nowIso,
-        },
+        __schedule_context: scheduleContext,
       },
       operatorUserId: null,
       targetRuleIds: [Number(rule.id)],

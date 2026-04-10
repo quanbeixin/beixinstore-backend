@@ -1,3 +1,5 @@
+const pool = require('./db')
+
 function normalizeText(value, maxLength = 500) {
   if (value === undefined || value === null) return ''
   return String(value).trim().slice(0, maxLength)
@@ -17,8 +19,8 @@ function normalizeHttpUrl(value, maxLength = 2000) {
 }
 
 function pickFeishuConfig() {
-  const appId = normalizeText(process.env.FEISHU_APP_ID, 128)
-  const appSecret = normalizeText(process.env.FEISHU_APP_SECRET, 256)
+  const appId = normalizeText(process.env.FEISHU_APP_ID || process.env.LARK_APP_ID, 128)
+  const appSecret = normalizeText(process.env.FEISHU_APP_SECRET || process.env.LARK_APP_SECRET, 256)
   const timeoutMs = Number(process.env.FEISHU_TIMEOUT_MS || 8000)
 
   return {
@@ -48,23 +50,94 @@ function toCsv(setValue) {
   return Array.from(setValue || []).filter(Boolean).join(',')
 }
 
-let sendControlOverride = null
+const SEND_CONTROL_CACHE_TTL_MS = Math.max(1000, Number(process.env.NOTIFICATION_SEND_CONTROL_CACHE_TTL_MS || 5000))
+let sendControlConfigCache = null
+let ensureSendControlTablePromise = null
 
-function getSendControlConfig() {
-  if (sendControlOverride) {
-    return {
-      mode: sendControlOverride.mode,
-      whitelistOpenIds: new Set(sendControlOverride.whitelistOpenIds),
-      whitelistChatIds: new Set(sendControlOverride.whitelistChatIds),
-    }
-  }
-
+function getEnvSendControlConfig() {
   const rawMode = normalizeText(process.env.NOTIFICATION_SEND_MODE, 32).toLowerCase()
   const mode = rawMode === 'shadow' || rawMode === 'whitelist' || rawMode === 'live' ? rawMode : 'live'
   return {
     mode,
     whitelistOpenIds: parseCsvToSet(process.env.NOTIFICATION_TEST_OPEN_IDS),
     whitelistChatIds: parseCsvToSet(process.env.NOTIFICATION_TEST_CHAT_IDS),
+  }
+}
+
+function cloneSendControlConfig(config) {
+  return {
+    mode: normalizeSendMode(config?.mode),
+    whitelistOpenIds: new Set(config?.whitelistOpenIds || []),
+    whitelistChatIds: new Set(config?.whitelistChatIds || []),
+  }
+}
+
+function setSendControlConfigCache(config) {
+  sendControlConfigCache = {
+    value: cloneSendControlConfig(config),
+    expireAt: Date.now() + SEND_CONTROL_CACHE_TTL_MS,
+  }
+}
+
+async function ensureSendControlTable() {
+  if (ensureSendControlTablePromise) return ensureSendControlTablePromise
+
+  ensureSendControlTablePromise = (async () => {
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS notification_send_control (
+         id TINYINT UNSIGNED NOT NULL PRIMARY KEY COMMENT '固定单行配置ID',
+         send_mode VARCHAR(16) NOT NULL DEFAULT 'live' COMMENT '发送模式 live/shadow/whitelist',
+         whitelist_open_ids TEXT NULL COMMENT '白名单用户 open_id（逗号分隔）',
+         whitelist_chat_ids TEXT NULL COMMENT '白名单群 chat_id（逗号分隔）',
+         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通知发送控制配置'`,
+    )
+
+    const envConfig = getEnvSendControlConfig()
+    await pool.query(
+      `INSERT INTO notification_send_control (
+         id,
+         send_mode,
+         whitelist_open_ids,
+         whitelist_chat_ids
+       ) VALUES (1, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         send_mode = send_mode`,
+      [envConfig.mode, toCsv(envConfig.whitelistOpenIds), toCsv(envConfig.whitelistChatIds)],
+    )
+  })().finally(() => {
+    ensureSendControlTablePromise = null
+  })
+
+  return ensureSendControlTablePromise
+}
+
+async function getSendControlConfig() {
+  if (sendControlConfigCache && sendControlConfigCache.expireAt > Date.now()) {
+    return cloneSendControlConfig(sendControlConfigCache.value)
+  }
+
+  try {
+    await ensureSendControlTable()
+    const [rows] = await pool.query(
+      `SELECT send_mode, whitelist_open_ids, whitelist_chat_ids
+       FROM notification_send_control
+       WHERE id = 1
+       LIMIT 1`,
+    )
+    const row = rows?.[0] || null
+    const dbConfig = {
+      mode: normalizeSendMode(row?.send_mode),
+      whitelistOpenIds: parseCsvToSet(row?.whitelist_open_ids || ''),
+      whitelistChatIds: parseCsvToSet(row?.whitelist_chat_ids || ''),
+    }
+    setSendControlConfigCache(dbConfig)
+    return cloneSendControlConfig(dbConfig)
+  } catch (error) {
+    console.warn('读取通知发送控制配置失败，回退环境变量:', error?.message || error)
+    const fallbackConfig = getEnvSendControlConfig()
+    setSendControlConfigCache(fallbackConfig)
+    return cloneSendControlConfig(fallbackConfig)
   }
 }
 
@@ -75,8 +148,8 @@ function isTargetAllowedByWhitelist(target, sendControl) {
   return false
 }
 
-function getNotificationSendControl() {
-  const config = getSendControlConfig()
+async function getNotificationSendControl() {
+  const config = await getSendControlConfig()
   return {
     mode: config.mode,
     whitelist_open_ids: Array.from(config.whitelistOpenIds),
@@ -84,7 +157,7 @@ function getNotificationSendControl() {
   }
 }
 
-function updateNotificationSendControl(payload = {}) {
+async function updateNotificationSendControl(payload = {}) {
   const mode = normalizeSendMode(payload.mode)
   const openIds = parseCsvToSet(
     Array.isArray(payload.whitelist_open_ids)
@@ -97,17 +170,37 @@ function updateNotificationSendControl(payload = {}) {
       : payload.whitelist_chat_ids || payload.whitelistChatIds || '',
   )
 
-  sendControlOverride = {
+  const nextConfig = {
     mode,
     whitelistOpenIds: openIds,
     whitelistChatIds: chatIds,
   }
 
+  await ensureSendControlTable()
+  await pool.query(
+    `INSERT INTO notification_send_control (
+       id,
+       send_mode,
+       whitelist_open_ids,
+       whitelist_chat_ids
+     ) VALUES (1, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       send_mode = VALUES(send_mode),
+       whitelist_open_ids = VALUES(whitelist_open_ids),
+       whitelist_chat_ids = VALUES(whitelist_chat_ids)`,
+    [mode, toCsv(openIds), toCsv(chatIds)],
+  )
+  setSendControlConfigCache(nextConfig)
+
   process.env.NOTIFICATION_SEND_MODE = mode
   process.env.NOTIFICATION_TEST_OPEN_IDS = toCsv(openIds)
   process.env.NOTIFICATION_TEST_CHAT_IDS = toCsv(chatIds)
 
-  return getNotificationSendControl()
+  return {
+    mode,
+    whitelist_open_ids: Array.from(openIds),
+    whitelist_chat_ids: Array.from(chatIds),
+  }
 }
 
 function buildSkippedResult(target, reasonCode, reasonMessage) {
@@ -659,7 +752,7 @@ async function sendByFeishuApp({ title, content, targets, metadata }) {
     }
   }
 
-  const sendControl = getSendControlConfig()
+  const sendControl = await getSendControlConfig()
   if (sendControl.mode === 'shadow') {
     const skippedResults = normalizedTargets.map((target) =>
       buildSkippedResult(target, 'SEND_SKIPPED_BY_MODE', '当前为 shadow 模式，仅记录日志不发送'),

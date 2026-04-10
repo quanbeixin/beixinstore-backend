@@ -51,6 +51,72 @@ function normalizeDemandId(value) {
   return text || ''
 }
 
+function normalizePortalBaseUrl() {
+  const text = normalizeText(process.env.NOTIFICATION_PORTAL_BASE_URL, 500)
+  return text ? text.replace(/\/+$/g, '') : ''
+}
+
+function buildPortalUrl(pathname = '', query = {}) {
+  const baseUrl = normalizePortalBaseUrl()
+  if (!baseUrl) return ''
+  const path = String(pathname || '').trim()
+  if (!path.startsWith('/')) return ''
+  const queryEntries = Object.entries(query || {}).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  if (queryEntries.length === 0) return `${baseUrl}${path}`
+  const search = new URLSearchParams(queryEntries.map(([key, value]) => [key, String(value)])).toString()
+  return search ? `${baseUrl}${path}?${search}` : `${baseUrl}${path}`
+}
+
+function buildDemandDetailUrlFromEventData(eventData = {}) {
+  const demandId = normalizeDemandId(eventData?.demand_id)
+  if (!demandId) return ''
+  return buildPortalUrl(`/work-demands/${encodeURIComponent(demandId)}`)
+}
+
+function buildWorklogPageUrlFromEventData(eventData = {}) {
+  const query = {}
+  const demandId = normalizeDemandId(eventData?.demand_id)
+  const worklogId = toNullableInt(eventData?.worklog_id || eventData?.log_id)
+  const taskId = toNullableInt(eventData?.task_id)
+  if (demandId) query.demand_id = demandId
+  if (worklogId) query.worklog_id = worklogId
+  if (taskId) query.task_id = taskId
+  return buildPortalUrl('/work-logs', query)
+}
+
+function buildActionMetaByEventType(eventType, eventData = {}) {
+  const normalizedEventType = normalizeText(eventType, 64).toLowerCase()
+
+  const goFillReportEvents = new Set([
+    'worklog_create',
+    'worklog_assign',
+    'worklog_deadline_remind',
+    'task_assign',
+    'task_deadline',
+    'daily_report_notify',
+  ])
+
+  const viewDemandDetailEvents = new Set([
+    'worklog_status_change',
+    'task_complete',
+    'node_assign',
+    'node_reject',
+    'node_complete',
+  ])
+
+  if (goFillReportEvents.has(normalizedEventType)) {
+    const url = buildWorklogPageUrlFromEventData(eventData)
+    return url ? { detail_url: url, detail_action_text: '去填报' } : null
+  }
+
+  if (viewDemandDetailEvents.has(normalizedEventType)) {
+    const url = buildDemandDetailUrlFromEventData(eventData)
+    return url ? { detail_url: url, detail_action_text: '查看详情' } : null
+  }
+
+  return null
+}
+
 const BUSINESS_ROLE_RECEIVER_KEYS = new Set([
   'demand_owner',
   'node_owner',
@@ -160,11 +226,106 @@ function evaluateRuleCondition(conditionConfig, eventData) {
 function renderTemplateText(template, data) {
   const source = String(template || '')
   return source.replace(/\$\{([a-zA-Z0-9_.]+)\}/g, (_full, keyPath) => {
-    const value = getValueByPath(data, keyPath)
-    if (value === undefined || value === null) return ''
-    if (typeof value === 'object') return JSON.stringify(value)
-    return String(value)
+    const rawValue = getValueByPath(data, keyPath)
+    if (rawValue === undefined || rawValue === null) return ''
+
+    const localizedValue = localizeTemplateValueByKeyPath(keyPath, rawValue)
+    if (localizedValue === undefined || localizedValue === null) return ''
+    if (typeof localizedValue === 'object') return JSON.stringify(localizedValue)
+    return String(localizedValue)
   })
+}
+
+const STATUS_CN_MAP = Object.freeze({
+  TODO: '待处理',
+  NOT_STARTED: '未开始',
+  IN_PROGRESS: '进行中',
+  DONE: '已完成',
+  CANCELLED: '已取消',
+  RETURNED: '已退回',
+  REJECTED: '已驳回',
+  TERMINATED: '已终止',
+  NEW: '新建',
+  OPEN: '待处理',
+  PROCESSING: '处理中',
+  FIXED: '已修复',
+  CLOSED: '已关闭',
+  REOPENED: '已重开',
+  VERIFIED: '已验证',
+  RESOLVED: '已解决',
+  BLOCKED: '已阻塞',
+  ACTIVE: '活跃',
+  PENDING: '待定',
+})
+
+const SEVERITY_CN_MAP = Object.freeze({
+  CRITICAL: '严重',
+  HIGH: '高',
+  MEDIUM: '中',
+  LOW: '低',
+})
+
+const PRIORITY_CN_MAP = Object.freeze({
+  P0: '最高',
+  P1: '高',
+  P2: '中',
+  P3: '低',
+  P4: '最低',
+  HIGHEST: '最高',
+  HIGH: '高',
+  MEDIUM: '中',
+  LOW: '低',
+  LOWEST: '最低',
+})
+
+const STATUS_TEMPLATE_KEYS = new Set([
+  'status',
+  'from_status',
+  'to_status',
+  'log_status',
+  'node_status',
+  'task_status',
+  'workflow_status',
+  'demand_status',
+  'bug_status',
+])
+
+const SEVERITY_TEMPLATE_KEYS = new Set(['severity', 'severity_code'])
+const PRIORITY_TEMPLATE_KEYS = new Set(['priority', 'priority_code'])
+
+function normalizeEnumCode(value) {
+  return normalizeText(value, 64).replace(/[\s-]+/g, '_').toUpperCase()
+}
+
+function localizeEnumValue(value, map) {
+  if (typeof value !== 'string' && typeof value !== 'number') return value
+  const text = String(value).trim()
+  if (!text) return value
+
+  const exact = map[text]
+  if (exact) return exact
+
+  const normalized = normalizeEnumCode(text)
+  return map[normalized] || value
+}
+
+function localizeTemplateValueByKeyPath(keyPath, value) {
+  const leafKey = normalizeText(String(keyPath || '').split('.').pop(), 64).toLowerCase()
+  if (!leafKey) return value
+
+  if (STATUS_TEMPLATE_KEYS.has(leafKey)) {
+    return localizeEnumValue(value, STATUS_CN_MAP)
+  }
+
+  if (SEVERITY_TEMPLATE_KEYS.has(leafKey)) {
+    return localizeEnumValue(value, SEVERITY_CN_MAP)
+  }
+
+  if (PRIORITY_TEMPLATE_KEYS.has(leafKey)) {
+    return localizeEnumValue(value, PRIORITY_CN_MAP)
+  }
+
+  return value
 }
 
 function extractDailyReportMembers(eventData, groupKey) {
@@ -349,6 +510,64 @@ function dedupeTargets(targets) {
     if (!map.has(key)) map.set(key, target)
   }
   return Array.from(map.values())
+}
+
+async function resolveUserOpenId(userId) {
+  const normalizedUserId = toNullableInt(userId)
+  if (!normalizedUserId || normalizedUserId <= 0) return ''
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT feishu_open_id
+       FROM users
+       WHERE id = ?
+       LIMIT 1`,
+      [normalizedUserId],
+    )
+    return normalizeText(rows?.[0]?.feishu_open_id, 128)
+  } catch {
+    return ''
+  }
+}
+
+function excludeOperatorSelfTargets(targets, operatorContext) {
+  const inputTargets = Array.isArray(targets) ? targets : []
+  const operatorUserId = toNullableInt(operatorContext?.user_id)
+  const operatorOpenId = normalizeText(operatorContext?.open_id, 128)
+
+  if (!operatorUserId && !operatorOpenId) {
+    return {
+      targets: inputTargets,
+      removed_count: 0,
+    }
+  }
+
+  const keptTargets = []
+  let removedCount = 0
+
+  for (const target of inputTargets) {
+    if (!target || target.target_type !== 'user') {
+      keptTargets.push(target)
+      continue
+    }
+
+    const targetUserId = toNullableInt(target?.extra?.user_id)
+    const targetOpenId = normalizeText(target?.target_id, 128)
+    const isOperatorSelfByUserId = operatorUserId && targetUserId && Number(targetUserId) === Number(operatorUserId)
+    const isOperatorSelfByOpenId = operatorOpenId && targetOpenId && targetOpenId === operatorOpenId
+
+    if (isOperatorSelfByUserId || isOperatorSelfByOpenId) {
+      removedCount += 1
+      continue
+    }
+
+    keptTargets.push(target)
+  }
+
+  return {
+    targets: keptTargets,
+    removed_count: removedCount,
+  }
 }
 
 async function resolveDemandIdFromEventData(eventData) {
@@ -719,6 +938,12 @@ const NotificationEvent = {
   async processEvent({ eventType, data = {}, operatorUserId = null, targetRuleIds = [] }) {
     const normalizedEventType = normalizeText(eventType, 64)
     const businessLineId = data?.business_line_id ?? null
+    const normalizedOperatorUserId = toNullableInt(operatorUserId)
+    const operatorOpenId = normalizedOperatorUserId ? await resolveUserOpenId(normalizedOperatorUserId) : ''
+    const operatorContext = {
+      user_id: normalizedOperatorUserId,
+      open_id: operatorOpenId,
+    }
 
     const candidateRules = await listCandidateRules(normalizedEventType, businessLineId, {
       ruleIds: targetRuleIds,
@@ -734,6 +959,15 @@ const NotificationEvent = {
 
       const renderedTitle = renderTemplateText(rule.message_title || rule.rule_name || '系统通知', data)
       const renderedContent = renderTemplateText(rule.message_content || `事件 ${normalizedEventType} 已触发`, data)
+      const derivedActionMeta = buildActionMetaByEventType(normalizedEventType, data) || {}
+      const metadataDetailUrl =
+        normalizeText(data?.detail_url, 2000) ||
+        normalizeText(derivedActionMeta?.detail_url, 2000) ||
+        null
+      const metadataDetailActionText =
+        normalizeText(data?.detail_action_text, 20) ||
+        normalizeText(derivedActionMeta?.detail_action_text, 20) ||
+        '查看详情'
       let sendResponse = {
         message: 'pending',
         operator_user_id: operatorUserId,
@@ -744,15 +978,30 @@ const NotificationEvent = {
         errorCode = 'RULE_MESSAGE_EMPTY'
         errorMessage = '规则未配置可发送文案'
       } else {
-        const targets = await resolveTargets(rule, data)
+        const resolvedTargets = await resolveTargets(rule, data)
+        const filteredTargetsResult = excludeOperatorSelfTargets(resolvedTargets, operatorContext)
+        const targets = filteredTargetsResult.targets
+        const removedSelfCount = Number(filteredTargetsResult.removed_count || 0)
+
         if (targets.length === 0) {
-          status = 'failed'
-          errorCode = 'NO_RECEIVERS'
-          errorMessage = '未找到可发送接收人（缺少用户 open_id 或接收配置）'
+          if (removedSelfCount > 0) {
+            status = 'skipped'
+            errorCode = 'ONLY_SELF_RECEIVER'
+            errorMessage = '接收人仅包含触发者本人，已跳过发送'
+          } else if (normalizedEventType === 'daily_report_notify') {
+            status = 'skipped'
+            errorCode = 'NO_RECEIVERS_FOR_CATEGORY'
+            errorMessage = '当前提醒分类下无匹配接收人'
+          } else {
+            status = 'failed'
+            errorCode = 'NO_RECEIVERS'
+            errorMessage = '未找到可发送接收人（缺少用户 open_id 或接收配置）'
+          }
           sendResponse = {
             target_count: 0,
             success_count: 0,
             failure_count: 0,
+            removed_self_count: removedSelfCount,
             results: [],
           }
         } else {
@@ -765,12 +1014,15 @@ const NotificationEvent = {
               rule_id: rule.id,
               rule_code: rule.rule_code,
               event_type: normalizedEventType,
-              detail_url: normalizeText(data?.detail_url, 2000) || null,
-              detail_action_text: '查看详情',
+              detail_url: metadataDetailUrl,
+              detail_action_text: metadataDetailActionText,
             },
           })
 
           sendResponse = sendResult.response || {}
+          if (removedSelfCount > 0 && sendResponse && typeof sendResponse === 'object') {
+            sendResponse.removed_self_count = removedSelfCount
+          }
 
           if (sendResult.skipped) {
             status = 'skipped'

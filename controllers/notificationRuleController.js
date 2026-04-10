@@ -258,7 +258,7 @@ const deleteRule = async (req, res) => {
 
 const getSendControl = async (_req, res) => {
   try {
-    const config = getNotificationSendControl()
+    const config = await getNotificationSendControl()
     return sendSuccess(res, { data: config, message: '查询成功' })
   } catch (err) {
     console.error('获取通知发送控制配置失败:', err)
@@ -273,7 +273,7 @@ const updateSendControl = async (req, res) => {
   }
 
   try {
-    const updated = updateNotificationSendControl({
+    const updated = await updateNotificationSendControl({
       mode,
       whitelist_open_ids: req.body?.whitelist_open_ids,
       whitelist_chat_ids: req.body?.whitelist_chat_ids,

@@ -40,6 +40,7 @@ Current implementation now uses a single table set (legacy schema) only:
 - `notification_templates`
 - `notification_logs`
 - `notification_rule_receivers`
+- `notification_send_control` (persisted send mode + whitelist; replaces process-memory-only override)
 
 Model behavior:
 

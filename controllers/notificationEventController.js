@@ -33,9 +33,21 @@ function toNullablePositiveInt(value) {
   return num
 }
 
+function parsePositiveIntArray(values) {
+  if (!Array.isArray(values)) return []
+  return Array.from(
+    new Set(
+      values
+        .map((item) => toNullablePositiveInt(item))
+        .filter(Boolean),
+    ),
+  )
+}
+
 const receiveEvent = async (req, res) => {
   const eventType = normalizeText(req.body?.eventType, 64)
   const data = req.body?.data
+  const targetRuleIds = parsePositiveIntArray(req.body?.targetRuleIds)
 
   if (!eventType) {
     return sendError(res, { status: 400, message: 'eventType 不能为空', code: 'VALIDATION_ERROR' })
@@ -67,6 +79,7 @@ const receiveEvent = async (req, res) => {
       eventType,
       data,
       operatorUserId: req.user?.id || null,
+      targetRuleIds,
     })
 
     return sendSuccess(res, { message: '事件处理完成', data: result })
