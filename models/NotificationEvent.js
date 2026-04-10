@@ -417,6 +417,64 @@ function dedupeTargets(targets) {
   return Array.from(map.values())
 }
 
+async function resolveUserOpenId(userId) {
+  const normalizedUserId = toNullableInt(userId)
+  if (!normalizedUserId || normalizedUserId <= 0) return ''
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT feishu_open_id
+       FROM users
+       WHERE id = ?
+       LIMIT 1`,
+      [normalizedUserId],
+    )
+    return normalizeText(rows?.[0]?.feishu_open_id, 128)
+  } catch {
+    return ''
+  }
+}
+
+function excludeOperatorSelfTargets(targets, operatorContext) {
+  const inputTargets = Array.isArray(targets) ? targets : []
+  const operatorUserId = toNullableInt(operatorContext?.user_id)
+  const operatorOpenId = normalizeText(operatorContext?.open_id, 128)
+
+  if (!operatorUserId && !operatorOpenId) {
+    return {
+      targets: inputTargets,
+      removed_count: 0,
+    }
+  }
+
+  const keptTargets = []
+  let removedCount = 0
+
+  for (const target of inputTargets) {
+    if (!target || target.target_type !== 'user') {
+      keptTargets.push(target)
+      continue
+    }
+
+    const targetUserId = toNullableInt(target?.extra?.user_id)
+    const targetOpenId = normalizeText(target?.target_id, 128)
+    const isOperatorSelfByUserId = operatorUserId && targetUserId && Number(targetUserId) === Number(operatorUserId)
+    const isOperatorSelfByOpenId = operatorOpenId && targetOpenId && targetOpenId === operatorOpenId
+
+    if (isOperatorSelfByUserId || isOperatorSelfByOpenId) {
+      removedCount += 1
+      continue
+    }
+
+    keptTargets.push(target)
+  }
+
+  return {
+    targets: keptTargets,
+    removed_count: removedCount,
+  }
+}
+
 async function resolveDemandIdFromEventData(eventData) {
   const directDemandId = normalizeDemandId(eventData?.demand_id)
   if (directDemandId) return directDemandId
@@ -785,6 +843,12 @@ const NotificationEvent = {
   async processEvent({ eventType, data = {}, operatorUserId = null, targetRuleIds = [] }) {
     const normalizedEventType = normalizeText(eventType, 64)
     const businessLineId = data?.business_line_id ?? null
+    const normalizedOperatorUserId = toNullableInt(operatorUserId)
+    const operatorOpenId = normalizedOperatorUserId ? await resolveUserOpenId(normalizedOperatorUserId) : ''
+    const operatorContext = {
+      user_id: normalizedOperatorUserId,
+      open_id: operatorOpenId,
+    }
 
     const candidateRules = await listCandidateRules(normalizedEventType, businessLineId, {
       ruleIds: targetRuleIds,
@@ -819,9 +883,17 @@ const NotificationEvent = {
         errorCode = 'RULE_MESSAGE_EMPTY'
         errorMessage = '规则未配置可发送文案'
       } else {
-        const targets = await resolveTargets(rule, data)
+        const resolvedTargets = await resolveTargets(rule, data)
+        const filteredTargetsResult = excludeOperatorSelfTargets(resolvedTargets, operatorContext)
+        const targets = filteredTargetsResult.targets
+        const removedSelfCount = Number(filteredTargetsResult.removed_count || 0)
+
         if (targets.length === 0) {
-          if (normalizedEventType === 'daily_report_notify') {
+          if (removedSelfCount > 0) {
+            status = 'skipped'
+            errorCode = 'ONLY_SELF_RECEIVER'
+            errorMessage = '接收人仅包含触发者本人，已跳过发送'
+          } else if (normalizedEventType === 'daily_report_notify') {
             status = 'skipped'
             errorCode = 'NO_RECEIVERS_FOR_CATEGORY'
             errorMessage = '当前提醒分类下无匹配接收人'
@@ -834,6 +906,7 @@ const NotificationEvent = {
             target_count: 0,
             success_count: 0,
             failure_count: 0,
+            removed_self_count: removedSelfCount,
             results: [],
           }
         } else {
@@ -852,6 +925,9 @@ const NotificationEvent = {
           })
 
           sendResponse = sendResult.response || {}
+          if (removedSelfCount > 0 && sendResponse && typeof sendResponse === 'object') {
+            sendResponse.removed_self_count = removedSelfCount
+          }
 
           if (sendResult.skipped) {
             status = 'skipped'
