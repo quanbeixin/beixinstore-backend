@@ -3441,10 +3441,13 @@ const Work = {
     unifiedStatus = '',
     teamScopeUserId = null,
     dateDimension = '',
+    entryGroupMode = '',
   } = {}) {
     const offset = (page - 1) * pageSize
     const normalizedDateDimension = String(dateDimension || '').trim().toUpperCase()
     const useEntryDateDimension = normalizedDateDimension === 'ENTRY'
+    const normalizedEntryGroupMode = String(entryGroupMode || '').trim().toUpperCase()
+    const useEntryDayGroupPagination = useEntryDateDimension && normalizedEntryGroupMode === 'DAY'
     const conditions = ['1 = 1']
     const params = []
 
@@ -3609,6 +3612,183 @@ const Work = {
 
     const todayDate = getBeijingTodayDateString()
     const normalizedUnifiedStatus = String(unifiedStatus || '').trim().toUpperCase()
+
+    if (useEntryDayGroupPagination) {
+      const [allRows] = await pool.query(listBaseSql, params)
+      const normalizedRows = (allRows || []).map((row) => withUnifiedWorkStatus(row, { todayDate }))
+      const explicitEntryLogIdSet = new Set(
+        normalizedRows
+          .map((row) => Number(row?.id || 0))
+          .filter((id) => Number.isInteger(id) && id > 0),
+      )
+
+      const fallbackConditions = ['1 = 1']
+      const fallbackParams = []
+      if (userId) {
+        fallbackConditions.push('l.user_id = ?')
+        fallbackParams.push(userId)
+      }
+      if (teamScopeUserId) {
+        fallbackConditions.push(
+          `u.department_id = (
+            SELECT department_id FROM users WHERE id = ?
+          )`,
+        )
+        fallbackParams.push(teamScopeUserId)
+      }
+      if (demandId) {
+        fallbackConditions.push('l.demand_id = ?')
+        fallbackParams.push(demandId)
+      }
+      if (phaseKey) {
+        fallbackConditions.push('l.phase_key = ?')
+        fallbackParams.push(phaseKey)
+      }
+      if (itemTypeId) {
+        fallbackConditions.push('l.item_type_id = ?')
+        fallbackParams.push(itemTypeId)
+      }
+      if (startDate) {
+        fallbackConditions.push('l.log_date >= ?')
+        fallbackParams.push(startDate)
+      }
+      if (endDate) {
+        fallbackConditions.push('l.log_date <= ?')
+        fallbackParams.push(endDate)
+      }
+      if (logStatus) {
+        fallbackConditions.push(`COALESCE(l.log_status, 'IN_PROGRESS') = ?`)
+        fallbackParams.push(logStatus)
+      }
+      if (keyword) {
+        fallbackConditions.push('(l.description LIKE ? OR COALESCE(l.demand_id, \'\') LIKE ?)')
+        fallbackParams.push(`%${keyword}%`, `%${keyword}%`)
+      }
+      const fallbackWhereSql = fallbackConditions.join(' AND ')
+      const fallbackSql = `
+        SELECT
+          l.id,
+          l.user_id,
+          COALESCE(NULLIF(u.real_name, ''), u.username) AS username,
+          DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+          DATE_FORMAT(l.log_date, '%Y-%m-%d') AS entry_date,
+          l.item_type_id,
+          COALESCE(t.type_key, '-') AS item_type_key,
+          COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+          COALESCE(t.require_demand, 0) AS require_demand,
+          l.description,
+          l.personal_estimate_hours,
+          l.self_task_difficulty_code,
+          COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
+          l.actual_hours,
+          ROUND(COALESCE(l.actual_hours, 0), 1) AS log_date_actual_hours,
+          l.remaining_hours,
+          COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+          COALESCE(l.task_source, 'SELF') AS task_source,
+          l.demand_id,
+          l.phase_key,
+          l.assigned_by_user_id,
+          COALESCE(NULLIF(au.real_name, ''), au.username) AS assigned_by_name,
+          DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+          DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+          DATE_FORMAT(l.log_completed_at, '%Y-%m-%d %H:%i:%s') AS log_completed_at,
+          COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
+          d.name AS demand_name,
+          DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+          DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+        FROM work_logs l
+        INNER JOIN users u ON u.id = l.user_id
+        LEFT JOIN users au ON au.id = l.assigned_by_user_id
+        LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+        LEFT JOIN work_demands d ON d.id = l.demand_id
+        LEFT JOIN config_dict_items std
+          ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+         AND std.item_code = l.self_task_difficulty_code
+        LEFT JOIN config_dict_items pdi
+          ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+         AND pdi.item_code = l.phase_key
+        WHERE ${fallbackWhereSql}
+        ORDER BY l.log_date DESC, l.id DESC`
+
+      const [fallbackRows] = await pool.query(fallbackSql, fallbackParams)
+      const normalizedFallbackRows = (fallbackRows || [])
+        .map((row) => withUnifiedWorkStatus(row, { todayDate }))
+        .filter((row) => {
+          const logId = Number(row?.id || 0)
+          const actualHours = Number(row?.actual_hours ?? row?.log_date_actual_hours ?? 0)
+          return (
+            Number.isInteger(logId) &&
+            logId > 0 &&
+            actualHours > 0 &&
+            !explicitEntryLogIdSet.has(logId)
+          )
+        })
+
+      const mergedRows = [...normalizedRows, ...normalizedFallbackRows]
+      const candidateRows =
+        normalizedUnifiedStatus && WORK_UNIFIED_STATUS_VALUES.includes(normalizedUnifiedStatus)
+          ? mergedRows.filter(
+              (row) => String(row.unified_status || '').toUpperCase() === normalizedUnifiedStatus,
+            )
+          : mergedRows
+
+      const dayMap = new Map()
+      candidateRows.forEach((row) => {
+        const dateKey = String(row?.entry_date || row?.log_date || '').trim() || '未标注日期'
+        if (!dayMap.has(dateKey)) {
+          dayMap.set(dateKey, {
+            key: `history-day-${dateKey}`,
+            date: dateKey,
+            items: [],
+            totalItems: 0,
+            totalActualHours: 0,
+            totalEstimateHours: 0,
+            doneCount: 0,
+            inProgressCount: 0,
+            todoCount: 0,
+          })
+        }
+
+        const dayRow = dayMap.get(dateKey)
+        dayRow.items.push(row)
+        dayRow.totalItems += 1
+        dayRow.totalActualHours += Number(row?.log_date_actual_hours ?? row?.actual_hours ?? 0)
+        dayRow.totalEstimateHours += Number(row?.personal_estimate_hours ?? 0)
+
+        const normalizedStatus = String(row?.log_status || '').trim().toUpperCase()
+        if (normalizedStatus === 'DONE') dayRow.doneCount += 1
+        if (normalizedStatus === 'IN_PROGRESS') dayRow.inProgressCount += 1
+        if (normalizedStatus === 'TODO') dayRow.todoCount += 1
+      })
+
+      const dayRows = Array.from(dayMap.values())
+        .map((dayRow) => ({
+          ...dayRow,
+          totalActualHours: Number(dayRow.totalActualHours.toFixed(1)),
+          totalEstimateHours: Number(dayRow.totalEstimateHours.toFixed(1)),
+          items: (dayRow.items || [])
+            .slice()
+            .sort((a, b) => {
+              const aTime = new Date(String(a?.entry_date || a?.log_date || '')).getTime()
+              const bTime = new Date(String(b?.entry_date || b?.log_date || '')).getTime()
+              if (aTime !== bTime) return bTime - aTime
+              return Number(b?.id || 0) - Number(a?.id || 0)
+            }),
+        }))
+        .sort((a, b) => {
+          if (a.date === '未标注日期') return 1
+          if (b.date === '未标注日期') return -1
+          return String(b.date || '').localeCompare(String(a.date || ''))
+        })
+
+      const total = dayRows.length
+      const pagedRows = dayRows.slice(offset, offset + pageSize)
+      return {
+        rows: pagedRows,
+        total,
+        total_items: candidateRows.length,
+      }
+    }
 
     if (normalizedUnifiedStatus && WORK_UNIFIED_STATUS_VALUES.includes(normalizedUnifiedStatus)) {
       const [allRows] = await pool.query(listBaseSql, params)

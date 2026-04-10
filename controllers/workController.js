@@ -2502,6 +2502,8 @@ const listLogs = async (req, res) => {
       : String(unifiedStatusRaw).trim().toUpperCase()
   const dateDimensionRaw = req.query.date_dimension
   const dateDimension = String(dateDimensionRaw || '').trim().toUpperCase() === 'ENTRY' ? 'ENTRY' : ''
+  const entryGroupModeRaw = req.query.entry_group_mode
+  const entryGroupMode = String(entryGroupModeRaw || '').trim().toUpperCase() === 'DAY' ? 'DAY' : ''
   const requestedUserId = toPositiveInt(req.query.user_id)
   const requestedScope = String(req.query.scope || '').trim().toLowerCase()
   const teamScope = requestedScope === 'team'
@@ -2542,7 +2544,7 @@ const listLogs = async (req, res) => {
   const teamScopeUserId = teamScope ? req.user.id : null
 
   try {
-    const { rows, total } = await Work.listLogs({
+    const { rows, total, total_items: totalItems } = await Work.listLogs({
       page,
       pageSize,
       keyword,
@@ -2556,6 +2558,7 @@ const listLogs = async (req, res) => {
       unifiedStatus,
       teamScopeUserId,
       dateDimension,
+      entryGroupMode,
     })
 
     return res.json({
@@ -2563,6 +2566,7 @@ const listLogs = async (req, res) => {
       data: {
         list: rows,
         total,
+        total_items: Number.isFinite(Number(totalItems)) ? Number(totalItems) : undefined,
         page,
         pageSize,
       },
@@ -2583,16 +2587,18 @@ const createLog = async (req, res) => {
   ) {
     return res.status(400).json({ success: false, message: '个人填报接口不允许写入负责人预估字段' })
   }
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'actual_hours')) {
+    return res.status(400).json({
+      success: false,
+      message: 'actual_hours 不允许直接写入，请通过事项日投入明细维护实际用时',
+    })
+  }
 
   const logDate = normalizeDate(req.body.log_date)
   const itemTypeId = toPositiveInt(req.body.item_type_id)
   const description = normalizeText(req.body.description, 2000)
-  const legacyActualHours = normalizeHours(req.body.actual_hours, null)
-  const personalEstimateHours = normalizeHours(
-    req.body.personal_estimate_hours,
-    legacyActualHours !== null ? legacyActualHours : null,
-  )
-  let actualHours = normalizeHours(req.body.actual_hours, 0)
+  const personalEstimateHours = normalizeHours(req.body.personal_estimate_hours, null)
+  const actualHours = 0
   const remainingHours = normalizeHours(req.body.remaining_hours, 0)
   const demandId = normalizeDemandId(req.body.demand_id)
   let phaseKey = normalizePhaseKey(req.body.phase_key)
@@ -2625,14 +2631,6 @@ const createLog = async (req, res) => {
 
   if (personalEstimateHours === null || personalEstimateHours <= 0) {
     return res.status(400).json({ success: false, message: 'personal_estimate_hours 必须大于 0' })
-  }
-
-  if (logStatus === 'DONE' && Number(actualHours || 0) === 0) {
-    actualHours = personalEstimateHours
-  }
-
-  if (actualHours === null || actualHours < 0) {
-    return res.status(400).json({ success: false, message: 'actual_hours 不能小于 0' })
   }
 
   if (remainingHours === null || remainingHours < 0) {
@@ -2814,6 +2812,12 @@ const createOwnerAssignedLog = async (req, res) => {
   ) {
     return res.status(400).json({ success: false, message: 'Owner 指派接口不允许写入受限字段' })
   }
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'actual_hours')) {
+    return res.status(400).json({
+      success: false,
+      message: 'actual_hours 不允许直接写入，请通过事项日投入明细维护实际用时',
+    })
+  }
 
   const assigneeUserId = toPositiveInt(req.body.assignee_user_id)
   if (!assigneeUserId) {
@@ -2831,7 +2835,7 @@ const createOwnerAssignedLog = async (req, res) => {
     normalizeHours(req.body.personal_estimate_hours, null),
   )
   const personalEstimateHours = ownerEstimateHours
-  let actualHours = normalizeHours(req.body.actual_hours, 0)
+  const actualHours = 0
   const remainingHours = normalizeHours(
     req.body.remaining_hours,
     personalEstimateHours !== null ? personalEstimateHours : 0,
@@ -2953,12 +2957,6 @@ const createOwnerAssignedLog = async (req, res) => {
     logStatus = expectedStartDate > today ? 'TODO' : 'IN_PROGRESS'
   }
 
-  if (logStatus === 'DONE' && Number(actualHours || 0) === 0) {
-    actualHours = personalEstimateHours
-  }
-  if (actualHours === null || actualHours < 0) {
-    return res.status(400).json({ success: false, message: 'actual_hours 不能小于 0' })
-  }
   if (remainingHours === null || remainingHours < 0) {
     return res.status(400).json({ success: false, message: 'remaining_hours 不能小于 0' })
   }
@@ -3575,13 +3573,12 @@ const createLogDailyEntry = async (req, res) => {
   }
 
   const entryDateRaw = req.body.entry_date
-  const entryDate = normalizeDate(entryDateRaw) || formatDate(new Date())
-  if (
-    entryDateRaw !== undefined &&
-    entryDateRaw !== null &&
-    String(entryDateRaw).trim() !== '' &&
-    !normalizeDate(entryDateRaw)
-  ) {
+  const hasEntryDate = entryDateRaw !== undefined && entryDateRaw !== null && String(entryDateRaw).trim() !== ''
+  const entryDate = normalizeDate(entryDateRaw)
+  if (!hasEntryDate) {
+    return res.status(400).json({ success: false, message: 'entry_date 必填，需为 YYYY-MM-DD' })
+  }
+  if (!entryDate) {
     return res.status(400).json({ success: false, message: 'entry_date 格式错误，需为 YYYY-MM-DD' })
   }
 
@@ -3684,13 +3681,12 @@ const updateLogDailyEntry = async (req, res) => {
   }
 
   const entryDateRaw = req.body.entry_date
-  const entryDate = normalizeDate(entryDateRaw) || formatDate(new Date())
-  if (
-    entryDateRaw !== undefined &&
-    entryDateRaw !== null &&
-    String(entryDateRaw).trim() !== '' &&
-    !normalizeDate(entryDateRaw)
-  ) {
+  const hasEntryDate = entryDateRaw !== undefined && entryDateRaw !== null && String(entryDateRaw).trim() !== ''
+  const entryDate = normalizeDate(entryDateRaw)
+  if (!hasEntryDate) {
+    return res.status(400).json({ success: false, message: 'entry_date 必填，需为 YYYY-MM-DD' })
+  }
+  if (!entryDate) {
     return res.status(400).json({ success: false, message: 'entry_date 格式错误，需为 YYYY-MM-DD' })
   }
 
