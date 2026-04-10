@@ -225,9 +225,21 @@ function evaluateRuleCondition(conditionConfig, eventData) {
 
 function renderTemplateText(template, data) {
   const source = String(template || '')
-  return source.replace(/\$\{([a-zA-Z0-9_.]+)\}/g, (_full, keyPath) => {
+  const renderedByBraces = source.replace(/\$\{([a-zA-Z0-9_.]+)\}/g, (_full, keyPath) => {
     const rawValue = getValueByPath(data, keyPath)
     if (rawValue === undefined || rawValue === null) return ''
+
+    const localizedValue = localizeTemplateValueByKeyPath(keyPath, rawValue)
+    if (localizedValue === undefined || localizedValue === null) return ''
+    if (typeof localizedValue === 'object') return JSON.stringify(localizedValue)
+    return String(localizedValue)
+  })
+
+  // 兼容历史模板中遗留的 @field_key 写法（例如 @demand_id）。
+  // 未匹配到字段时保留原文，避免误替换普通文本。
+  return renderedByBraces.replace(/@([a-zA-Z0-9_.]+)/g, (full, keyPath) => {
+    const rawValue = getValueByPath(data, keyPath)
+    if (rawValue === undefined || rawValue === null) return full
 
     const localizedValue = localizeTemplateValueByKeyPath(keyPath, rawValue)
     if (localizedValue === undefined || localizedValue === null) return ''
