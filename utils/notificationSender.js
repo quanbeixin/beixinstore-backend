@@ -431,6 +431,15 @@ function buildInteractiveCardPayload({ title, markdown, actionUrl, actionText })
   }
 }
 
+function buildFallbackInteractiveCardPayload({ title, actionUrl, actionText }) {
+  return buildInteractiveCardPayload({
+    title,
+    markdown: '请点击下方按钮查看详情。',
+    actionUrl,
+    actionText,
+  })
+}
+
 async function sendFeishuMessage({ token, receiveIdType, receiveId, messageBody, timeoutMs }) {
   const url = `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(receiveIdType)}`
 
@@ -867,6 +876,20 @@ async function sendByFeishuApp({ title, content, targets, metadata }) {
         }),
         timeoutMs,
       })
+
+      if (!sent.success && targetActionUrl) {
+        sent = await sendFeishuMessage({
+          token: tokenResult.token,
+          receiveIdType,
+          receiveId: target.target_id,
+          messageBody: buildFallbackInteractiveCardPayload({
+            title,
+            actionUrl: targetActionUrl,
+            actionText: metadata?.detail_action_text || '查看详情',
+          }),
+          timeoutMs,
+        })
+      }
 
       if (!sent.success) {
         sent = await sendFeishuMessage({

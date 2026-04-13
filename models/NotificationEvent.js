@@ -53,7 +53,17 @@ function normalizeDemandId(value) {
 
 function normalizePortalBaseUrl() {
   const text = normalizeText(process.env.NOTIFICATION_PORTAL_BASE_URL, 500)
-  return text ? text.replace(/\/+$/g, '') : ''
+  if (text) return text.replace(/\/+$/g, '')
+
+  const fallbackOrigin = normalizeText(process.env.CLIENT_ORIGIN, 1000)
+  if (!fallbackOrigin) return ''
+
+  const firstOrigin = fallbackOrigin
+    .split(',')
+    .map((item) => String(item || '').trim())
+    .find(Boolean)
+
+  return firstOrigin ? firstOrigin.replace(/\/+$/g, '') : ''
 }
 
 function buildPortalUrl(pathname = '', query = {}) {
