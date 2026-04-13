@@ -10,10 +10,10 @@ const DEFAULT_PRIORITY_CODE = 'MEDIUM'
 
 const ALLOWED_TRANSITIONS = Object.freeze({
   NEW: ['PROCESSING'],
-  PROCESSING: ['FIXED', 'REOPENED'],
+  PROCESSING: ['FIXED', 'CLOSED'],
   FIXED: ['CLOSED', 'REOPENED'],
   REOPENED: ['PROCESSING'],
-  CLOSED: [],
+  CLOSED: ['REOPENED'],
 })
 
 function toPositiveInt(value) {
@@ -1004,6 +1004,59 @@ const Bug = {
     } catch (err) {
       await conn.rollback()
       throw err
+    } finally {
+      conn.release()
+    }
+  },
+
+  async addBugCommentLog(bugId, { operatorId, comment, statusCode = null } = {}) {
+    const normalizedBugId = toPositiveInt(bugId)
+    const normalizedOperatorId = toPositiveInt(operatorId)
+    const normalizedComment = normalizeNullableText(comment, 20000)
+    const preferredStatus = normalizeCode(statusCode)
+    if (!normalizedBugId || !normalizedOperatorId || !normalizedComment) {
+      return { ok: false, reason: 'invalid_input' }
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const [rows] = await conn.query(
+        `SELECT status_code
+         FROM bugs
+         WHERE id = ?
+           AND deleted_at IS NULL
+         LIMIT 1
+         FOR UPDATE`,
+        [normalizedBugId],
+      )
+      const bug = rows[0] || null
+      if (!bug) {
+        await conn.rollback()
+        return { ok: false, reason: 'not_found' }
+      }
+      const currentStatus = normalizeCode(bug.status_code) || preferredStatus
+      if (!currentStatus) {
+        await conn.rollback()
+        return { ok: false, reason: 'status_invalid' }
+      }
+
+      await conn.query(
+        `INSERT INTO bug_status_logs (
+           bug_id,
+           from_status_code,
+           to_status_code,
+           operator_id,
+           remark
+         ) VALUES (?, ?, ?, ?, ?)`,
+        [normalizedBugId, currentStatus, currentStatus, normalizedOperatorId, normalizedComment],
+      )
+
+      await conn.commit()
+      return { ok: true, statusCode: currentStatus }
+    } catch (error) {
+      await conn.rollback()
+      throw error
     } finally {
       conn.release()
     }

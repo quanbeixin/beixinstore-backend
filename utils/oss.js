@@ -144,6 +144,7 @@ function buildSignedGetObjectUrl({
   objectKey,
   expireSeconds = 300,
   securityToken = '',
+  responseContentDisposition = '',
 }) {
   const normalizedAccessKeyId = normalizeText(accessKeyId, 128)
   const normalizedAccessKeySecret = normalizeText(accessKeySecret, 256)
@@ -151,6 +152,7 @@ function buildSignedGetObjectUrl({
   const normalizedEndpoint = normalizeEndpoint(endpoint)
   const normalizedObjectKey = String(objectKey || '').replace(/^\/+/, '')
   const normalizedSecurityToken = normalizeText(securityToken, 2048)
+  const normalizedResponseContentDisposition = normalizeText(responseContentDisposition, 200)
   const expires = Math.floor(Date.now() / 1000) + Math.max(60, Number(expireSeconds) || 300)
 
   if (
@@ -163,7 +165,17 @@ function buildSignedGetObjectUrl({
     return ''
   }
 
-  const canonicalizedResource = `/${normalizedBucketName}/${normalizedObjectKey}`
+  const responseOverrides = []
+  if (normalizedResponseContentDisposition) {
+    responseOverrides.push(['response-content-disposition', normalizedResponseContentDisposition])
+  }
+  const canonicalizedOverride = responseOverrides
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('&')
+  const canonicalizedResource = canonicalizedOverride
+    ? `/${normalizedBucketName}/${normalizedObjectKey}?${canonicalizedOverride}`
+    : `/${normalizedBucketName}/${normalizedObjectKey}`
   const stringToSign = ['GET', '', '', String(expires), canonicalizedResource].join('\n')
   const signature = crypto.createHmac('sha1', normalizedAccessKeySecret).update(stringToSign).digest('base64')
 
@@ -174,6 +186,9 @@ function buildSignedGetObjectUrl({
   })
   if (normalizedSecurityToken) {
     query.set('security-token', normalizedSecurityToken)
+  }
+  if (normalizedResponseContentDisposition) {
+    query.set('response-content-disposition', normalizedResponseContentDisposition)
   }
 
   return `https://${normalizedBucketName}.${normalizedEndpoint}/${encodeObjectKeyForPath(normalizedObjectKey)}?${query.toString()}`

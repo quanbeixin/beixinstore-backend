@@ -1,7 +1,9 @@
 const Bug = require('../models/Bug')
 const Work = require('../models/Work')
+const User = require('../models/User')
 const NotificationEvent = require('../models/NotificationEvent')
 const pool = require('../utils/db')
+const { sendNotification } = require('../utils/notificationSender')
 const {
   buildOssObjectKey,
   buildPublicObjectUrl,
@@ -73,7 +75,10 @@ function getBugAttachmentSignExpireSeconds() {
   return Math.max(60, Number(process.env.BUG_ATTACHMENT_SIGN_EXPIRE_SECONDS || 1800))
 }
 
-function buildBugAttachmentDownloadUrl(attachment, { ossConfig = null, expireSeconds = 1800 } = {}) {
+function buildBugAttachmentAccessUrl(
+  attachment,
+  { ossConfig = null, expireSeconds = 1800, contentDisposition = 'inline' } = {},
+) {
   if (!attachment) return ''
   const storageProvider = normalizeCode(attachment.storage_provider)
   const objectKey = normalizeText(attachment.object_key, 500).replace(/^\/+/, '')
@@ -88,6 +93,7 @@ function buildBugAttachmentDownloadUrl(attachment, { ossConfig = null, expireSec
       objectKey,
       expireSeconds,
       securityToken: ossConfig.securityToken,
+      responseContentDisposition: contentDisposition,
     })
     if (signedUrl) return signedUrl
   }
@@ -99,7 +105,9 @@ function decorateBugAttachment(attachment, options = {}) {
   if (!attachment) return attachment
   return {
     ...attachment,
-    download_url: buildBugAttachmentDownloadUrl(attachment, options),
+    // 文件名点击预览优先使用 inline 链接；下载按钮使用 attachment 链接。
+    download_url: buildBugAttachmentAccessUrl(attachment, { ...options, contentDisposition: 'inline' }),
+    download_file_url: buildBugAttachmentAccessUrl(attachment, { ...options, contentDisposition: 'attachment' }),
   }
 }
 
@@ -656,10 +664,109 @@ const reopenBug = async (req, res) =>
   })
 
 const rejectBug = async (req, res) =>
-  handleTransition(req, res, BUG_STATUS.REOPENED, {
+  handleTransition(req, res, BUG_STATUS.CLOSED, {
     requireRemark: true,
-    successMessage: 'Bug已打回',
+    successMessage: 'Bug已打回并关闭',
   })
+
+const createBugComment = async (req, res) => {
+  const bugId = toPositiveInt(req.params.id)
+  if (!bugId) {
+    return res.status(400).json({ success: false, message: 'Bug ID 无效' })
+  }
+
+  const comment = normalizeText(req.body?.comment, 20000)
+  if (!comment) {
+    return res.status(400).json({ success: false, message: '评论内容不能为空' })
+  }
+  const mentionUserId = toPositiveInt(req.body?.mention_user_id)
+
+  try {
+    const bug = await Bug.findBugById(bugId)
+    if (!bug) {
+      return res.status(404).json({ success: false, message: 'Bug不存在' })
+    }
+
+    let mentionUser = null
+    if (mentionUserId) {
+      mentionUser = await User.findById(mentionUserId)
+      if (!mentionUser) {
+        return res.status(400).json({ success: false, message: '被@用户不存在' })
+      }
+    }
+
+    const mentionDisplayName =
+      normalizeText(mentionUser?.real_name || mentionUser?.username, 100) ||
+      (mentionUserId ? `用户${mentionUserId}` : '')
+    const statusCode = normalizeCode(bug?.status_code) || BUG_STATUS.NEW
+    const commentForHistory = mentionDisplayName ? `@${mentionDisplayName} ${comment}` : comment
+    const logResult = await Bug.addBugCommentLog(bugId, {
+      operatorId: req.user.id,
+      statusCode,
+      comment: commentForHistory,
+    })
+    if (!logResult?.ok) {
+      if (logResult?.reason === 'not_found') {
+        return res.status(404).json({ success: false, message: 'Bug不存在' })
+      }
+      return res.status(400).json({ success: false, message: '评论保存失败' })
+    }
+
+    const warnings = []
+    if (mentionUserId) {
+      const mentionOpenId = normalizeText(mentionUser?.feishu_open_id, 128)
+      if (!mentionOpenId) {
+        warnings.push('评论已记录，但被@用户未绑定飞书 OpenID，通知未发送')
+      } else {
+        const sendResult = await sendNotification({
+          channelType: 'feishu',
+          title: `Bug评论提醒 ${normalizeText(bug?.bug_no, 64) || `#${bugId}`}`,
+          content: comment,
+          targets: [
+            {
+              target_type: 'user',
+              target_id: mentionOpenId,
+              target_name: mentionDisplayName || null,
+              extra: {
+                user_id: mentionUserId,
+              },
+            },
+          ],
+          metadata: {
+            source: 'bug_comment_mention',
+            bug_id: bugId,
+            bug_no: normalizeText(bug?.bug_no, 64) || null,
+            detail_url: buildBugDetailUrl(bugId),
+            detail_action_text: '查看Bug',
+            mention_user_id: mentionUserId,
+            mention_user_name: mentionDisplayName || null,
+          },
+        })
+        if (!sendResult?.success) {
+          warnings.push(sendResult?.error_message || '评论已记录，但通知发送失败')
+        } else if (sendResult?.skipped) {
+          warnings.push(sendResult?.error_message || '评论已记录，但通知发送被策略跳过')
+        }
+      }
+    }
+
+    const latestDetail = await Bug.getBugDetail(bugId)
+    const responseData = decorateBugDetailAttachments(latestDetail, {
+      ossConfig: getOssConfigFromEnv(),
+      expireSeconds: getBugAttachmentSignExpireSeconds(),
+    })
+
+    return res.json({
+      success: true,
+      message: warnings.length ? `评论已发布（${warnings.join('；')}）` : '评论已发布',
+      data: responseData,
+      warnings,
+    })
+  } catch (err) {
+    console.error('Bug评论失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
 
 const listBugAssignees = async (req, res) => {
   try {
@@ -916,6 +1023,7 @@ module.exports = {
   verifyBug,
   reopenBug,
   rejectBug,
+  createBugComment,
   listBugAssignees,
   getDemandBugStats,
   listDemandBugs,

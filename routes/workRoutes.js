@@ -13,6 +13,7 @@ const {
   verifyBug,
   reopenBug,
   rejectBug,
+  createBugComment,
   listBugAssignees,
   getDemandBugStats,
   listDemandBugs,
@@ -110,6 +111,7 @@ router.post('/bugs/:id/fix', authMiddleware.requirePermission('bug.transition'),
 router.post('/bugs/:id/verify', authMiddleware.requirePermission('bug.transition'), verifyBug)
 router.post('/bugs/:id/reopen', authMiddleware.requirePermission('bug.transition'), reopenBug)
 router.post('/bugs/:id/reject', authMiddleware.requirePermission('bug.transition'), rejectBug)
+router.post('/bugs/:id/comments', authMiddleware.requirePermission('bug.view'), createBugComment)
 router.post('/bugs/:id/attachments/policy', authMiddleware.requirePermission('bug.update'), getBugAttachmentPolicy)
 router.post('/bugs/:id/attachments', authMiddleware.requirePermission('bug.update'), createBugAttachment)
 router.delete(
