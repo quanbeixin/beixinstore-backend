@@ -1989,9 +1989,8 @@ const updateDemand = async (req, res) => {
       return res.status(404).json({ success: false, message: '需求不存在' })
     }
 
-    if (!canEditDemand(req, existing)) {
-      return res.status(403).json({ success: false, message: '仅需求负责人或管理员可修改需求' })
-    }
+    // 需求编辑权限放开：所有已登录且具备 demand.view 的用户均可修改。
+    // 路由层已通过 authMiddleware + requirePermission('demand.view') 做基础校验。
 
     if (req.body.owner_estimate_hours !== undefined) {
       return res.status(400).json({ success: false, message: '需求池接口不允许传 owner_estimate_hours' })
