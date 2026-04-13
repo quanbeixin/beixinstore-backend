@@ -1,6 +1,7 @@
 const pool = require('../utils/db')
 const NotificationEvent = require('../models/NotificationEvent')
 const Work = require('../models/Work')
+const { getChinaBusinessDayInfo } = require('../utils/chinaBusinessCalendar')
 
 const SCHEDULE_EVENT_TYPES = new Set(['schedule_hourly', 'schedule_daily', 'schedule_weekly', 'schedule_monthly'])
 const DEADLINE_EVENT_TYPES = new Set(['worklog_deadline_remind'])
@@ -139,6 +140,13 @@ function getScheduleBucketKey(eventType, nowParts) {
   return `${y}${m}` // monthly
 }
 
+function formatNowPartsDate(nowParts) {
+  const year = String(toInt(nowParts?.year, 0)).padStart(4, '0')
+  const month = String(toInt(nowParts?.month, 0)).padStart(2, '0')
+  const day = String(toInt(nowParts?.day, 0)).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 function isScheduleMatched(eventType, scheduleConfig, nowParts) {
   const cfg = scheduleConfig && typeof scheduleConfig === 'object' ? scheduleConfig : {}
   const minute = toInt(cfg.minute, 0)
@@ -271,6 +279,14 @@ async function dispatchScheduleRules(rules) {
     const dispatchEventType = String(scheduleConfig.event_type || scheduleSceneCode).trim().toLowerCase() || scheduleSceneCode
     const timeZone = String(scheduleConfig.timezone || DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE
     const nowParts = getNowParts(timeZone)
+    const shouldSkipLegalHolidays = scheduleConfig.skip_legal_holidays !== false
+    if (shouldSkipLegalHolidays) {
+      const dateText = formatNowPartsDate(nowParts)
+      const businessDayInfo = getChinaBusinessDayInfo(dateText)
+      if (businessDayInfo?.is_holiday === true) {
+        continue
+      }
+    }
 
     if (!isScheduleMatched(scheduleSceneCode, scheduleConfig, nowParts)) continue
 
