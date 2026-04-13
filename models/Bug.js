@@ -6,6 +6,7 @@ const BUG_PRIORITY_DICT_KEY = 'bug_priority'
 const BUG_TYPE_DICT_KEY = 'bug_type'
 const BUG_PRODUCT_DICT_KEY = 'bug_product'
 const BUG_STAGE_DICT_KEY = 'bug_stage'
+const DEFAULT_PRIORITY_CODE = 'MEDIUM'
 
 const ALLOWED_TRANSITIONS = Object.freeze({
   NEW: ['PROCESSING'],
@@ -18,6 +19,16 @@ const ALLOWED_TRANSITIONS = Object.freeze({
 function toPositiveInt(value) {
   const num = Number(value)
   return Number.isInteger(num) && num > 0 ? num : null
+}
+
+function normalizePositiveIntList(values) {
+  const source = Array.isArray(values) ? values : [values]
+  const dedup = new Set()
+  source.forEach((item) => {
+    const normalized = toPositiveInt(item)
+    if (normalized) dedup.add(normalized)
+  })
+  return Array.from(dedup)
 }
 
 function normalizeText(value, maxLen = 255) {
@@ -104,8 +115,15 @@ function buildBugListWhere({
   }
 
   if (assigneeId) {
-    conditions.push('b.assignee_id = ?')
-    params.push(assigneeId)
+    conditions.push(
+      `(b.assignee_id = ? OR EXISTS (
+        SELECT 1
+        FROM bug_assignees ba_filter
+        WHERE ba_filter.bug_id = b.id
+          AND ba_filter.user_id = ?
+      ))`,
+    )
+    params.push(assigneeId, assigneeId)
   }
 
   if (reporterId) {
@@ -171,7 +189,12 @@ const DETAIL_SELECT_SQL = `
     b.verify_result,
     DATE_FORMAT(b.closed_at, '%Y-%m-%d %H:%i:%s') AS closed_at,
     DATE_FORMAT(b.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
-    DATE_FORMAT(b.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+    DATE_FORMAT(b.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+    (
+      SELECT COUNT(1)
+      FROM bug_attachments ba_count
+      WHERE ba_count.bug_id = b.id
+    ) AS attachment_count
   FROM bugs b
   LEFT JOIN config_dict_items severity
     ON severity.type_key = '${BUG_SEVERITY_DICT_KEY}'
@@ -290,6 +313,251 @@ const Bug = {
     }))
   },
 
+  async listBugAssigneeMembers(bugIds = [], conn = pool) {
+    const normalizedBugIds = Array.from(
+      new Set(
+        (bugIds || [])
+          .map((item) => toPositiveInt(item))
+          .filter((item) => Number.isInteger(item) && item > 0),
+      ),
+    )
+    if (normalizedBugIds.length === 0) return new Map()
+
+    let rows = []
+    try {
+      const [queryRows] = await conn.query(
+        `SELECT
+           ba.bug_id,
+           ba.user_id,
+           ba.is_primary,
+           COALESCE(NULLIF(u.real_name, ''), u.username) AS user_name
+         FROM bug_assignees ba
+         LEFT JOIN users u ON u.id = ba.user_id
+         WHERE ba.bug_id IN (${normalizedBugIds.map(() => '?').join(', ')})
+         ORDER BY ba.bug_id ASC, ba.is_primary DESC, ba.id ASC`,
+        normalizedBugIds,
+      )
+      rows = queryRows || []
+    } catch (error) {
+      if (error?.code !== 'ER_NO_SUCH_TABLE') throw error
+      return new Map()
+    }
+
+    const assigneeMap = new Map()
+    ;(rows || []).forEach((row) => {
+      const bugId = toPositiveInt(row?.bug_id)
+      const userId = toPositiveInt(row?.user_id)
+      if (!bugId || !userId) return
+      if (!assigneeMap.has(bugId)) assigneeMap.set(bugId, [])
+      assigneeMap.get(bugId).push({
+        id: userId,
+        name: row?.user_name || `用户${userId}`,
+        is_primary: Number(row?.is_primary || 0) === 1,
+      })
+    })
+
+    return assigneeMap
+  },
+
+  async listBugWatcherMembers(bugIds = [], conn = pool) {
+    const normalizedBugIds = Array.from(
+      new Set(
+        (bugIds || [])
+          .map((item) => toPositiveInt(item))
+          .filter((item) => Number.isInteger(item) && item > 0),
+      ),
+    )
+    if (normalizedBugIds.length === 0) return new Map()
+
+    let rows = []
+    try {
+      const [queryRows] = await conn.query(
+        `SELECT
+           bw.bug_id,
+           bw.user_id,
+           COALESCE(NULLIF(u.real_name, ''), u.username) AS user_name
+         FROM bug_watchers bw
+         LEFT JOIN users u ON u.id = bw.user_id
+         WHERE bw.bug_id IN (${normalizedBugIds.map(() => '?').join(', ')})
+         ORDER BY bw.bug_id ASC, bw.id ASC`,
+        normalizedBugIds,
+      )
+      rows = queryRows || []
+    } catch (error) {
+      if (error?.code !== 'ER_NO_SUCH_TABLE') throw error
+      return new Map()
+    }
+
+    const watcherMap = new Map()
+    ;(rows || []).forEach((row) => {
+      const bugId = toPositiveInt(row?.bug_id)
+      const userId = toPositiveInt(row?.user_id)
+      if (!bugId || !userId) return
+      if (!watcherMap.has(bugId)) watcherMap.set(bugId, [])
+      watcherMap.get(bugId).push({
+        id: userId,
+        name: row?.user_name || `用户${userId}`,
+      })
+    })
+
+    return watcherMap
+  },
+
+  decorateBugRowsWithAssignees(rows = [], assigneeMap = new Map()) {
+    return (rows || []).map((row) => {
+      const bugId = toPositiveInt(row?.id)
+      const members = (bugId && assigneeMap.get(bugId)) || []
+      const uniqueMembers = []
+      const seenUserIds = new Set()
+      members.forEach((item) => {
+        const userId = toPositiveInt(item?.id)
+        if (!userId || seenUserIds.has(userId)) return
+        seenUserIds.add(userId)
+        uniqueMembers.push({
+          id: userId,
+          name: item?.name || `用户${userId}`,
+          is_primary: Number(item?.is_primary || 0) === 1,
+        })
+      })
+
+      let assigneeIds = uniqueMembers.map((item) => item.id)
+      let assigneeList = uniqueMembers
+
+      const legacyAssigneeId = toPositiveInt(row?.assignee_id)
+      const legacyAssigneeName = row?.assignee_name || (legacyAssigneeId ? `用户${legacyAssigneeId}` : '')
+      if (assigneeIds.length === 0 && legacyAssigneeId) {
+        assigneeIds = [legacyAssigneeId]
+        assigneeList = [
+          {
+            id: legacyAssigneeId,
+            name: legacyAssigneeName || `用户${legacyAssigneeId}`,
+            is_primary: true,
+          },
+        ]
+      }
+
+      const assigneeNames = assigneeList.map((item) => item.name).filter(Boolean)
+      const primaryAssignee =
+        assigneeList.find((item) => item.is_primary) ||
+        assigneeList.find((item) => item.id === legacyAssigneeId) ||
+        assigneeList[0] ||
+        null
+
+      return {
+        ...row,
+        assignee_id: primaryAssignee?.id || legacyAssigneeId || null,
+        assignee_name: primaryAssignee?.name || legacyAssigneeName || '',
+        assignee_ids: assigneeIds,
+        assignee_names: assigneeNames.join('、'),
+        assignees: assigneeList,
+      }
+    })
+  },
+
+  decorateBugRowsWithWatchers(rows = [], watcherMap = new Map()) {
+    return (rows || []).map((row) => {
+      const bugId = toPositiveInt(row?.id)
+      const members = (bugId && watcherMap.get(bugId)) || []
+      const uniqueMembers = []
+      const seenUserIds = new Set()
+      members.forEach((item) => {
+        const userId = toPositiveInt(item?.id)
+        if (!userId || seenUserIds.has(userId)) return
+        seenUserIds.add(userId)
+        uniqueMembers.push({
+          id: userId,
+          name: item?.name || `用户${userId}`,
+        })
+      })
+
+      const watcherIds = uniqueMembers.map((item) => item.id)
+      const watcherNames = uniqueMembers.map((item) => item.name).filter(Boolean)
+
+      return {
+        ...row,
+        watcher_ids: watcherIds,
+        watcher_names: watcherNames.join('、'),
+        watchers: uniqueMembers,
+      }
+    })
+  },
+
+  async syncBugAssignees(conn, bugId, assigneeIds = []) {
+    const normalizedBugId = toPositiveInt(bugId)
+    const normalizedAssigneeIds = normalizePositiveIntList(assigneeIds)
+    if (!normalizedBugId || normalizedAssigneeIds.length === 0) {
+      throw new Error('同步Bug处理人失败：处理人不能为空')
+    }
+
+    try {
+      await conn.query('DELETE FROM bug_assignees WHERE bug_id = ?', [normalizedBugId])
+      for (let i = 0; i < normalizedAssigneeIds.length; i += 1) {
+        const userId = normalizedAssigneeIds[i]
+        await conn.query(
+          `INSERT INTO bug_assignees (bug_id, user_id, is_primary)
+           VALUES (?, ?, ?)`,
+          [normalizedBugId, userId, i === 0 ? 1 : 0],
+        )
+      }
+    } catch (error) {
+      if (error?.code !== 'ER_NO_SUCH_TABLE') throw error
+      throw new Error('请先执行 bug_multi_assignees 数据库迁移后再使用多人处理人')
+    }
+  },
+
+  async syncBugWatchers(conn, bugId, watcherIds = []) {
+    const normalizedBugId = toPositiveInt(bugId)
+    if (!normalizedBugId) {
+      throw new Error('同步Bug关注人失败：参数无效')
+    }
+    const normalizedWatcherIds = normalizePositiveIntList(watcherIds)
+
+    try {
+      await conn.query('DELETE FROM bug_watchers WHERE bug_id = ?', [normalizedBugId])
+      for (const userId of normalizedWatcherIds) {
+        await conn.query(
+          `INSERT INTO bug_watchers (bug_id, user_id)
+           VALUES (?, ?)`,
+          [normalizedBugId, userId],
+        )
+      }
+    } catch (error) {
+      if (error?.code !== 'ER_NO_SUCH_TABLE') throw error
+      throw new Error('请先执行 bug_watchers 数据库迁移后再使用关注人（数据库迁移）')
+    }
+  },
+
+  async isBugAssignee(bugId, userId) {
+    const normalizedBugId = toPositiveInt(bugId)
+    const normalizedUserId = toPositiveInt(userId)
+    if (!normalizedBugId || !normalizedUserId) return false
+
+    try {
+      const [[relationRow]] = await pool.query(
+        `SELECT 1 AS hit
+         FROM bug_assignees
+         WHERE bug_id = ?
+           AND user_id = ?
+         LIMIT 1`,
+        [normalizedBugId, normalizedUserId],
+      )
+      if (relationRow?.hit) return true
+    } catch (error) {
+      if (error?.code !== 'ER_NO_SUCH_TABLE') throw error
+    }
+
+    const [[legacyRow]] = await pool.query(
+      `SELECT 1 AS hit
+       FROM bugs
+       WHERE id = ?
+         AND assignee_id = ?
+         AND deleted_at IS NULL
+       LIMIT 1`,
+      [normalizedBugId, normalizedUserId],
+    )
+    return Boolean(legacyRow?.hit)
+  },
+
   async listBugs({
     page = 1,
     pageSize = 20,
@@ -342,6 +610,14 @@ const Bug = {
       [...params, normalizedPageSize, offset],
     )
 
+    const rowIds = (rows || []).map((item) => item.id)
+    const [assigneeMap, watcherMap] = await Promise.all([
+      this.listBugAssigneeMembers(rowIds),
+      this.listBugWatcherMembers(rowIds),
+    ])
+    const rowsWithAssignees = this.decorateBugRowsWithAssignees(rows || [], assigneeMap)
+    const decoratedRows = this.decorateBugRowsWithWatchers(rowsWithAssignees, watcherMap)
+
     const [[totalRow]] = await pool.query(
       `SELECT COUNT(*) AS total
        FROM bugs b
@@ -350,7 +626,7 @@ const Bug = {
     )
 
     return {
-      rows: rows || [],
+      rows: decoratedRows,
       total: Number(totalRow?.total || 0),
       page: normalizedPage,
       pageSize: normalizedPageSize,
@@ -367,7 +643,14 @@ const Bug = {
        LIMIT 1`,
       [bugId],
     )
-    return rows[0] || null
+    const firstRow = rows[0] || null
+    if (!firstRow) return null
+    const [assigneeMap, watcherMap] = await Promise.all([
+      this.listBugAssigneeMembers([bugId]),
+      this.listBugWatcherMembers([bugId]),
+    ])
+    const withAssignees = this.decorateBugRowsWithAssignees([firstRow], assigneeMap)
+    return this.decorateBugRowsWithWatchers(withAssignees, watcherMap)[0] || null
   },
 
   async listBugStatusLogs(bugId) {
@@ -456,10 +739,22 @@ const Bug = {
     demandId = null,
     reporterId,
     assigneeId,
+    assigneeIds = [],
+    watcherIds = [],
   }) {
     const conn = await pool.getConnection()
     try {
       await conn.beginTransaction()
+
+      const normalizedPrimaryAssigneeId = toPositiveInt(assigneeId) || null
+      const normalizedAssigneeIds = normalizePositiveIntList(assigneeIds)
+      if (normalizedPrimaryAssigneeId && !normalizedAssigneeIds.includes(normalizedPrimaryAssigneeId)) {
+        normalizedAssigneeIds.unshift(normalizedPrimaryAssigneeId)
+      }
+      const finalAssigneeIds = normalizedAssigneeIds.length > 0 ? normalizedAssigneeIds : [normalizedPrimaryAssigneeId]
+      if (!toPositiveInt(finalAssigneeIds[0])) {
+        throw new Error('处理人不能为空')
+      }
 
       const [result] = await conn.query(
         `INSERT INTO bugs (
@@ -483,7 +778,7 @@ const Bug = {
           normalizeText(title, 200),
           normalizeText(description, 20000),
           normalizeCode(severityCode),
-          normalizeCode(priorityCode),
+          normalizeCode(priorityCode) || DEFAULT_PRIORITY_CODE,
           normalizeCode(bugTypeCode),
           normalizeCode(productCode),
           normalizeCode(issueStage),
@@ -493,13 +788,15 @@ const Bug = {
           normalizeNullableText(environmentInfo, 20000),
           normalizeDemandId(demandId),
           toPositiveInt(reporterId),
-          toPositiveInt(assigneeId),
+          toPositiveInt(finalAssigneeIds[0]),
         ],
       )
 
       const bugId = Number(result.insertId)
       const bugNo = normalizeBugNo(bugId)
       await conn.query('UPDATE bugs SET bug_no = ? WHERE id = ?', [bugNo, bugId])
+      await this.syncBugAssignees(conn, bugId, finalAssigneeIds)
+      await this.syncBugWatchers(conn, bugId, watcherIds)
 
       await conn.query(
         `INSERT INTO bug_status_logs (
@@ -538,53 +835,85 @@ const Bug = {
       environmentInfo = null,
       demandId = null,
       assigneeId,
+      assigneeIds = [],
+      watcherIds = [],
       fixSolution,
       verifyResult,
     },
   ) {
     const normalizedBugId = toPositiveInt(bugId)
     if (!normalizedBugId) return 0
-    const [result] = await pool.query(
-      `UPDATE bugs
-       SET
-         title = ?,
-         description = ?,
-         severity_code = ?,
-         priority_code = ?,
-         bug_type_code = ?,
-         product_code = ?,
-         issue_stage = ?,
-         reproduce_steps = ?,
-         expected_result = ?,
-         actual_result = ?,
-         environment_info = ?,
-         demand_id = ?,
-         assignee_id = ?,
-         fix_solution = ?,
-         verify_result = ?,
-         updated_at = NOW()
-       WHERE id = ?
-         AND deleted_at IS NULL`,
-      [
-        normalizeText(title, 200),
-        normalizeText(description, 20000),
-        normalizeCode(severityCode),
-        normalizeCode(priorityCode),
-        normalizeCode(bugTypeCode),
-        normalizeCode(productCode),
-        normalizeCode(issueStage),
-        normalizeText(reproduceSteps, 20000),
-        normalizeText(expectedResult, 20000),
-        normalizeText(actualResult, 20000),
-        normalizeNullableText(environmentInfo, 20000),
-        normalizeDemandId(demandId),
-        toPositiveInt(assigneeId),
-        normalizeNullableText(fixSolution, 20000),
-        normalizeNullableText(verifyResult, 20000),
-        normalizedBugId,
-      ],
-    )
-    return Number(result.affectedRows || 0)
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const normalizedPrimaryAssigneeId = toPositiveInt(assigneeId) || null
+      const normalizedAssigneeIds = normalizePositiveIntList(assigneeIds)
+      if (normalizedPrimaryAssigneeId && !normalizedAssigneeIds.includes(normalizedPrimaryAssigneeId)) {
+        normalizedAssigneeIds.unshift(normalizedPrimaryAssigneeId)
+      }
+      const finalAssigneeIds = normalizedAssigneeIds.length > 0 ? normalizedAssigneeIds : [normalizedPrimaryAssigneeId]
+      if (!toPositiveInt(finalAssigneeIds[0])) {
+        throw new Error('处理人不能为空')
+      }
+
+      const [result] = await conn.query(
+        `UPDATE bugs
+         SET
+           title = ?,
+           description = ?,
+           severity_code = ?,
+           priority_code = COALESCE(?, priority_code),
+           bug_type_code = ?,
+           product_code = ?,
+           issue_stage = ?,
+           reproduce_steps = ?,
+           expected_result = ?,
+           actual_result = ?,
+           environment_info = ?,
+           demand_id = ?,
+           assignee_id = ?,
+           fix_solution = ?,
+           verify_result = ?,
+           updated_at = NOW()
+         WHERE id = ?
+           AND deleted_at IS NULL`,
+        [
+          normalizeText(title, 200),
+          normalizeText(description, 20000),
+          normalizeCode(severityCode),
+          normalizeCode(priorityCode),
+          normalizeCode(bugTypeCode),
+          normalizeCode(productCode),
+          normalizeCode(issueStage),
+          normalizeText(reproduceSteps, 20000),
+          normalizeText(expectedResult, 20000),
+          normalizeText(actualResult, 20000),
+          normalizeNullableText(environmentInfo, 20000),
+          normalizeDemandId(demandId),
+          toPositiveInt(finalAssigneeIds[0]),
+          normalizeNullableText(fixSolution, 20000),
+          normalizeNullableText(verifyResult, 20000),
+          normalizedBugId,
+        ],
+      )
+
+      const affectedRows = Number(result.affectedRows || 0)
+      if (affectedRows <= 0) {
+        await conn.rollback()
+        return 0
+      }
+
+      await this.syncBugAssignees(conn, normalizedBugId, finalAssigneeIds)
+      await this.syncBugWatchers(conn, normalizedBugId, watcherIds)
+      await conn.commit()
+      return affectedRows
+    } catch (err) {
+      await conn.rollback()
+      throw err
+    } finally {
+      conn.release()
+    }
   },
 
   async deleteBug(bugId) {

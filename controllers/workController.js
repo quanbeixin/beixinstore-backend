@@ -1727,6 +1727,8 @@ const createDemand = async (req, res) => {
   const docLink = normalizeText(req.body.doc_link, 500)
   const uiDesignLink = normalizeText(req.body.ui_design_link, 500)
   const testCaseLink = normalizeText(req.body.test_case_link, 500)
+  const codeBranch = normalizeText(req.body.code_branch, 255)
+  const releaseNote = normalizeText(req.body.release_note, 2000)
   const expectedReleaseDateRaw = req.body.expected_release_date
   const expectedReleaseDate = normalizeDate(expectedReleaseDateRaw)
   const status = normalizeStatus(req.body.status)
@@ -1865,6 +1867,8 @@ const createDemand = async (req, res) => {
       docLink: docLink || null,
       uiDesignLink: uiDesignLink || null,
       testCaseLink: testCaseLink || null,
+      codeBranch: codeBranch || null,
+      releaseNote: releaseNote || null,
       businessGroupCode,
       expectedReleaseDate: expectedReleaseDate || null,
       status,
@@ -2133,6 +2137,14 @@ const updateDemand = async (req, res) => {
       req.body.test_case_link === undefined
         ? existing.test_case_link
         : normalizeText(req.body.test_case_link, 500) || null
+    const codeBranch =
+      req.body.code_branch === undefined
+        ? existing.code_branch
+        : normalizeText(req.body.code_branch, 255) || null
+    const releaseNote =
+      req.body.release_note === undefined
+        ? existing.release_note
+        : normalizeText(req.body.release_note, 2000) || null
     let expectedReleaseDate = existing.expected_release_date || null
     if (req.body.expected_release_date !== undefined) {
       const raw = req.body.expected_release_date
@@ -2215,6 +2227,8 @@ const updateDemand = async (req, res) => {
       docLink,
       uiDesignLink,
       testCaseLink,
+      codeBranch,
+      releaseNote,
       businessGroupCode,
       expectedReleaseDate,
       status,

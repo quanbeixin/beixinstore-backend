@@ -41,6 +41,18 @@ function toNullableInt(value) {
   return num
 }
 
+function toNullableIntList(value) {
+  if (value === undefined || value === null || value === '') return []
+  const source = Array.isArray(value) ? value : [value]
+  return Array.from(
+    new Set(
+      source
+        .map((item) => toNullableInt(item))
+        .filter((item) => Number.isInteger(item) && item > 0),
+    ),
+  )
+}
+
 function parseJsonArray(value, fallback = []) {
   const parsed = safeJsonParse(value, fallback)
   return Array.isArray(parsed) ? parsed : fallback
@@ -121,6 +133,7 @@ const BUSINESS_ROLE_RECEIVER_KEYS = new Set([
   'demand_owner',
   'node_owner',
   'node_assignee',
+  'bug_watcher',
   'daily_report_team_all',
   'daily_report_scheduled',
   'daily_report_filled',
@@ -677,13 +690,37 @@ async function resolveBusinessRoleUserIds(roleKeys, eventData) {
     }
 
     if (key === 'node_owner' || key === 'node_assignee') {
+      const dynamicAssigneeIds = [
+        ...toNullableIntList(getValueByPath(eventData, 'assignee_ids')),
+        ...toNullableIntList(getValueByPath(eventData, 'to_assignee_ids')),
+      ]
+      if (dynamicAssigneeIds.length > 0) {
+        userIds.push(...dynamicAssigneeIds)
+        continue
+      }
+
       const nodeOwnerUserId =
         toNullableInt(getValueByPath(eventData, 'assignee_id')) ||
         toNullableInt(getValueByPath(eventData, 'to_assignee_id')) ||
         toNullableInt(getValueByPath(eventData, 'task_assignee_id'))
-      if (nodeOwnerUserId) {
-        userIds.push(nodeOwnerUserId)
+      if (nodeOwnerUserId) userIds.push(nodeOwnerUserId)
+      continue
+    }
+
+    if (key === 'bug_watcher') {
+      const watcherIds = [
+        ...toNullableIntList(getValueByPath(eventData, 'watcher_ids')),
+        ...toNullableIntList(getValueByPath(eventData, 'to_watcher_ids')),
+      ]
+      if (watcherIds.length > 0) {
+        userIds.push(...watcherIds)
+        continue
       }
+
+      const watcherId =
+        toNullableInt(getValueByPath(eventData, 'watcher_id')) ||
+        toNullableInt(getValueByPath(eventData, 'to_watcher_id'))
+      if (watcherId) userIds.push(watcherId)
       continue
     }
 
@@ -748,8 +785,9 @@ async function resolveTargetsFromRuleConfig(rule, eventData) {
 
   if (rule.receiver_type === 'field') {
     const path = normalizeText(config.user_id_field, 128)
-    const dynamicUserId = toNullableInt(getValueByPath(eventData, path || 'operator_id'))
-    if (dynamicUserId) userIds.push(dynamicUserId)
+    const dynamicValue = getValueByPath(eventData, path || 'operator_id')
+    const dynamicUserIds = toNullableIntList(dynamicValue)
+    if (dynamicUserIds.length > 0) userIds.push(...dynamicUserIds)
   }
 
   const businessRoleUserIds = await resolveBusinessRoleUserIds(roleKeys, eventData)

@@ -136,6 +136,49 @@ function buildPublicObjectUrl({ publicBaseUrl, objectKey }) {
   return `${publicBaseUrl}/${encoded}`
 }
 
+function buildSignedGetObjectUrl({
+  accessKeyId,
+  accessKeySecret,
+  bucketName,
+  endpoint,
+  objectKey,
+  expireSeconds = 300,
+  securityToken = '',
+}) {
+  const normalizedAccessKeyId = normalizeText(accessKeyId, 128)
+  const normalizedAccessKeySecret = normalizeText(accessKeySecret, 256)
+  const normalizedBucketName = normalizeText(bucketName, 100)
+  const normalizedEndpoint = normalizeEndpoint(endpoint)
+  const normalizedObjectKey = String(objectKey || '').replace(/^\/+/, '')
+  const normalizedSecurityToken = normalizeText(securityToken, 2048)
+  const expires = Math.floor(Date.now() / 1000) + Math.max(60, Number(expireSeconds) || 300)
+
+  if (
+    !normalizedAccessKeyId ||
+    !normalizedAccessKeySecret ||
+    !normalizedBucketName ||
+    !normalizedEndpoint ||
+    !normalizedObjectKey
+  ) {
+    return ''
+  }
+
+  const canonicalizedResource = `/${normalizedBucketName}/${normalizedObjectKey}`
+  const stringToSign = ['GET', '', '', String(expires), canonicalizedResource].join('\n')
+  const signature = crypto.createHmac('sha1', normalizedAccessKeySecret).update(stringToSign).digest('base64')
+
+  const query = new URLSearchParams({
+    OSSAccessKeyId: normalizedAccessKeyId,
+    Expires: String(expires),
+    Signature: signature,
+  })
+  if (normalizedSecurityToken) {
+    query.set('security-token', normalizedSecurityToken)
+  }
+
+  return `https://${normalizedBucketName}.${normalizedEndpoint}/${encodeObjectKeyForPath(normalizedObjectKey)}?${query.toString()}`
+}
+
 function encodeObjectKeyForPath(objectKey = '') {
   return String(objectKey || '')
     .split('/')
@@ -250,6 +293,7 @@ function deleteOssObject({
 module.exports = {
   buildOssObjectKey,
   buildPublicObjectUrl,
+  buildSignedGetObjectUrl,
   createPostPolicy,
   deleteOssObject,
   getOssConfigFromEnv,

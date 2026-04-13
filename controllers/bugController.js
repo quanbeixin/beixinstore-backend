@@ -5,6 +5,7 @@ const pool = require('../utils/db')
 const {
   buildOssObjectKey,
   buildPublicObjectUrl,
+  buildSignedGetObjectUrl,
   createPostPolicy,
   deleteOssObject,
   getOssConfigFromEnv,
@@ -22,6 +23,16 @@ const BUG_STATUS = Object.freeze({
 function toPositiveInt(value) {
   const num = Number(value)
   return Number.isInteger(num) && num > 0 ? num : null
+}
+
+function normalizePositiveIntList(values) {
+  const source = Array.isArray(values) ? values : [values]
+  const dedup = new Set()
+  source.forEach((item) => {
+    const normalized = toPositiveInt(item)
+    if (normalized) dedup.add(normalized)
+  })
+  return Array.from(dedup)
 }
 
 function normalizeText(value, maxLen = 500) {
@@ -58,6 +69,96 @@ function normalizeDate(value) {
   return text
 }
 
+function getBugAttachmentSignExpireSeconds() {
+  return Math.max(60, Number(process.env.BUG_ATTACHMENT_SIGN_EXPIRE_SECONDS || 1800))
+}
+
+function buildBugAttachmentDownloadUrl(attachment, { ossConfig = null, expireSeconds = 1800 } = {}) {
+  if (!attachment) return ''
+  const storageProvider = normalizeCode(attachment.storage_provider)
+  const objectKey = normalizeText(attachment.object_key, 500).replace(/^\/+/, '')
+  const objectUrl = normalizeText(attachment.object_url, 1000)
+
+  if (storageProvider === 'ALIYUN_OSS' && ossConfig && objectKey) {
+    const signedUrl = buildSignedGetObjectUrl({
+      accessKeyId: ossConfig.accessKeyId,
+      accessKeySecret: ossConfig.accessKeySecret,
+      bucketName: normalizeText(attachment.bucket_name, 100) || ossConfig.bucketName,
+      endpoint: ossConfig.endpoint,
+      objectKey,
+      expireSeconds,
+      securityToken: ossConfig.securityToken,
+    })
+    if (signedUrl) return signedUrl
+  }
+
+  return objectUrl || ''
+}
+
+function decorateBugAttachment(attachment, options = {}) {
+  if (!attachment) return attachment
+  return {
+    ...attachment,
+    download_url: buildBugAttachmentDownloadUrl(attachment, options),
+  }
+}
+
+function decorateBugDetailAttachments(detail, options = {}) {
+  if (!detail || !Array.isArray(detail.attachments)) return detail
+  return {
+    ...detail,
+    attachments: detail.attachments.map((item) => decorateBugAttachment(item, options)),
+  }
+}
+
+function extractBugAssigneeList(bug) {
+  const list = []
+  const seen = new Set()
+  const source = Array.isArray(bug?.assignees) ? bug.assignees : []
+
+  source.forEach((item) => {
+    const userId = toPositiveInt(item?.id || item?.user_id)
+    if (!userId || seen.has(userId)) return
+    seen.add(userId)
+    list.push({
+      id: userId,
+      name:
+        normalizeText(item?.name || item?.user_name || '', 100) ||
+        `用户${userId}`,
+    })
+  })
+
+  const legacyAssigneeId = toPositiveInt(bug?.assignee_id)
+  if (legacyAssigneeId && !seen.has(legacyAssigneeId)) {
+    list.unshift({
+      id: legacyAssigneeId,
+      name: normalizeText(bug?.assignee_name, 100) || `用户${legacyAssigneeId}`,
+    })
+  }
+
+  return list
+}
+
+function extractBugWatcherList(bug) {
+  const list = []
+  const seen = new Set()
+  const source = Array.isArray(bug?.watchers) ? bug.watchers : []
+
+  source.forEach((item) => {
+    const userId = toPositiveInt(item?.id || item?.user_id)
+    if (!userId || seen.has(userId)) return
+    seen.add(userId)
+    list.push({
+      id: userId,
+      name:
+        normalizeText(item?.name || item?.user_name || '', 100) ||
+        `用户${userId}`,
+    })
+  })
+
+  return list
+}
+
 async function resolveBusinessLineId(demandId) {
   const normalizedDemandId = normalizeDemandId(demandId)
   if (!normalizedDemandId) return null
@@ -84,6 +185,8 @@ async function resolveBusinessLineId(demandId) {
 async function buildBugNotificationData({ bug, req, extra = {} }) {
   const businessLineId = await resolveBusinessLineId(bug?.demand_id)
   const bugId = Number(bug?.id || 0) || null
+  const assigneeList = extractBugAssigneeList(bug)
+  const watcherList = extractBugWatcherList(bug)
   const operatorName =
     normalizeText(req?.user?.real_name || '', 100) ||
     normalizeText(req?.user?.username || '', 100) ||
@@ -96,12 +199,19 @@ async function buildBugNotificationData({ bug, req, extra = {} }) {
     bug_title: normalizeText(bug?.title, 200) || '',
     bug_content: normalizeText(bug?.description, 20000) || '',
     severity: normalizeText(bug?.severity_name || bug?.severity_code, 64) || '',
-    priority: normalizeText(bug?.priority_name || bug?.priority_code, 64) || '',
     status: normalizeText(bug?.status_name || bug?.status_code, 64) || '',
     reporter_id: toPositiveInt(bug?.reporter_id),
     reporter_name: normalizeText(bug?.reporter_name, 100) || '',
     assignee_id: toPositiveInt(bug?.assignee_id),
     assignee_name: normalizeText(bug?.assignee_name, 100) || '',
+    assignee_ids: assigneeList.map((item) => item.id),
+    assignee_names:
+      normalizeText(bug?.assignee_names, 500) ||
+      assigneeList.map((item) => item.name).join('、'),
+    watcher_ids: watcherList.map((item) => item.id),
+    watcher_names:
+      normalizeText(bug?.watcher_names, 500) ||
+      watcherList.map((item) => item.name).join('、'),
     operator_id: toPositiveInt(req?.user?.id),
     operator_name: operatorName,
     demand_id: normalizeText(bug?.demand_id, 64) || null,
@@ -146,6 +256,14 @@ async function canManageBug(req, bug) {
   const currentUserId = Number(req.user?.id || 0)
   if (currentUserId > 0 && currentUserId === Number(bug.reporter_id || 0)) return true
   if (currentUserId > 0 && currentUserId === Number(bug.assignee_id || 0)) return true
+  if (
+    currentUserId > 0 &&
+    Array.isArray(bug.assignee_ids) &&
+    bug.assignee_ids.some((item) => Number(item) === currentUserId)
+  ) {
+    return true
+  }
+  if (currentUserId > 0 && toPositiveInt(bug.id) && (await Bug.isBugAssignee(bug.id, currentUserId))) return true
   if (currentUserId > 0 && currentUserId === Number(bug.demand_owner_user_id || 0)) return true
   if (currentUserId > 0 && currentUserId === Number(bug.demand_project_manager_id || 0)) return true
 
@@ -162,7 +280,6 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
   const title = normalizeText(payload.title, 200)
   const description = normalizeText(payload.description, 20000)
   const severityCode = normalizeCode(payload.severity_code)
-  const priorityCode = normalizeCode(payload.priority_code)
   const bugTypeCode = normalizeCode(payload.bug_type_code)
   const productCode = normalizeCode(payload.product_code)
   const issueStage = normalizeCode(payload.issue_stage)
@@ -171,14 +288,21 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
   const actualResult = normalizeText(payload.actual_result, 20000)
   const environmentInfo = normalizeText(payload.environment_info, 20000)
   const demandId = normalizeDemandId(payload.demand_id)
-  const assigneeId = toPositiveInt(payload.assignee_id)
+  const assigneeIds = normalizePositiveIntList(payload.assignee_ids)
+  const legacyAssigneeId = toPositiveInt(payload.assignee_id)
+  if (legacyAssigneeId && !assigneeIds.includes(legacyAssigneeId)) {
+    assigneeIds.unshift(legacyAssigneeId)
+  }
+  const assigneeId = assigneeIds[0] || null
+  const watcherIds = normalizePositiveIntList(payload.watcher_ids)
+  const assigneeIdSet = new Set(assigneeIds)
+  const sanitizedWatcherIds = watcherIds.filter((item) => !assigneeIdSet.has(item))
   const fixSolution = normalizeText(payload.fix_solution, 20000)
   const verifyResult = normalizeText(payload.verify_result, 20000)
 
   if (!title) return { ok: false, message: 'Bug标题不能为空' }
   if (!description) return { ok: false, message: 'Bug描述不能为空' }
   if (!severityCode) return { ok: false, message: '严重程度不能为空' }
-  if (!priorityCode) return { ok: false, message: '优先级不能为空' }
   if (!reproduceSteps) return { ok: false, message: '重现步骤不能为空' }
   if (!expectedResult) return { ok: false, message: '预期结果不能为空' }
   if (!actualResult) return { ok: false, message: '实际结果不能为空' }
@@ -186,9 +310,6 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
 
   if (!(await Bug.validateDictCode('bug_severity', severityCode))) {
     return { ok: false, message: '严重程度不存在或已停用' }
-  }
-  if (!(await Bug.validateDictCode('bug_priority', priorityCode))) {
-    return { ok: false, message: '优先级不存在或已停用' }
   }
   if (!(await Bug.validateDictCode('bug_type', bugTypeCode, { allowNull: true }))) {
     return { ok: false, message: 'Bug类型不存在或已停用' }
@@ -211,7 +332,6 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
       title,
       description,
       severityCode,
-      priorityCode,
       bugTypeCode: bugTypeCode || null,
       productCode: productCode || null,
       issueStage: issueStage || null,
@@ -221,6 +341,8 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
       environmentInfo: environmentInfo || null,
       demandId: demandId || null,
       assigneeId,
+      assigneeIds,
+      watcherIds: sanitizedWatcherIds,
       fixSolution: isCreate ? null : fixSolution || null,
       verifyResult: isCreate ? null : verifyResult || null,
       demand,
@@ -246,7 +368,6 @@ const listBugs = async (req, res) => {
       keyword: req.query.keyword,
       statusCode: req.query.status_code,
       severityCode: req.query.severity_code,
-      priorityCode: req.query.priority_code,
       bugTypeCode: req.query.bug_type_code,
       productCode: req.query.product_code,
       issueStage: req.query.issue_stage,
@@ -274,7 +395,11 @@ const getBugDetail = async (req, res) => {
     if (!detail) {
       return res.status(404).json({ success: false, message: 'Bug不存在' })
     }
-    return res.json({ success: true, data: detail })
+    const responseData = decorateBugDetailAttachments(detail, {
+      ossConfig: getOssConfigFromEnv(),
+      expireSeconds: getBugAttachmentSignExpireSeconds(),
+    })
+    return res.json({ success: true, data: responseData })
   } catch (err) {
     console.error('获取Bug详情失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
@@ -293,6 +418,7 @@ const createBug = async (req, res) => {
       reporterId: req.user.id,
     })
     const detail = await Bug.getBugDetail(bugId)
+    const assigneeList = extractBugAssigneeList(detail)
     const createReceiverUserId = toPositiveInt(detail?.assignee_id)
     const assignReceiverUserId = toPositiveInt(detail?.assignee_id)
     const shouldSkipCreateNotification =
@@ -309,24 +435,33 @@ const createBug = async (req, res) => {
         req,
       })
     }
-    await emitBugNotificationEvent({
-      eventType: 'bug_assign',
-      bug: detail,
-      req,
-      extra: {
-        from_assignee_id: null,
-        from_assignee_name: '',
-        to_assignee_id: toPositiveInt(detail?.assignee_id),
-        to_assignee_name: normalizeText(detail?.assignee_name, 100) || '',
-      },
-    })
+    for (const assignee of assigneeList) {
+      await emitBugNotificationEvent({
+        eventType: 'bug_assign',
+        bug: detail,
+        req,
+        extra: {
+          from_assignee_id: null,
+          from_assignee_name: '',
+          to_assignee_id: assignee.id,
+          to_assignee_name: assignee.name,
+        },
+      })
+    }
 
+    const responseData = decorateBugDetailAttachments(detail, {
+      ossConfig: getOssConfigFromEnv(),
+      expireSeconds: getBugAttachmentSignExpireSeconds(),
+    })
     return res.status(201).json({
       success: true,
       message: 'Bug创建成功',
-      data: detail,
+      data: responseData,
     })
   } catch (err) {
+    if (String(err?.message || '').includes('数据库迁移')) {
+      return res.status(500).json({ success: false, message: err.message })
+    }
     console.error('创建Bug失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
@@ -356,24 +491,39 @@ const updateBug = async (req, res) => {
     const detail = await Bug.getBugDetail(bugId)
 
     // 指派变更时触发 bug_assign
-    const prevAssigneeId = toPositiveInt(existing?.assignee_id)
-    const nextAssigneeId = toPositiveInt(detail?.assignee_id)
-    if (prevAssigneeId !== nextAssigneeId) {
+    const prevAssigneeList = extractBugAssigneeList(existing)
+    const nextAssigneeList = extractBugAssigneeList(detail)
+    const prevAssigneeIds = new Set(prevAssigneeList.map((item) => item.id))
+    const newAssignees = nextAssigneeList.filter((item) => !prevAssigneeIds.has(item.id))
+    const primaryPreviousAssignee =
+      prevAssigneeList[0] || {
+        id: toPositiveInt(existing?.assignee_id),
+        name: normalizeText(existing?.assignee_name, 100) || '',
+      }
+
+    for (const assignee of newAssignees) {
       await emitBugNotificationEvent({
         eventType: 'bug_assign',
         bug: detail,
         req,
         extra: {
-          from_assignee_id: prevAssigneeId,
-          from_assignee_name: normalizeText(existing?.assignee_name, 100) || '',
-          to_assignee_id: nextAssigneeId,
-          to_assignee_name: normalizeText(detail?.assignee_name, 100) || '',
+          from_assignee_id: primaryPreviousAssignee?.id || null,
+          from_assignee_name: primaryPreviousAssignee?.name || '',
+          to_assignee_id: assignee.id,
+          to_assignee_name: assignee.name,
         },
       })
     }
 
-    return res.json({ success: true, message: 'Bug更新成功', data: detail })
+    const responseData = decorateBugDetailAttachments(detail, {
+      ossConfig: getOssConfigFromEnv(),
+      expireSeconds: getBugAttachmentSignExpireSeconds(),
+    })
+    return res.json({ success: true, message: 'Bug更新成功', data: responseData })
   } catch (err) {
+    if (String(err?.message || '').includes('数据库迁移')) {
+      return res.status(500).json({ success: false, message: err.message })
+    }
     console.error('更新Bug失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
@@ -471,7 +621,11 @@ async function handleTransition(req, res, targetStatus, { requireFixSolution = f
       })
     }
 
-    return res.json({ success: true, message: successMessage, data: detail })
+    const responseData = decorateBugDetailAttachments(detail, {
+      ossConfig: getOssConfigFromEnv(),
+      expireSeconds: getBugAttachmentSignExpireSeconds(),
+    })
+    return res.json({ success: true, message: successMessage, data: responseData })
   } catch (err) {
     console.error('Bug流转失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
@@ -554,7 +708,6 @@ const listDemandBugs = async (req, res) => {
       keyword: req.query.keyword,
       statusCode: req.query.status_code,
       severityCode: req.query.severity_code,
-      priorityCode: req.query.priority_code,
       bugTypeCode: req.query.bug_type_code,
       productCode: req.query.product_code,
       issueStage: req.query.issue_stage,
@@ -679,7 +832,11 @@ const createBugAttachment = async (req, res) => {
     })
 
     const attachment = await Bug.findAttachmentById(attachmentId)
-    return res.status(201).json({ success: true, message: '附件登记成功', data: attachment })
+    const responseData = decorateBugAttachment(attachment, {
+      ossConfig: getOssConfigFromEnv(),
+      expireSeconds: getBugAttachmentSignExpireSeconds(),
+    })
+    return res.status(201).json({ success: true, message: '附件登记成功', data: responseData })
   } catch (err) {
     console.error('登记Bug附件失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
