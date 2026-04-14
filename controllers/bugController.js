@@ -22,6 +22,14 @@ const BUG_STATUS = Object.freeze({
   REOPENED: 'REOPENED',
 })
 
+const DEFAULT_ACTION_REQUIREMENTS = Object.freeze({
+  start: { requireRemark: false, requireFixSolution: false, requireVerifyResult: false },
+  fix: { requireRemark: false, requireFixSolution: true, requireVerifyResult: false },
+  verify: { requireRemark: false, requireFixSolution: false, requireVerifyResult: false },
+  reopen: { requireRemark: true, requireFixSolution: false, requireVerifyResult: false },
+  reject: { requireRemark: true, requireFixSolution: false, requireVerifyResult: false },
+})
+
 function toPositiveInt(value) {
   const num = Number(value)
   return Number.isInteger(num) && num > 0 ? num : null
@@ -49,6 +57,13 @@ function normalizeDemandId(value) {
 function normalizeCode(value) {
   const normalized = String(value || '').trim().toUpperCase()
   return normalized || ''
+}
+
+function normalizeActionKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .slice(0, 50)
 }
 
 function normalizeNotificationPortalBaseUrl() {
@@ -98,6 +113,47 @@ function decorateBugViewRow(req, row) {
     can_edit: canManageBugView(req, row),
     can_delete: canDeleteBugView(req, row),
   }
+}
+
+function normalizeWorkflowTransitionPayloadRows(items = []) {
+  const source = Array.isArray(items) ? items : []
+  return source
+    .map((item, index) => ({
+      from_status_code: normalizeCode(item?.from_status_code),
+      to_status_code: normalizeCode(item?.to_status_code),
+      action_key: normalizeActionKey(item?.action_key),
+      action_name: normalizeText(item?.action_name, 50) || normalizeActionKey(item?.action_key),
+      enabled:
+        item?.enabled === false ||
+        item?.enabled === 0 ||
+        item?.enabled === '0' ||
+        String(item?.enabled || '').toLowerCase() === 'false'
+          ? 0
+          : 1,
+      sort_order: Number.isInteger(Number(item?.sort_order)) ? Number(item.sort_order) : (index + 1) * 10,
+      require_remark:
+        item?.require_remark === true ||
+        item?.require_remark === 1 ||
+        item?.require_remark === '1' ||
+        String(item?.require_remark || '').toLowerCase() === 'true'
+          ? 1
+          : 0,
+      require_fix_solution:
+        item?.require_fix_solution === true ||
+        item?.require_fix_solution === 1 ||
+        item?.require_fix_solution === '1' ||
+        String(item?.require_fix_solution || '').toLowerCase() === 'true'
+          ? 1
+          : 0,
+      require_verify_result:
+        item?.require_verify_result === true ||
+        item?.require_verify_result === 1 ||
+        item?.require_verify_result === '1' ||
+        String(item?.require_verify_result || '').toLowerCase() === 'true'
+          ? 1
+          : 0,
+    }))
+    .filter((item) => item.from_status_code && item.to_status_code && item.action_key)
 }
 
 function getBugAttachmentSignExpireSeconds() {
@@ -340,9 +396,6 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
   if (!title) return { ok: false, message: 'Bug标题不能为空' }
   if (!description) return { ok: false, message: 'Bug描述不能为空' }
   if (!severityCode) return { ok: false, message: '严重程度不能为空' }
-  if (!reproduceSteps) return { ok: false, message: '重现步骤不能为空' }
-  if (!expectedResult) return { ok: false, message: '预期结果不能为空' }
-  if (!actualResult) return { ok: false, message: '实际结果不能为空' }
   if (!assigneeId) return { ok: false, message: '处理人不能为空' }
 
   if (!(await Bug.validateDictCode('bug_severity', severityCode))) {
@@ -372,9 +425,9 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
       bugTypeCode: bugTypeCode || null,
       productCode: productCode || null,
       issueStage: issueStage || null,
-      reproduceSteps,
-      expectedResult,
-      actualResult,
+      reproduceSteps: reproduceSteps || '',
+      expectedResult: expectedResult || '',
+      actualResult: actualResult || '',
       environmentInfo: environmentInfo || null,
       demandId: demandId || null,
       assigneeId,
@@ -584,7 +637,18 @@ const deleteBug = async (req, res) => {
   }
 }
 
-async function handleTransition(req, res, targetStatus, { requireFixSolution = false, requireRemark = false, requireVerifyResult = false, successMessage }) {
+async function handleTransition(
+  req,
+  res,
+  targetStatus,
+  {
+    actionKey = '',
+    requireFixSolution = false,
+    requireRemark = false,
+    requireVerifyResult = false,
+    successMessage,
+  },
+) {
   const bugId = toPositiveInt(req.params.id)
   if (!bugId) {
     return res.status(400).json({ success: false, message: 'Bug ID 无效' })
@@ -599,14 +663,53 @@ async function handleTransition(req, res, targetStatus, { requireFixSolution = f
       return res.status(403).json({ success: false, message: '无权限操作该Bug' })
     }
 
+    const normalizedActionKey = normalizeActionKey(actionKey)
+    const persistedWorkflowTransitions = await Bug.listBugWorkflowTransitions({ includeDisabled: false })
+    const persistedStatusTransitions = persistedWorkflowTransitions.filter(
+      (item) =>
+        normalizeCode(item?.from_status_code) === normalizeCode(existing?.status_code),
+    )
+    let workflowRule = null
+
+    if (persistedStatusTransitions.length > 0) {
+      workflowRule =
+        persistedStatusTransitions.find(
+          (item) =>
+            normalizeCode(item?.to_status_code) === normalizeCode(targetStatus) &&
+            (!normalizedActionKey || normalizeActionKey(item?.action_key) === normalizedActionKey),
+        ) || null
+      if (!workflowRule) {
+        return res.status(400).json({ success: false, message: '当前流程配置不允许执行该操作' })
+      }
+    } else {
+      workflowRule = await Bug.getWorkflowTransitionRule({
+        fromStatusCode: existing?.status_code,
+        toStatusCode: targetStatus,
+        actionKey: normalizedActionKey,
+      })
+    }
+
+    const defaultRequirements = DEFAULT_ACTION_REQUIREMENTS[normalizedActionKey] || {
+      requireRemark,
+      requireFixSolution,
+      requireVerifyResult,
+    }
+    const resolvedRequirements = workflowRule
+      ? {
+          requireRemark: Number(workflowRule.require_remark) === 1,
+          requireFixSolution: Number(workflowRule.require_fix_solution) === 1,
+          requireVerifyResult: Number(workflowRule.require_verify_result) === 1,
+        }
+      : defaultRequirements
+
     const payload = buildTransitionPayload(targetStatus, req)
-    if (requireFixSolution && !payload.fixSolution) {
+    if (resolvedRequirements.requireFixSolution && !payload.fixSolution) {
       return res.status(400).json({ success: false, message: '修复方案不能为空' })
     }
-    if (requireRemark && !payload.remark) {
+    if (resolvedRequirements.requireRemark && !payload.remark) {
       return res.status(400).json({ success: false, message: '备注不能为空' })
     }
-    if (requireVerifyResult && !payload.verifyResult) {
+    if (resolvedRequirements.requireVerifyResult && !payload.verifyResult) {
       return res.status(400).json({ success: false, message: '验证结果不能为空' })
     }
 
@@ -671,31 +774,61 @@ async function handleTransition(req, res, targetStatus, { requireFixSolution = f
 
 const startBug = async (req, res) =>
   handleTransition(req, res, BUG_STATUS.PROCESSING, {
+    actionKey: 'start',
     successMessage: 'Bug已开始处理',
   })
 
 const fixBug = async (req, res) =>
   handleTransition(req, res, BUG_STATUS.FIXED, {
+    actionKey: 'fix',
     requireFixSolution: true,
     successMessage: 'Bug已标记为已修复',
   })
 
 const verifyBug = async (req, res) =>
   handleTransition(req, res, BUG_STATUS.CLOSED, {
+    actionKey: 'verify',
     successMessage: 'Bug已关闭',
   })
 
 const reopenBug = async (req, res) =>
   handleTransition(req, res, BUG_STATUS.REOPENED, {
+    actionKey: 'reopen',
     requireRemark: true,
     successMessage: 'Bug已重新打开',
   })
 
 const rejectBug = async (req, res) =>
   handleTransition(req, res, BUG_STATUS.CLOSED, {
+    actionKey: 'reject',
     requireRemark: true,
     successMessage: 'Bug已打回并关闭',
   })
+
+const transitionBugByWorkflow = async (req, res) => {
+  const targetStatus = normalizeCode(req.body?.to_status_code)
+  const actionKey = normalizeActionKey(req.body?.action_key)
+  if (!targetStatus) {
+    return res.status(400).json({ success: false, message: '缺少目标状态编码 to_status_code' })
+  }
+  if (!actionKey) {
+    return res.status(400).json({ success: false, message: '缺少动作编码 action_key' })
+  }
+
+  const defaults = DEFAULT_ACTION_REQUIREMENTS[actionKey] || {
+    requireRemark: false,
+    requireFixSolution: false,
+    requireVerifyResult: false,
+  }
+
+  return handleTransition(req, res, targetStatus, {
+    actionKey,
+    requireRemark: defaults.requireRemark,
+    requireFixSolution: defaults.requireFixSolution,
+    requireVerifyResult: defaults.requireVerifyResult,
+    successMessage: 'Bug状态已更新',
+  })
+}
 
 const createBugComment = async (req, res) => {
   const bugId = toPositiveInt(req.params.id)
@@ -805,6 +938,71 @@ const listBugAssignees = async (req, res) => {
     return res.json({ success: true, data: rows })
   } catch (err) {
     console.error('获取Bug可选处理人失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getBugWorkflowConfig = async (req, res) => {
+  try {
+    const data = await Bug.getBugWorkflowConfig({ includeDisabled: true })
+    return res.json({
+      success: true,
+      data: {
+        ...data,
+        editable: Boolean(req.userAccess?.is_super_admin || hasPermission(req, 'bug.manage')),
+      },
+    })
+  } catch (err) {
+    if (err?.code === 'BUG_WORKFLOW_CONFIG_UNAVAILABLE') {
+      return res.status(400).json({ success: false, message: err.message })
+    }
+    console.error('获取Bug流程配置失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const updateBugWorkflowConfig = async (req, res) => {
+  if (!(req.userAccess?.is_super_admin || hasPermission(req, 'bug.manage'))) {
+    return res.status(403).json({ success: false, message: '无权限更新流程配置' })
+  }
+
+  const transitions = normalizeWorkflowTransitionPayloadRows(req.body?.transitions)
+  if (transitions.length === 0) {
+    return res.status(400).json({ success: false, message: '请至少配置一条流程流转规则' })
+  }
+
+  try {
+    const statuses = await Bug.getBugStatusOptions({ enabledOnly: true })
+    const statusCodeSet = new Set(statuses.map((item) => normalizeCode(item?.status_code)))
+
+    const invalidRow = transitions.find(
+      (item) =>
+        !statusCodeSet.has(normalizeCode(item.from_status_code)) ||
+        !statusCodeSet.has(normalizeCode(item.to_status_code)),
+    )
+    if (invalidRow) {
+      return res.status(400).json({
+        success: false,
+        message: `状态编码无效：${invalidRow.from_status_code || '-'} -> ${invalidRow.to_status_code || '-'}`,
+      })
+    }
+
+    await Bug.replaceBugWorkflowTransitions(transitions, { operatorUserId: req.user.id })
+    const latest = await Bug.getBugWorkflowConfig({ includeDisabled: true })
+
+    return res.json({
+      success: true,
+      message: 'Bug流程配置已保存',
+      data: {
+        ...latest,
+        editable: true,
+      },
+    })
+  } catch (err) {
+    if (err?.code === 'BUG_WORKFLOW_CONFIG_UNAVAILABLE') {
+      return res.status(400).json({ success: false, message: err.message })
+    }
+    console.error('更新Bug流程配置失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -1201,8 +1399,11 @@ module.exports = {
   verifyBug,
   reopenBug,
   rejectBug,
+  transitionBugByWorkflow,
   createBugComment,
   listBugAssignees,
+  getBugWorkflowConfig,
+  updateBugWorkflowConfig,
   listBugViews,
   getBugViewById,
   createBugView,

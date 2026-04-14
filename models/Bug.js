@@ -13,9 +13,97 @@ const BUG_VIEW_VISIBILITY = Object.freeze({
 })
 const BUG_VIEW_GROUP_FIELD_SET = new Set(['status', 'reporter', 'bug_type'])
 const BUG_VIEW_ALLOWED_PAGE_SIZE_SET = new Set([20, 50, 100])
+const DEFAULT_WORKFLOW_TRANSITIONS = Object.freeze([
+  {
+    from_status_code: 'NEW',
+    to_status_code: 'PROCESSING',
+    action_key: 'start',
+    action_name: '开始处理',
+    enabled: 1,
+    sort_order: 10,
+    require_remark: 0,
+    require_fix_solution: 0,
+    require_verify_result: 0,
+  },
+  {
+    from_status_code: 'REOPENED',
+    to_status_code: 'PROCESSING',
+    action_key: 'start',
+    action_name: '重新处理',
+    enabled: 1,
+    sort_order: 20,
+    require_remark: 0,
+    require_fix_solution: 0,
+    require_verify_result: 0,
+  },
+  {
+    from_status_code: 'PROCESSING',
+    to_status_code: 'FIXED',
+    action_key: 'fix',
+    action_name: '修复完成',
+    enabled: 1,
+    sort_order: 30,
+    require_remark: 0,
+    require_fix_solution: 1,
+    require_verify_result: 0,
+  },
+  {
+    from_status_code: 'PROCESSING',
+    to_status_code: 'CLOSED',
+    action_key: 'reject',
+    action_name: '打回并关闭',
+    enabled: 1,
+    sort_order: 40,
+    require_remark: 1,
+    require_fix_solution: 0,
+    require_verify_result: 0,
+  },
+  {
+    from_status_code: 'FIXED',
+    to_status_code: 'CLOSED',
+    action_key: 'verify',
+    action_name: '验证通过',
+    enabled: 1,
+    sort_order: 50,
+    require_remark: 0,
+    require_fix_solution: 0,
+    require_verify_result: 0,
+  },
+  {
+    from_status_code: 'FIXED',
+    to_status_code: 'REOPENED',
+    action_key: 'reopen',
+    action_name: '重新打开',
+    enabled: 1,
+    sort_order: 60,
+    require_remark: 1,
+    require_fix_solution: 0,
+    require_verify_result: 0,
+  },
+  {
+    from_status_code: 'CLOSED',
+    to_status_code: 'REOPENED',
+    action_key: 'reopen',
+    action_name: '重新打开',
+    enabled: 1,
+    sort_order: 70,
+    require_remark: 1,
+    require_fix_solution: 0,
+    require_verify_result: 0,
+  },
+])
 
 let bugSavedViewTableReady = false
 let bugSavedViewTablePromise = null
+let bugWorkflowTableReady = false
+let bugWorkflowTablePromise = null
+const WORKFLOW_TABLE_UNAVAILABLE_ERROR_CODES = new Set([
+  'ER_NO_SUCH_TABLE',
+  'ER_TABLEACCESS_DENIED_ERROR',
+  'ER_DBACCESS_DENIED_ERROR',
+  'ER_ACCESS_DENIED_ERROR',
+  'ER_SPECIFIC_ACCESS_DENIED_ERROR',
+])
 
 const ALLOWED_TRANSITIONS = Object.freeze({
   NEW: ['PROCESSING'],
@@ -58,6 +146,40 @@ function normalizeDemandId(value) {
 function normalizeCode(value, maxLen = 50) {
   const normalized = String(value || '').trim().toUpperCase()
   return normalized.slice(0, maxLen) || null
+}
+
+function normalizeTinyBool(value, fallback = 0) {
+  if (value === undefined || value === null || value === '') return fallback ? 1 : 0
+  if (value === true || value === 1 || value === '1' || String(value).toLowerCase() === 'true') return 1
+  return 0
+}
+
+function normalizeTransitionActionKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .slice(0, 50)
+}
+
+function normalizeWorkflowTransitionRow(row = {}, { fallbackSort = 0 } = {}) {
+  return {
+    id: toPositiveInt(row.id),
+    from_status_code: normalizeCode(row.from_status_code) || '',
+    to_status_code: normalizeCode(row.to_status_code) || '',
+    action_key: normalizeTransitionActionKey(row.action_key),
+    action_name: normalizeText(row.action_name, 50),
+    enabled: normalizeTinyBool(row.enabled, 1),
+    sort_order: Number.isInteger(Number(row.sort_order)) ? Number(row.sort_order) : fallbackSort,
+    require_remark: normalizeTinyBool(row.require_remark, 0),
+    require_fix_solution: normalizeTinyBool(row.require_fix_solution, 0),
+    require_verify_result: normalizeTinyBool(row.require_verify_result, 0),
+  }
+}
+
+function buildDefaultWorkflowTransitions() {
+  return DEFAULT_WORKFLOW_TRANSITIONS.map((item, index) =>
+    normalizeWorkflowTransitionRow(item, { fallbackSort: (index + 1) * 10 }),
+  )
 }
 
 function normalizeDateText(value) {
@@ -161,6 +283,59 @@ async function ensureBugSavedViewTable() {
   })
 
   await bugSavedViewTablePromise
+}
+
+async function ensureBugWorkflowTable() {
+  if (bugWorkflowTableReady) return
+  if (bugWorkflowTablePromise) {
+    await bugWorkflowTablePromise
+    return
+  }
+
+  bugWorkflowTablePromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bug_workflow_transitions (
+        id BIGINT NOT NULL AUTO_INCREMENT,
+        from_status_code VARCHAR(50) NOT NULL COMMENT '来源状态编码',
+        to_status_code VARCHAR(50) NOT NULL COMMENT '目标状态编码',
+        action_key VARCHAR(50) NOT NULL COMMENT '动作编码',
+        action_name VARCHAR(50) NOT NULL COMMENT '动作名称',
+        enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用',
+        sort_order INT NOT NULL DEFAULT 100 COMMENT '排序',
+        require_remark TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否要求备注',
+        require_fix_solution TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否要求修复方案',
+        require_verify_result TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否要求验证结果',
+        created_by BIGINT NULL COMMENT '创建人',
+        updated_by BIGINT NULL COMMENT '更新人',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        deleted_at DATETIME NULL DEFAULT NULL,
+        PRIMARY KEY (id),
+        UNIQUE KEY uk_bug_workflow_transition (from_status_code, action_key, to_status_code),
+        KEY idx_bug_workflow_from_status (from_status_code, enabled, sort_order),
+        KEY idx_bug_workflow_deleted (deleted_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Bug流程流转配置'
+    `)
+    bugWorkflowTableReady = true
+  })().finally(() => {
+    bugWorkflowTablePromise = null
+  })
+
+  await bugWorkflowTablePromise
+}
+
+function isWorkflowTableUnavailableError(error) {
+  const code = String(error?.code || '').trim().toUpperCase()
+  return WORKFLOW_TABLE_UNAVAILABLE_ERROR_CODES.has(code)
+}
+
+function createWorkflowConfigUnavailableError(error) {
+  const wrapped = new Error(
+    'Bug流程配置中心未初始化，请先执行 backend/docs/migrations/apply-bug-workflow-config.sh',
+  )
+  wrapped.code = 'BUG_WORKFLOW_CONFIG_UNAVAILABLE'
+  if (error) wrapped.cause = error
+  return wrapped
 }
 
 function normalizeBugNo(id) {
@@ -833,6 +1008,229 @@ const Bug = {
     return Number(result?.affectedRows || 0)
   },
 
+  async listBugWorkflowTransitions({ includeDisabled = false } = {}) {
+    try {
+      await ensureBugWorkflowTable()
+
+      const [rows] = await pool.query(
+        `SELECT
+           id,
+           from_status_code,
+           to_status_code,
+           action_key,
+           action_name,
+           enabled,
+           sort_order,
+           require_remark,
+           require_fix_solution,
+           require_verify_result
+         FROM bug_workflow_transitions
+         WHERE deleted_at IS NULL
+         ${includeDisabled ? '' : 'AND enabled = 1'}
+         ORDER BY sort_order ASC, id ASC`,
+      )
+
+      return (rows || [])
+        .map((item, index) => normalizeWorkflowTransitionRow(item, { fallbackSort: (index + 1) * 10 }))
+        .filter((item) => item.from_status_code && item.to_status_code && item.action_key)
+    } catch (error) {
+      if (!isWorkflowTableUnavailableError(error)) throw error
+      return []
+    }
+  },
+
+  async getBugStatusOptions({ enabledOnly = true } = {}) {
+    let rows = []
+    try {
+      const [queryRows] = await pool.query(
+        `SELECT
+           item_code,
+           item_name,
+           color,
+           enabled,
+           sort_order
+         FROM config_dict_items
+         WHERE type_key = ?
+           ${enabledOnly ? 'AND enabled = 1' : ''}
+         ORDER BY sort_order ASC, id ASC`,
+        [BUG_STATUS_DICT_KEY],
+      )
+      rows = queryRows || []
+    } catch (error) {
+      if (String(error?.code || '').trim().toUpperCase() !== 'ER_BAD_FIELD_ERROR') {
+        throw error
+      }
+
+      const [fallbackRows] = await pool.query(
+        `SELECT
+           item_code,
+           item_name,
+           color,
+           enabled
+         FROM config_dict_items
+         WHERE type_key = ?
+           ${enabledOnly ? 'AND enabled = 1' : ''}
+         ORDER BY id ASC`,
+        [BUG_STATUS_DICT_KEY],
+      )
+      rows = fallbackRows || []
+    }
+
+    return (rows || [])
+      .map((item) => ({
+        status_code: normalizeCode(item.item_code) || '',
+        status_name: normalizeText(item.item_name, 50) || normalizeCode(item.item_code) || '',
+        color: normalizeText(item.color, 20) || null,
+        enabled: normalizeTinyBool(item.enabled, 1),
+        sort_order: Number.isInteger(Number(item.sort_order)) ? Number(item.sort_order) : 0,
+      }))
+      .filter((item) => item.status_code)
+  },
+
+  async getBugWorkflowConfig({ includeDisabled = false } = {}) {
+    const [statusOptions, transitionsFromDb] = await Promise.all([
+      this.getBugStatusOptions({ enabledOnly: true }),
+      this.listBugWorkflowTransitions({ includeDisabled }),
+    ])
+
+    const transitions =
+      transitionsFromDb.length > 0
+        ? transitionsFromDb
+        : buildDefaultWorkflowTransitions().filter((item) => includeDisabled || item.enabled)
+
+    return {
+      statuses: statusOptions,
+      transitions,
+    }
+  },
+
+  async getWorkflowTransitionsForStatus(fromStatusCode, { includeDisabled = false } = {}) {
+    const fromCode = normalizeCode(fromStatusCode)
+    if (!fromCode) return []
+
+    const config = await this.getBugWorkflowConfig({ includeDisabled })
+    const matched = (config.transitions || []).filter(
+      (item) => normalizeCode(item.from_status_code) === fromCode && (includeDisabled || item.enabled),
+    )
+    if (matched.length > 0) return matched
+
+    const fallbackTargets = ALLOWED_TRANSITIONS[fromCode] || []
+    return buildDefaultWorkflowTransitions().filter(
+      (item) =>
+        item.from_status_code === fromCode &&
+        fallbackTargets.includes(item.to_status_code) &&
+        (includeDisabled || item.enabled),
+    )
+  },
+
+  async getWorkflowTransitionRule({ fromStatusCode, toStatusCode, actionKey = '' } = {}) {
+    const fromCode = normalizeCode(fromStatusCode)
+    const toCode = normalizeCode(toStatusCode)
+    const normalizedActionKey = normalizeTransitionActionKey(actionKey)
+    if (!fromCode || !toCode) return null
+
+    const transitions = await this.getWorkflowTransitionsForStatus(fromCode, { includeDisabled: false })
+    return (
+      transitions.find(
+        (item) =>
+          item.from_status_code === fromCode &&
+          item.to_status_code === toCode &&
+          (!normalizedActionKey || item.action_key === normalizedActionKey),
+      ) || null
+    )
+  },
+
+  async replaceBugWorkflowTransitions(transitions = [], { operatorUserId = null } = {}) {
+    try {
+      await ensureBugWorkflowTable()
+    } catch (error) {
+      if (isWorkflowTableUnavailableError(error)) {
+        throw createWorkflowConfigUnavailableError(error)
+      }
+      throw error
+    }
+
+    const normalizedOperatorId = toPositiveInt(operatorUserId)
+    const source = Array.isArray(transitions) ? transitions : []
+    const prepared = source
+      .map((item, index) =>
+        normalizeWorkflowTransitionRow(item, {
+          fallbackSort: Number.isInteger(Number(item?.sort_order)) ? Number(item.sort_order) : (index + 1) * 10,
+        }),
+      )
+      .filter((item) => item.from_status_code && item.to_status_code && item.action_key)
+
+    if (prepared.length === 0) {
+      return 0
+    }
+
+    const dedupMap = new Map()
+    prepared.forEach((item, index) => {
+      const dedupKey = `${item.from_status_code}|${item.action_key}|${item.to_status_code}`
+      if (!dedupMap.has(dedupKey)) {
+        dedupMap.set(dedupKey, {
+          ...item,
+          sort_order: Number.isInteger(Number(item.sort_order)) ? Number(item.sort_order) : (index + 1) * 10,
+        })
+      }
+    })
+    const finalRows = Array.from(dedupMap.values())
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      // NOTE:
+      // 当前表存在唯一索引 uk_bug_workflow_transition(from_status_code, action_key, to_status_code)。
+      // 如果仅做软删除（deleted_at=NOW()）再插入同键记录，会触发唯一键冲突。
+      // 这里改为覆盖式硬删除后重建，保证保存流程配置时不会出现 ER_DUP_ENTRY。
+      await conn.query('DELETE FROM bug_workflow_transitions')
+
+      for (let index = 0; index < finalRows.length; index += 1) {
+        const item = finalRows[index]
+        await conn.query(
+          `INSERT INTO bug_workflow_transitions (
+             from_status_code,
+             to_status_code,
+             action_key,
+             action_name,
+             enabled,
+             sort_order,
+             require_remark,
+             require_fix_solution,
+             require_verify_result,
+             created_by,
+             updated_by,
+             deleted_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+          [
+            item.from_status_code,
+            item.to_status_code,
+            item.action_key,
+            item.action_name || item.action_key,
+            item.enabled,
+            Number.isInteger(Number(item.sort_order)) ? Number(item.sort_order) : (index + 1) * 10,
+            item.require_remark,
+            item.require_fix_solution,
+            item.require_verify_result,
+            normalizedOperatorId,
+            normalizedOperatorId,
+          ],
+        )
+      }
+
+      await conn.commit()
+      return finalRows.length
+    } catch (error) {
+      await conn.rollback()
+      if (isWorkflowTableUnavailableError(error)) {
+        throw createWorkflowConfigUnavailableError(error)
+      }
+      throw error
+    } finally {
+      conn.release()
+    }
+  },
+
   async listBugs({
     page = 1,
     pageSize = 20,
@@ -1230,7 +1628,12 @@ const Bug = {
       }
 
       const fromStatus = normalizeCode(existing.status_code)
-      const allowedTargets = ALLOWED_TRANSITIONS[fromStatus] || []
+      const configuredTransitions = await this.getWorkflowTransitionsForStatus(fromStatus, {
+        includeDisabled: false,
+      })
+      const allowedTargets = configuredTransitions.length > 0
+        ? configuredTransitions.map((item) => item.to_status_code)
+        : ALLOWED_TRANSITIONS[fromStatus] || []
       if (!allowedTargets.includes(normalizedToStatus)) {
         await conn.rollback()
         return { ok: false, reason: 'transition_not_allowed', fromStatus, toStatus: normalizedToStatus }

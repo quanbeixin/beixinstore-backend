@@ -13,8 +13,11 @@ const {
   verifyBug,
   reopenBug,
   rejectBug,
+  transitionBugByWorkflow,
   createBugComment,
   listBugAssignees,
+  getBugWorkflowConfig,
+  updateBugWorkflowConfig,
   listBugViews,
   getBugViewById,
   createBugView,
@@ -106,6 +109,8 @@ const { getHumanGantt } = require('../controllers/humanGanttController')
 router.use(authMiddleware)
 
 router.get('/bugs/assignees', authMiddleware.requirePermission('bug.view'), listBugAssignees)
+router.get('/bugs/workflow/config', authMiddleware.requirePermission('bug.view'), getBugWorkflowConfig)
+router.put('/bugs/workflow/config', authMiddleware.requirePermission('bug.manage'), updateBugWorkflowConfig)
 router.get('/bugs/views', authMiddleware.requirePermission('bug.view'), listBugViews)
 router.get('/bugs/views/:viewId', authMiddleware.requirePermission('bug.view'), getBugViewById)
 router.post('/bugs/views', authMiddleware.requirePermission('bug.view'), createBugView)
@@ -121,6 +126,7 @@ router.post('/bugs/:id/fix', authMiddleware.requirePermission('bug.transition'),
 router.post('/bugs/:id/verify', authMiddleware.requirePermission('bug.transition'), verifyBug)
 router.post('/bugs/:id/reopen', authMiddleware.requirePermission('bug.transition'), reopenBug)
 router.post('/bugs/:id/reject', authMiddleware.requirePermission('bug.transition'), rejectBug)
+router.post('/bugs/:id/transition', authMiddleware.requirePermission('bug.transition'), transitionBugByWorkflow)
 router.post('/bugs/:id/comments', authMiddleware.requirePermission('bug.view'), createBugComment)
 router.post('/bugs/:id/attachments/policy', authMiddleware.requirePermission('bug.update'), getBugAttachmentPolicy)
 router.post('/bugs/:id/attachments', authMiddleware.requirePermission('bug.update'), createBugAttachment)
