@@ -21,7 +21,21 @@ function hasAiCapability() {
 
 function parseCategories(categoriesText) {
   return String(categoriesText || '')
-    .split(',')
+    .split(/[,\n，；;|]/)
+    .map((item) => normalizeText(item, 200))
+    .map((item) => {
+      if (!item) return ''
+      const stripped = item.replace(/^[-*.\d)(、\s]+/, '')
+      const parts = stripped.split(/[：:]/).map((part) => normalizeText(part, 100))
+      const candidate = parts.length > 1 ? parts[parts.length - 1] : stripped
+      return normalizeText(candidate, 100)
+    })
+    .filter((item) => {
+      if (!item) return false
+      if (/(优先从以下选择|以下分类|请从以下|问题分类|如果.*新增)/.test(item)) return false
+      if (item.length > 28 && /(优先|以下|选择|分类|新增|请)/.test(item)) return false
+      return true
+    })
     .map((item) => normalizeText(item, 100))
     .filter(Boolean)
 }
@@ -43,6 +57,15 @@ function sanitizeCategory(inputCategory, categoryOptions) {
     (item) => item.toLowerCase() === normalized.toLowerCase(),
   )
   if (exact) return exact
+
+  const fuzzy = categoryOptions.find(
+    (item) => normalized.includes(item) || item.includes(normalized),
+  )
+  if (fuzzy) return fuzzy
+
+  if (normalized.length > 28 && /(优先|以下|选择|分类|新增|请)/.test(normalized)) {
+    return categoryOptions[0] || '咨询'
+  }
 
   return normalized
 }
@@ -90,6 +113,80 @@ function looksLikeEnglish(text) {
   return letters > 0 && letters >= chinese * 2
 }
 
+function hasChineseChars(text) {
+  return /[\u4e00-\u9fa5]/.test(String(text || ''))
+}
+
+function isMostlyChinese(text) {
+  const raw = String(text || '')
+  if (!raw) return false
+
+  const letters = (raw.match(/[A-Za-z]/g) || []).length
+  const chinese = (raw.match(/[\u4e00-\u9fa5]/g) || []).length
+  return chinese > 0 && chinese >= letters
+}
+
+function needsChineseTranslation(sourceText, translatedText) {
+  const source = normalizeText(sourceText)
+  if (!source) return false
+  if (isMostlyChinese(source)) return false
+
+  const translated = normalizeText(translatedText)
+  if (!translated) return true
+  if (translated === source) return true
+  if (!hasChineseChars(translated)) return true
+  return false
+}
+
+function extractPlainAiText(rawText) {
+  const text = normalizeText(rawText)
+  if (!text) return ''
+
+  return normalizeText(
+    text
+      .replace(/^```[\w-]*\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .replace(/^["“”']+/, '')
+      .replace(/["“”']+$/, ''),
+  )
+}
+
+async function translateToChinese(text) {
+  const source = normalizeText(text)
+  if (!source) return ''
+  if (isMostlyChinese(source)) return source
+  if (!hasAiCapability()) return ''
+
+  try {
+    const response = await callFeedbackAi({
+      systemPrompt:
+        '你是专业翻译助手。请把用户原文准确翻译成简体中文，仅输出翻译文本，不要任何解释或 JSON。',
+      userPrompt: `请翻译为简体中文：\n${source}`,
+      temperature: 0.1,
+      maxTokens: 600,
+    })
+
+    return extractPlainAiText(response?.content)
+  } catch (error) {
+    console.warn('用户问题翻译失败，保留原文:', error?.message || error)
+    return ''
+  }
+}
+
+async function ensureChineseQuestion(sourceText, analyzedCnText) {
+  const source = normalizeText(sourceText)
+  if (!source) return ''
+
+  const candidate = normalizeText(analyzedCnText)
+  if (!needsChineseTranslation(source, candidate)) {
+    return candidate || source
+  }
+
+  const translated = await translateToChinese(source)
+  if (translated) return translated
+  return candidate || source
+}
+
 function buildHeuristicAnalysis(feedback, config) {
   const question = normalizeText(feedback?.user_question)
   const lower = question.toLowerCase()
@@ -126,7 +223,7 @@ function buildHeuristicAnalysis(feedback, config) {
     ai_reply_en: 'Thanks for your feedback. We are sorry for the inconvenience and will investigate this issue as soon as possible.',
     user_request: summary || '反馈问题',
     is_new_request: category.includes('需求'),
-    user_question_cn: looksLikeEnglish(question) ? question : question,
+    user_question_cn: isMostlyChinese(question) || looksLikeEnglish(question) ? question : '',
   }
 }
 
@@ -146,19 +243,72 @@ function clearConfigCache() {
   configCache = null
 }
 
+function shouldRetryWithFallbackModel(error) {
+  const message = String(error?.message || '').toLowerCase()
+  return (
+    message.includes('insufficient') ||
+    message.includes('quota') ||
+    message.includes('balance') ||
+    message.includes('rate limit')
+  )
+}
+
+async function callFeedbackAi(payload = {}) {
+  const preferredApiKey = normalizeText(process.env.FEEDBACK_AI_API_KEY, 256) || undefined
+  const preferredBaseUrl = normalizeText(process.env.FEEDBACK_AI_BASE_URL, 255) || undefined
+  const preferredModel = normalizeText(process.env.FEEDBACK_AI_MODEL, 64) || undefined
+
+  try {
+    return await callChatCompletion({
+      ...payload,
+      apiKey: preferredApiKey,
+      baseUrl: preferredBaseUrl,
+      model: preferredModel,
+    })
+  } catch (error) {
+    const fallbackApiKey =
+      normalizeText(process.env.AGENT_AI_API_KEY, 256) ||
+      normalizeText(process.env.OPENAI_API_KEY, 256) ||
+      normalizeText(process.env.DEEPSEEK_API_KEY, 256)
+    const fallbackBaseUrl =
+      normalizeText(process.env.AGENT_AI_BASE_URL, 255) ||
+      normalizeText(process.env.OPENAI_BASE_URL, 255) ||
+      normalizeText(process.env.DEEPSEEK_BASE_URL, 255) ||
+      preferredBaseUrl ||
+      undefined
+    const fallbackModel =
+      normalizeText(process.env.AGENT_AI_DEFAULT_MODEL, 64) || preferredModel || undefined
+    const hasDifferentFallback = Boolean(fallbackApiKey) && fallbackApiKey !== preferredApiKey
+
+    if (!hasDifferentFallback || !shouldRetryWithFallbackModel(error)) {
+      throw error
+    }
+
+    console.warn('反馈 AI 主配置不可用，自动切换备用模型:', error?.message || error)
+    return callChatCompletion({
+      ...payload,
+      apiKey: fallbackApiKey,
+      baseUrl: fallbackBaseUrl,
+      model: fallbackModel,
+    })
+  }
+}
+
 async function analyzeFeedback(feedback) {
   const config = await getPromptConfig()
   const categoryOptions = parseCategories(config?.categories)
+  const heuristic = buildHeuristicAnalysis(feedback, config)
 
   if (!hasAiCapability()) {
-    return buildHeuristicAnalysis(feedback, config)
+    heuristic.user_question_cn = await ensureChineseQuestion(
+      feedback?.user_question,
+      heuristic.user_question_cn,
+    )
+    return heuristic
   }
 
   try {
-    const response = await callChatCompletion({
-      apiKey: normalizeText(process.env.FEEDBACK_AI_API_KEY, 256) || undefined,
-      baseUrl: normalizeText(process.env.FEEDBACK_AI_BASE_URL, 255) || undefined,
-      model: normalizeText(process.env.FEEDBACK_AI_MODEL, 64) || undefined,
+    const response = await callFeedbackAi({
       systemPrompt: `${config.systemPrompt || ''}\n\n${config.replyStyle || ''}`,
       userPrompt: buildPrompt(feedback, config),
       temperature: Number.isFinite(Number(process.env.FEEDBACK_AI_TEMPERATURE))
@@ -171,24 +321,36 @@ async function analyzeFeedback(feedback) {
 
     const parsed = extractJsonObject(response?.content)
     if (!parsed) {
-      return buildHeuristicAnalysis(feedback, config)
+      heuristic.user_question_cn = await ensureChineseQuestion(
+        feedback?.user_question,
+        heuristic.user_question_cn,
+      )
+      return heuristic
     }
+
+    const userQuestionCn = await ensureChineseQuestion(
+      feedback?.user_question,
+      parsed.user_question_cn,
+    )
 
     return {
       ai_category: sanitizeCategory(parsed.ai_category, categoryOptions),
       ai_sentiment: normalizeSentiment(parsed.ai_sentiment),
-      ai_reply: normalizeText(parsed.ai_reply) || buildHeuristicAnalysis(feedback, config).ai_reply,
+      ai_reply: normalizeText(parsed.ai_reply) || heuristic.ai_reply,
       ai_reply_en:
         normalizeText(parsed.ai_reply_en) ||
         'Thanks for your feedback. We will review it and get back to you soon.',
       user_request: summarizeRequest(parsed.user_request || feedback?.user_question),
       is_new_request: normalizeBool(parsed.is_new_request, false),
-      user_question_cn:
-        normalizeText(parsed.user_question_cn) || normalizeText(feedback?.user_question),
+      user_question_cn: userQuestionCn,
     }
   } catch (error) {
     console.warn('反馈 AI 分析失败，回退到规则分析:', error?.message || error)
-    return buildHeuristicAnalysis(feedback, config)
+    heuristic.user_question_cn = await ensureChineseQuestion(
+      feedback?.user_question,
+      heuristic.user_question_cn,
+    )
+    return heuristic
   }
 }
 
