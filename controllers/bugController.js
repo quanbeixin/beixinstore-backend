@@ -71,6 +71,35 @@ function normalizeDate(value) {
   return text
 }
 
+function sanitizeBugViewConfig(config = {}) {
+  return Bug.sanitizeBugViewConfig(config)
+}
+
+function normalizeBugViewVisibility(value) {
+  return Bug.normalizeBugViewVisibility(value)
+}
+
+function canManageBugView(req, viewRow) {
+  if (!viewRow) return false
+  if (req.userAccess?.is_super_admin) return true
+  if (hasPermission(req, 'bug.manage')) return true
+  return Number(req.user?.id || 0) > 0 && Number(req.user?.id || 0) === Number(viewRow.created_by || 0)
+}
+
+function canDeleteBugView(req, viewRow) {
+  if (!viewRow) return false
+  return Number(req.user?.id || 0) > 0 && Number(req.user?.id || 0) === Number(viewRow.created_by || 0)
+}
+
+function decorateBugViewRow(req, row) {
+  if (!row) return null
+  return {
+    ...row,
+    can_edit: canManageBugView(req, row),
+    can_delete: canDeleteBugView(req, row),
+  }
+}
+
 function getBugAttachmentSignExpireSeconds() {
   return Math.max(60, Number(process.env.BUG_ATTACHMENT_SIGN_EXPIRE_SECONDS || 1800))
 }
@@ -653,7 +682,6 @@ const fixBug = async (req, res) =>
 
 const verifyBug = async (req, res) =>
   handleTransition(req, res, BUG_STATUS.CLOSED, {
-    requireVerifyResult: true,
     successMessage: 'Bug已关闭',
   })
 
@@ -777,6 +805,156 @@ const listBugAssignees = async (req, res) => {
     return res.json({ success: true, data: rows })
   } catch (err) {
     console.error('获取Bug可选处理人失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listBugViews = async (req, res) => {
+  try {
+    const rows = await Bug.listBugViews({ viewerUserId: req.user.id })
+    return res.json({
+      success: true,
+      data: rows.map((item) => decorateBugViewRow(req, item)),
+    })
+  } catch (err) {
+    console.error('获取Bug视图列表失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getBugViewById = async (req, res) => {
+  const viewId = toPositiveInt(req.params.viewId)
+  if (!viewId) {
+    return res.status(400).json({ success: false, message: '视图ID无效' })
+  }
+
+  try {
+    const row = await Bug.getBugViewById(viewId, { viewerUserId: req.user.id })
+    if (!row) {
+      return res.status(404).json({ success: false, message: '视图不存在或无权限查看' })
+    }
+    return res.json({
+      success: true,
+      data: decorateBugViewRow(req, row),
+    })
+  } catch (err) {
+    console.error('获取Bug视图详情失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const createBugView = async (req, res) => {
+  const viewName = normalizeText(req.body?.view_name || req.body?.name, 100)
+  if (!viewName) {
+    return res.status(400).json({ success: false, message: '视图名称不能为空' })
+  }
+
+  const visibility = normalizeBugViewVisibility(req.body?.visibility)
+  const config = sanitizeBugViewConfig(req.body?.config)
+
+  try {
+    const viewId = await Bug.createBugView({
+      viewName,
+      visibility,
+      config,
+      createdBy: req.user.id,
+      updatedBy: req.user.id,
+    })
+    if (!viewId) {
+      return res.status(400).json({ success: false, message: '创建视图失败，请检查参数' })
+    }
+    const row = await Bug.getBugViewById(viewId, {
+      viewerUserId: req.user.id,
+      bypassScope: true,
+    })
+    return res.status(201).json({
+      success: true,
+      message: '视图保存成功',
+      data: decorateBugViewRow(req, row),
+    })
+  } catch (err) {
+    console.error('创建Bug视图失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const updateBugView = async (req, res) => {
+  const viewId = toPositiveInt(req.params.viewId)
+  if (!viewId) {
+    return res.status(400).json({ success: false, message: '视图ID无效' })
+  }
+
+  try {
+    const existing = await Bug.getBugViewById(viewId, {
+      viewerUserId: req.user.id,
+      bypassScope: true,
+    })
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '视图不存在' })
+    }
+    if (!canManageBugView(req, existing)) {
+      return res.status(403).json({ success: false, message: '无权限编辑该视图' })
+    }
+
+    const viewName = normalizeText(req.body?.view_name || req.body?.name || existing.view_name, 100)
+    if (!viewName) {
+      return res.status(400).json({ success: false, message: '视图名称不能为空' })
+    }
+    const visibility = normalizeBugViewVisibility(req.body?.visibility || existing.visibility)
+    const configSource = Object.prototype.hasOwnProperty.call(req.body || {}, 'config')
+      ? req.body.config
+      : existing.config
+    const config = sanitizeBugViewConfig(configSource)
+
+    const affected = await Bug.updateBugView(viewId, {
+      viewName,
+      visibility,
+      config,
+      updatedBy: req.user.id,
+    })
+    if (!affected) {
+      return res.status(400).json({ success: false, message: '视图更新失败' })
+    }
+
+    const row = await Bug.getBugViewById(viewId, {
+      viewerUserId: req.user.id,
+      bypassScope: true,
+    })
+    return res.json({
+      success: true,
+      message: '视图更新成功',
+      data: decorateBugViewRow(req, row),
+    })
+  } catch (err) {
+    console.error('更新Bug视图失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const deleteBugView = async (req, res) => {
+  const viewId = toPositiveInt(req.params.viewId)
+  if (!viewId) {
+    return res.status(400).json({ success: false, message: '视图ID无效' })
+  }
+
+  try {
+    const existing = await Bug.getBugViewById(viewId, {
+      viewerUserId: req.user.id,
+      bypassScope: true,
+    })
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '视图不存在' })
+    }
+    if (!canDeleteBugView(req, existing)) {
+      return res.status(403).json({ success: false, message: '无权限删除该视图' })
+    }
+    const affected = await Bug.deleteBugView(viewId, { updatedBy: req.user.id })
+    if (!affected) {
+      return res.status(400).json({ success: false, message: '视图删除失败' })
+    }
+    return res.json({ success: true, message: '视图删除成功' })
+  } catch (err) {
+    console.error('删除Bug视图失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -1025,6 +1203,11 @@ module.exports = {
   rejectBug,
   createBugComment,
   listBugAssignees,
+  listBugViews,
+  getBugViewById,
+  createBugView,
+  updateBugView,
+  deleteBugView,
   getDemandBugStats,
   listDemandBugs,
   getBugAttachmentPolicy,

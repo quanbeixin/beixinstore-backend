@@ -7,6 +7,15 @@ const BUG_TYPE_DICT_KEY = 'bug_type'
 const BUG_PRODUCT_DICT_KEY = 'bug_product'
 const BUG_STAGE_DICT_KEY = 'bug_stage'
 const DEFAULT_PRIORITY_CODE = 'MEDIUM'
+const BUG_VIEW_VISIBILITY = Object.freeze({
+  PRIVATE: 'PRIVATE',
+  SHARED: 'SHARED',
+})
+const BUG_VIEW_GROUP_FIELD_SET = new Set(['status', 'reporter', 'bug_type'])
+const BUG_VIEW_ALLOWED_PAGE_SIZE_SET = new Set([20, 50, 100])
+
+let bugSavedViewTableReady = false
+let bugSavedViewTablePromise = null
 
 const ALLOWED_TRANSITIONS = Object.freeze({
   NEW: ['PROCESSING'],
@@ -49,6 +58,109 @@ function normalizeDemandId(value) {
 function normalizeCode(value, maxLen = 50) {
   const normalized = String(value || '').trim().toUpperCase()
   return normalized.slice(0, maxLen) || null
+}
+
+function normalizeDateText(value) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
+}
+
+function normalizeBugViewVisibility(value) {
+  const normalized = normalizeCode(value, 16)
+  return normalized === BUG_VIEW_VISIBILITY.SHARED
+    ? BUG_VIEW_VISIBILITY.SHARED
+    : BUG_VIEW_VISIBILITY.PRIVATE
+}
+
+function parseJsonObject(value) {
+  if (!value) return {}
+  if (typeof value === 'object' && !Array.isArray(value)) return value
+  try {
+    const parsed = JSON.parse(String(value))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+    return {}
+  } catch {
+    return {}
+  }
+}
+
+function sanitizeBugViewConfig(config = {}) {
+  const source = config && typeof config === 'object' && !Array.isArray(config) ? config : {}
+  const dedupGroupFields = new Set()
+  const groupFields = (Array.isArray(source.group_fields) ? source.group_fields : [])
+    .map((item) => String(item || '').trim())
+    .filter((item) => BUG_VIEW_GROUP_FIELD_SET.has(item))
+    .filter((item) => {
+      if (dedupGroupFields.has(item)) return false
+      dedupGroupFields.add(item)
+      return true
+    })
+    .slice(0, 3)
+  const pageSize = Number(source.page_size || 0)
+
+  return {
+    keyword: normalizeText(source.keyword, 100),
+    status_code: normalizeCode(source.status_code),
+    severity_code: normalizeCode(source.severity_code),
+    assignee_id: toPositiveInt(source.assignee_id),
+    reporter_id: toPositiveInt(source.reporter_id),
+    start_date: normalizeDateText(source.start_date),
+    end_date: normalizeDateText(source.end_date),
+    group_fields: groupFields,
+    page_size: BUG_VIEW_ALLOWED_PAGE_SIZE_SET.has(pageSize) ? pageSize : 20,
+  }
+}
+
+function normalizeBugViewRow(row, { viewerUserId = null } = {}) {
+  if (!row) return null
+  const creatorId = toPositiveInt(row.created_by)
+  const normalizedViewerUserId = toPositiveInt(viewerUserId)
+  const isOwner = Boolean(creatorId && normalizedViewerUserId && creatorId === normalizedViewerUserId)
+  return {
+    id: toPositiveInt(row.id),
+    view_name: normalizeText(row.view_name, 100),
+    visibility: normalizeBugViewVisibility(row.visibility),
+    config: sanitizeBugViewConfig(parseJsonObject(row.view_config)),
+    created_by: creatorId,
+    creator_name: normalizeText(row.creator_name, 100) || '',
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null,
+    is_owner: isOwner,
+  }
+}
+
+async function ensureBugSavedViewTable() {
+  if (bugSavedViewTableReady) return
+  if (bugSavedViewTablePromise) {
+    await bugSavedViewTablePromise
+    return
+  }
+
+  bugSavedViewTablePromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS bug_saved_views (
+        id BIGINT NOT NULL AUTO_INCREMENT,
+        view_name VARCHAR(100) NOT NULL COMMENT '视图名称',
+        visibility VARCHAR(16) NOT NULL DEFAULT 'PRIVATE' COMMENT 'PRIVATE/SHARED',
+        view_config JSON NOT NULL COMMENT '筛选与分组配置JSON',
+        created_by BIGINT NOT NULL COMMENT '创建人用户ID',
+        updated_by BIGINT NULL COMMENT '最后修改人用户ID',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        deleted_at DATETIME NULL DEFAULT NULL,
+        PRIMARY KEY (id),
+        KEY idx_bug_saved_views_creator (created_by),
+        KEY idx_bug_saved_views_visibility (visibility),
+        KEY idx_bug_saved_views_deleted (deleted_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Bug列表筛选视图'
+    `)
+    bugSavedViewTableReady = true
+  })().finally(() => {
+    bugSavedViewTablePromise = null
+  })
+
+  await bugSavedViewTablePromise
 }
 
 function normalizeBugNo(id) {
@@ -556,6 +668,169 @@ const Bug = {
       [normalizedBugId, normalizedUserId],
     )
     return Boolean(legacyRow?.hit)
+  },
+
+  sanitizeBugViewConfig(config = {}) {
+    return sanitizeBugViewConfig(config)
+  },
+
+  normalizeBugViewVisibility(value) {
+    return normalizeBugViewVisibility(value)
+  },
+
+  async listBugViews({ viewerUserId } = {}) {
+    const normalizedViewerUserId = toPositiveInt(viewerUserId)
+    if (!normalizedViewerUserId) return []
+    await ensureBugSavedViewTable()
+
+    const [rows] = await pool.query(
+      `SELECT
+         v.id,
+         v.view_name,
+         v.visibility,
+         v.view_config,
+         v.created_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS creator_name,
+         DATE_FORMAT(v.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(v.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM bug_saved_views v
+       LEFT JOIN users u ON u.id = v.created_by
+       WHERE v.deleted_at IS NULL
+         AND (v.created_by = ? OR v.visibility = 'SHARED')
+       ORDER BY
+         CASE WHEN v.created_by = ? THEN 0 ELSE 1 END ASC,
+         v.updated_at DESC,
+         v.id DESC`,
+      [normalizedViewerUserId, normalizedViewerUserId],
+    )
+
+    return (rows || []).map((item) =>
+      normalizeBugViewRow(item, { viewerUserId: normalizedViewerUserId }),
+    )
+  },
+
+  async getBugViewById(viewId, { viewerUserId = null, bypassScope = false } = {}) {
+    const normalizedViewId = toPositiveInt(viewId)
+    if (!normalizedViewId) return null
+    await ensureBugSavedViewTable()
+
+    const normalizedViewerUserId = toPositiveInt(viewerUserId)
+    let visibilityCondition = ''
+    const params = [normalizedViewId]
+
+    if (!bypassScope) {
+      if (!normalizedViewerUserId) return null
+      visibilityCondition = ' AND (v.created_by = ? OR v.visibility = ?)'
+      params.push(normalizedViewerUserId, BUG_VIEW_VISIBILITY.SHARED)
+    }
+
+    const [rows] = await pool.query(
+      `SELECT
+         v.id,
+         v.view_name,
+         v.visibility,
+         v.view_config,
+         v.created_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS creator_name,
+         DATE_FORMAT(v.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(v.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM bug_saved_views v
+       LEFT JOIN users u ON u.id = v.created_by
+       WHERE v.id = ?
+         AND v.deleted_at IS NULL
+         ${visibilityCondition}
+       LIMIT 1`,
+      params,
+    )
+
+    return normalizeBugViewRow(rows?.[0], { viewerUserId: normalizedViewerUserId })
+  },
+
+  async createBugView({
+    viewName,
+    visibility = BUG_VIEW_VISIBILITY.PRIVATE,
+    config = {},
+    createdBy,
+    updatedBy = null,
+  } = {}) {
+    const normalizedCreatedBy = toPositiveInt(createdBy)
+    if (!normalizedCreatedBy) return null
+    await ensureBugSavedViewTable()
+
+    const normalizedViewName = normalizeText(viewName, 100)
+    if (!normalizedViewName) return null
+    const normalizedVisibility = normalizeBugViewVisibility(visibility)
+    const normalizedConfig = sanitizeBugViewConfig(config)
+    const normalizedUpdatedBy = toPositiveInt(updatedBy) || normalizedCreatedBy
+
+    const [result] = await pool.query(
+      `INSERT INTO bug_saved_views (
+         view_name,
+         visibility,
+         view_config,
+         created_by,
+         updated_by
+       ) VALUES (?, ?, CAST(? AS JSON), ?, ?)`,
+      [
+        normalizedViewName,
+        normalizedVisibility,
+        JSON.stringify(normalizedConfig),
+        normalizedCreatedBy,
+        normalizedUpdatedBy,
+      ],
+    )
+    return toPositiveInt(result?.insertId)
+  },
+
+  async updateBugView(
+    viewId,
+    { viewName, visibility = BUG_VIEW_VISIBILITY.PRIVATE, config = {}, updatedBy } = {},
+  ) {
+    const normalizedViewId = toPositiveInt(viewId)
+    const normalizedUpdatedBy = toPositiveInt(updatedBy)
+    if (!normalizedViewId || !normalizedUpdatedBy) return 0
+    await ensureBugSavedViewTable()
+
+    const normalizedViewName = normalizeText(viewName, 100)
+    if (!normalizedViewName) return 0
+    const normalizedVisibility = normalizeBugViewVisibility(visibility)
+    const normalizedConfig = sanitizeBugViewConfig(config)
+
+    const [result] = await pool.query(
+      `UPDATE bug_saved_views
+       SET view_name = ?,
+           visibility = ?,
+           view_config = CAST(? AS JSON),
+           updated_by = ?
+       WHERE id = ?
+         AND deleted_at IS NULL`,
+      [
+        normalizedViewName,
+        normalizedVisibility,
+        JSON.stringify(normalizedConfig),
+        normalizedUpdatedBy,
+        normalizedViewId,
+      ],
+    )
+
+    return Number(result?.affectedRows || 0)
+  },
+
+  async deleteBugView(viewId, { updatedBy } = {}) {
+    const normalizedViewId = toPositiveInt(viewId)
+    const normalizedUpdatedBy = toPositiveInt(updatedBy)
+    if (!normalizedViewId || !normalizedUpdatedBy) return 0
+    await ensureBugSavedViewTable()
+
+    const [result] = await pool.query(
+      `UPDATE bug_saved_views
+       SET deleted_at = NOW(),
+           updated_by = ?
+       WHERE id = ?
+         AND deleted_at IS NULL`,
+      [normalizedUpdatedBy, normalizedViewId],
+    )
+    return Number(result?.affectedRows || 0)
   },
 
   async listBugs({

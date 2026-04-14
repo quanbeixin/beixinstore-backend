@@ -15,6 +15,11 @@ const {
   rejectBug,
   createBugComment,
   listBugAssignees,
+  listBugViews,
+  getBugViewById,
+  createBugView,
+  updateBugView,
+  deleteBugView,
   getDemandBugStats,
   listDemandBugs,
   getBugAttachmentPolicy,
@@ -101,6 +106,11 @@ const { getHumanGantt } = require('../controllers/humanGanttController')
 router.use(authMiddleware)
 
 router.get('/bugs/assignees', authMiddleware.requirePermission('bug.view'), listBugAssignees)
+router.get('/bugs/views', authMiddleware.requirePermission('bug.view'), listBugViews)
+router.get('/bugs/views/:viewId', authMiddleware.requirePermission('bug.view'), getBugViewById)
+router.post('/bugs/views', authMiddleware.requirePermission('bug.view'), createBugView)
+router.put('/bugs/views/:viewId', authMiddleware.requirePermission('bug.view'), updateBugView)
+router.delete('/bugs/views/:viewId', authMiddleware.requirePermission('bug.view'), deleteBugView)
 router.get('/bugs', authMiddleware.requirePermission('bug.view'), listBugs)
 router.get('/bugs/:id', authMiddleware.requirePermission('bug.view'), getBugDetail)
 router.post('/bugs', authMiddleware.requirePermission('bug.create'), createBug)
