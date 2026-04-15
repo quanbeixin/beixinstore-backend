@@ -2321,7 +2321,7 @@ const Workflow = {
         nextInstanceRows,
       )
 
-      if (Boolean(autoAssignCurrentNode)) {
+      if (autoAssignCurrentNode) {
         // 保持与旧逻辑兼容，当前接口目前默认不自动指派
       }
 
