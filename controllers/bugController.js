@@ -377,6 +377,51 @@ function extractBugWatcherList(bug) {
   return list
 }
 
+function pickFirstNonEmptyText(candidates = [], maxLen = 20000) {
+  for (const item of candidates) {
+    const text = normalizeText(item, maxLen)
+    if (text) return text
+  }
+  return ''
+}
+
+function parseFeishuCardCommentText(payload = {}) {
+  const formValue = payload?.action?.form_value || payload?.form_value || {}
+  const rawValue = formValue?.reply_comment
+  if (rawValue && typeof rawValue === 'object') {
+    return pickFirstNonEmptyText(
+      [rawValue.value, rawValue.text, rawValue.content, rawValue.input, rawValue.default_value],
+      20000,
+    )
+  }
+  return normalizeText(rawValue, 20000)
+}
+
+function parseFeishuCardActionValue(payload = {}) {
+  const actionValue = payload?.action?.value
+  if (!actionValue) return {}
+  if (typeof actionValue === 'object') return actionValue
+  try {
+    const parsed = JSON.parse(String(actionValue))
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function parseFeishuOperatorOpenId(payload = {}) {
+  return pickFirstNonEmptyText(
+    [
+      payload?.open_id,
+      payload?.operator?.open_id,
+      payload?.event?.open_id,
+      payload?.event?.operator?.open_id,
+      payload?.user?.open_id,
+    ],
+    128,
+  )
+}
+
 async function resolveBusinessLineId(demandId) {
   const normalizedDemandId = normalizeDemandId(demandId)
   if (!normalizedDemandId) return null
@@ -1055,7 +1100,7 @@ const createBugComment = async (req, res) => {
             bug_id: bugId,
             bug_no: normalizeText(bug?.bug_no, 64) || null,
             detail_url: buildBugDetailUrl(bugId),
-            detail_action_text: '查看Bug',
+            detail_action_text: '查看详情',
             mention_user_id: mentionUserId,
             mention_user_name: mentionDisplayName || null,
           },
@@ -1086,6 +1131,101 @@ const createBugComment = async (req, res) => {
   } catch (err) {
     console.error('Bug评论失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const receiveFeishuBugCommentAction = async (req, res) => {
+  const payload = req.body && typeof req.body === 'object' ? req.body : {}
+
+  if (payload?.type === 'url_verification' && payload?.challenge) {
+    return res.json({ challenge: payload.challenge })
+  }
+
+  const actionValue = parseFeishuCardActionValue(payload)
+  const actionKey = normalizeText(actionValue?.action, 80).toLowerCase()
+  if (actionKey !== 'bug_comment_reply_submit') {
+    return res.json({ ok: true })
+  }
+
+  const bugId = toPositiveInt(actionValue?.bug_id)
+  const comment = parseFeishuCardCommentText(payload)
+  if (!bugId || !comment) {
+    return res.json({
+      toast: {
+        type: 'warning',
+        content: '回复内容不能为空',
+      },
+    })
+  }
+
+  try {
+    const operatorOpenId = parseFeishuOperatorOpenId(payload)
+    if (!operatorOpenId) {
+      return res.json({
+        toast: {
+          type: 'warning',
+          content: '未识别到飞书用户身份，无法提交回复',
+        },
+      })
+    }
+
+    const [users] = await pool.query(
+      `SELECT id
+       FROM users
+       WHERE feishu_open_id = ?
+       LIMIT 1`,
+      [operatorOpenId],
+    )
+    const operatorId = toPositiveInt(users?.[0]?.id)
+    if (!operatorId) {
+      return res.json({
+        toast: {
+          type: 'warning',
+          content: '当前飞书账号未绑定系统用户，无法提交回复',
+        },
+      })
+    }
+
+    const bug = await Bug.findBugById(bugId)
+    if (!bug) {
+      return res.json({
+        toast: {
+          type: 'warning',
+          content: 'Bug 不存在或已删除',
+        },
+      })
+    }
+
+    const statusCode = normalizeCode(bug?.status_code) || BUG_STATUS.NEW
+    const result = await Bug.addBugCommentLog(bugId, {
+      operatorId,
+      statusCode,
+      comment,
+      parentCommentId: null,
+    })
+    if (!result?.ok) {
+      return res.json({
+        toast: {
+          type: 'error',
+          content: '回复提交失败，请稍后重试',
+        },
+      })
+    }
+
+    return res.json({
+      toast: {
+        type: 'success',
+        content: '回复已提交到系统',
+      },
+    })
+  } catch (error) {
+    console.error('处理飞书卡片回复评论失败:', error)
+    return res.json({
+      toast: {
+        type: 'error',
+        content: '回复提交失败，请稍后重试',
+      },
+    })
   }
 }
 
@@ -1764,6 +1904,7 @@ module.exports = {
   rejectBug,
   transitionBugByWorkflow,
   createBugComment,
+  receiveFeishuBugCommentAction,
   updateBugComment,
   listBugAssignees,
   getBugWorkflowConfig,

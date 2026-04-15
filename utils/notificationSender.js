@@ -483,6 +483,77 @@ function buildInteractiveCardPayload({ title, markdown, actionUrl, actionText })
   }
 }
 
+function buildBugCommentReplyCardPayload({
+  title,
+  markdown,
+  detailUrl,
+  detailActionText,
+  bugId,
+}) {
+  const normalizedDetailUrl = normalizeHttpUrl(detailUrl)
+  const normalizedBugId = Number(bugId)
+  const bugIdValue = Number.isInteger(normalizedBugId) && normalizedBugId > 0 ? normalizedBugId : null
+
+  const elements = [
+    {
+      tag: 'markdown',
+      content: String(markdown || ''),
+    },
+    {
+      tag: 'input',
+      name: 'reply_comment',
+      required: false,
+      placeholder: {
+        tag: 'plain_text',
+        content: '请输入回复内容',
+      },
+    },
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button',
+          text: {
+            tag: 'plain_text',
+            content: normalizeText(detailActionText, 20) || '查看详情',
+          },
+          type: 'default',
+          ...(normalizedDetailUrl ? { url: normalizedDetailUrl } : {}),
+        },
+        {
+          tag: 'button',
+          text: {
+            tag: 'plain_text',
+            content: '提交回复',
+          },
+          type: 'primary',
+          value: {
+            action: 'bug_comment_reply_submit',
+            bug_id: bugIdValue,
+          },
+        },
+      ],
+    },
+  ]
+
+  return {
+    msg_type: 'interactive',
+    content: JSON.stringify({
+      config: {
+        wide_screen_mode: true,
+      },
+      header: {
+        template: 'blue',
+        title: {
+          tag: 'plain_text',
+          content: normalizeText(title, 100) || '系统通知',
+        },
+      },
+      elements,
+    }),
+  }
+}
+
 function buildFallbackInteractiveCardPayload({ title, actionUrl, actionText }) {
   return buildInteractiveCardPayload({
     title,
@@ -916,16 +987,26 @@ async function sendByFeishuApp({ title, content, targets, metadata }) {
 
     try {
       const targetActionUrl = buildTargetActionUrl(detailUrl, target)
+      const isBugCommentMention = String(metadata?.source || '').trim().toLowerCase() === 'bug_comment_mention'
+      const bugId = Number(metadata?.bug_id || 0)
       let sent = await sendFeishuMessage({
         token: tokenResult.token,
         receiveIdType,
         receiveId: target.target_id,
-        messageBody: buildInteractiveCardPayload({
-          title,
-          markdown,
-          actionUrl: targetActionUrl,
-          actionText: metadata?.detail_action_text || '查看详情',
-        }),
+        messageBody: isBugCommentMention
+          ? buildBugCommentReplyCardPayload({
+              title,
+              markdown,
+              detailUrl: targetActionUrl,
+              detailActionText: metadata?.detail_action_text || '查看详情',
+              bugId,
+            })
+          : buildInteractiveCardPayload({
+              title,
+              markdown,
+              actionUrl: targetActionUrl,
+              actionText: metadata?.detail_action_text || '查看详情',
+            }),
         timeoutMs,
       })
 

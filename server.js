@@ -23,6 +23,7 @@ const integrationRoutes = require('./routes/integrationRoutes')
 const userFeedbackRoutes = require('./routes/userFeedbackRoutes')
 const userFeedbackConfigRoutes = require('./routes/userFeedbackConfigRoutes')
 const publicFeedbackRoutes = require('./routes/publicFeedbackRoutes')
+const publicFeishuRoutes = require('./routes/publicFeishuRoutes')
 const { apiLimiter, loginLimiter } = require('./middleware/security')
 const notificationSchedulerService = require('./services/notificationSchedulerService')
 
@@ -118,6 +119,7 @@ app.use('/api/notification', notificationEventRoutes)
 app.use('/api/feedback', userFeedbackRoutes)
 app.use('/api/ai-config', userFeedbackConfigRoutes)
 app.use('/api/public/feedback', publicFeedbackRoutes)
+app.use('/api/public/feishu', publicFeishuRoutes)
 app.use('/api', testRoutes)
 
 app.get('/', (req, res) => {
