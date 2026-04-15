@@ -89,6 +89,7 @@ const {
   getDemandWorkflow,
   assignDemandWorkflowCurrentNode,
   assignDemandWorkflowNode,
+  remindDemandWorkflowNodeStatus,
   submitDemandWorkflowCurrentNode,
   submitDemandWorkflowNode,
   rejectDemandWorkflowCurrentNode,
@@ -248,6 +249,11 @@ router.post(
   '/demands/:id/workflow/nodes/:nodeKey/assign',
   authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
   assignDemandWorkflowNode,
+)
+router.post(
+  '/demands/:id/workflow/nodes/:nodeKey/remind',
+  authMiddleware.requireAnyPermission(['demand.manage', 'demand.workflow.manage']),
+  remindDemandWorkflowNodeStatus,
 )
 router.post(
   '/demands/:id/workflow/current/submit',

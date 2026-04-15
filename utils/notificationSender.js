@@ -489,56 +489,148 @@ function buildBugCommentReplyCardPayload({
   detailUrl,
   detailActionText,
   bugId,
+  parentCommentId = null,
+  mode = 'replying',
 }) {
   const normalizedDetailUrl = normalizeHttpUrl(detailUrl)
   const normalizedBugId = Number(bugId)
   const bugIdValue = Number.isInteger(normalizedBugId) && normalizedBugId > 0 ? normalizedBugId : null
+  const normalizedParentCommentId = Number(parentCommentId)
+  const parentCommentIdValue =
+    Number.isInteger(normalizedParentCommentId) && normalizedParentCommentId > 0 ? normalizedParentCommentId : null
+  const normalizedTitle = normalizeText(title, 100) || '系统通知'
+  const normalizedMarkdown = String(markdown || '')
+  const normalizedDetailActionText = normalizeText(detailActionText, 20) || '查看详情'
+  const normalizedMode = String(mode || '').trim().toLowerCase() === 'collapsed' ? 'collapsed' : 'replying'
+  const replySubmitButtonName = `bug_reply_submit_${bugIdValue || 0}_${parentCommentIdValue || 0}`
+  const replyFormName = `bug_reply_form_${bugIdValue || 0}_${parentCommentIdValue || 0}`
 
-  const elements = [
-    {
-      tag: 'markdown',
-      content: String(markdown || ''),
-    },
-    {
-      tag: 'input',
-      name: 'reply_comment',
-      required: false,
-      placeholder: {
-        tag: 'plain_text',
-        content: '请输入回复内容',
-      },
-    },
-    {
-      tag: 'action',
-      actions: [
+  const openReplyValue = {
+    action: 'bug_comment_reply_open',
+    bug_id: bugIdValue,
+  }
+
+  const elements = [{ tag: 'markdown', content: normalizedMarkdown }]
+  if (normalizedMode === 'collapsed') {
+    elements.push({
+      tag: 'column_set',
+      flex_mode: 'none',
+      horizontal_align: 'left',
+      columns: [
         {
-          tag: 'button',
-          text: {
-            tag: 'plain_text',
-            content: normalizeText(detailActionText, 20) || '查看详情',
-          },
-          type: 'default',
-          ...(normalizedDetailUrl ? { url: normalizedDetailUrl } : {}),
+          tag: 'column',
+          width: 'auto',
+          elements: [
+            {
+              tag: 'button',
+              name: 'bug_comment_detail_btn',
+              text: {
+                tag: 'plain_text',
+                content: normalizedDetailActionText,
+              },
+              type: 'default',
+              ...(normalizedDetailUrl ? { url: normalizedDetailUrl } : {}),
+            },
+          ],
         },
         {
-          tag: 'button',
-          text: {
-            tag: 'plain_text',
-            content: '提交回复',
-          },
-          type: 'primary',
-          value: {
-            action: 'bug_comment_reply_submit',
-            bug_id: bugIdValue,
-          },
+          tag: 'column',
+          width: 'auto',
+          elements: [
+            {
+              tag: 'button',
+              name: 'bug_comment_reply_open_btn',
+              text: {
+                tag: 'plain_text',
+                content: '回复评论',
+              },
+              type: 'primary',
+              value: openReplyValue,
+            },
+          ],
         },
       ],
-    },
-  ]
+    })
+  } else {
+    elements.push({
+      tag: 'form',
+      name: replyFormName,
+      elements: [
+        {
+          tag: 'input',
+          name: 'reply_comment',
+          required: false,
+          input_type: 'multiline_text',
+          rows: 3,
+          auto_resize: true,
+          max_rows: 6,
+          placeholder: {
+            tag: 'plain_text',
+            content: '请输入回复内容',
+          },
+        },
+        {
+          tag: 'column_set',
+          flex_mode: 'none',
+          horizontal_align: 'left',
+          columns: [
+            {
+              tag: 'column',
+              width: 'auto',
+              elements: [
+                {
+                  tag: 'button',
+                  name: 'bug_comment_detail_btn',
+                  text: {
+                    tag: 'plain_text',
+                    content: normalizedDetailActionText,
+                  },
+                  type: 'default',
+                  ...(normalizedDetailUrl ? { url: normalizedDetailUrl } : {}),
+                },
+              ],
+            },
+            {
+              tag: 'column',
+              width: 'auto',
+              elements: [
+                {
+                  tag: 'button',
+                  name: replySubmitButtonName,
+                  text: {
+                    tag: 'plain_text',
+                    content: '回复评论',
+                  },
+                  type: 'primary',
+                  form_action_type: 'submit',
+                  behaviors: [
+                    {
+                      type: 'callback',
+                      value: {
+                        action: 'bug_comment_reply_submit',
+                        bug_id: bugIdValue,
+                        parent_comment_id: parentCommentIdValue,
+                      },
+                    },
+                  ],
+                  value: {
+                    action: 'bug_comment_reply_submit',
+                    bug_id: bugIdValue,
+                    parent_comment_id: parentCommentIdValue,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+  }
 
   return {
     msg_type: 'interactive',
     content: JSON.stringify({
+      schema: '2.0',
       config: {
         wide_screen_mode: true,
       },
@@ -546,10 +638,12 @@ function buildBugCommentReplyCardPayload({
         template: 'blue',
         title: {
           tag: 'plain_text',
-          content: normalizeText(title, 100) || '系统通知',
+          content: normalizedTitle,
         },
       },
-      elements,
+      body: {
+        elements,
+      },
     }),
   }
 }
@@ -1000,6 +1094,8 @@ async function sendByFeishuApp({ title, content, targets, metadata }) {
               detailUrl: targetActionUrl,
               detailActionText: metadata?.detail_action_text || '查看详情',
               bugId,
+              parentCommentId: metadata?.source_comment_log_id,
+              mode: 'replying',
             })
           : buildInteractiveCardPayload({
               title,
@@ -1120,4 +1216,5 @@ module.exports = {
   updateNotificationSendControl,
   listFeishuChats,
   createFeishuDemandChat,
+  buildBugCommentReplyCardPayload,
 }
