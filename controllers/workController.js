@@ -1972,6 +1972,8 @@ const createDemand = async (req, res) => {
   const docLink = normalizeText(req.body.doc_link, 500)
   const uiDesignLink = normalizeText(req.body.ui_design_link, 500)
   const testCaseLink = normalizeText(req.body.test_case_link, 500)
+  const frontendTechSolution = normalizeText(req.body.frontend_tech_solution, 10000)
+  const backendTechSolution = normalizeText(req.body.backend_tech_solution, 10000)
   const codeBranch = normalizeText(req.body.code_branch, 255)
   const releaseNote = normalizeText(req.body.release_note, 2000)
   const expectedReleaseDateRaw = req.body.expected_release_date
@@ -2112,6 +2114,8 @@ const createDemand = async (req, res) => {
       docLink: docLink || null,
       uiDesignLink: uiDesignLink || null,
       testCaseLink: testCaseLink || null,
+      frontendTechSolution: frontendTechSolution || null,
+      backendTechSolution: backendTechSolution || null,
       codeBranch: codeBranch || null,
       releaseNote: releaseNote || null,
       businessGroupCode,
@@ -2381,6 +2385,14 @@ const updateDemand = async (req, res) => {
       req.body.test_case_link === undefined
         ? existing.test_case_link
         : normalizeText(req.body.test_case_link, 500) || null
+    const frontendTechSolution =
+      req.body.frontend_tech_solution === undefined
+        ? existing.frontend_tech_solution
+        : normalizeText(req.body.frontend_tech_solution, 10000) || null
+    const backendTechSolution =
+      req.body.backend_tech_solution === undefined
+        ? existing.backend_tech_solution
+        : normalizeText(req.body.backend_tech_solution, 10000) || null
     const codeBranch =
       req.body.code_branch === undefined
         ? existing.code_branch
@@ -2471,6 +2483,8 @@ const updateDemand = async (req, res) => {
       docLink,
       uiDesignLink,
       testCaseLink,
+      frontendTechSolution,
+      backendTechSolution,
       codeBranch,
       releaseNote,
       businessGroupCode,
