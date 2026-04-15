@@ -1,5 +1,6 @@
 const pool = require('../utils/db')
 const { sendNotification } = require('../utils/notificationSender')
+const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 
 function normalizeText(value, maxLength = 255) {
   if (value === undefined || value === null) return ''
@@ -63,19 +64,41 @@ function normalizeDemandId(value) {
   return text || ''
 }
 
+function isLocalHost(hostname = '') {
+  const normalized = String(hostname || '').trim().toLowerCase()
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '0.0.0.0'
+}
+
+function normalizePublicBaseUrl(value) {
+  const text = normalizeText(value, 1000)
+  if (!text) return ''
+  try {
+    const parsed = new URL(text)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
+    if (isLocalHost(parsed.hostname)) return ''
+    parsed.pathname = parsed.pathname.replace(/\/+$/g, '')
+    return parsed.toString().replace(/\/+$/g, '')
+  } catch {
+    return ''
+  }
+}
+
 function normalizePortalBaseUrl() {
-  const text = normalizeText(process.env.NOTIFICATION_PORTAL_BASE_URL, 500)
-  if (text) return text.replace(/\/+$/g, '')
+  const explicitPublic = normalizePublicBaseUrl(process.env.NOTIFICATION_PORTAL_PUBLIC_BASE_URL)
+  if (explicitPublic) return explicitPublic
+
+  const configuredBaseUrl = normalizePublicBaseUrl(process.env.NOTIFICATION_PORTAL_BASE_URL)
+  if (configuredBaseUrl) return configuredBaseUrl
 
   const fallbackOrigin = normalizeText(process.env.CLIENT_ORIGIN, 1000)
-  if (!fallbackOrigin) return ''
-
-  const firstOrigin = fallbackOrigin
+  const firstNonLocalOrigin = fallbackOrigin
     .split(',')
     .map((item) => String(item || '').trim())
+    .map((item) => normalizePublicBaseUrl(item))
     .find(Boolean)
+  if (firstNonLocalOrigin) return firstNonLocalOrigin
 
-  return firstOrigin ? firstOrigin.replace(/\/+$/g, '') : ''
+  return DEFAULT_NOTIFICATION_PUBLIC_BASE_URL
 }
 
 function buildPortalUrl(pathname = '', query = {}) {

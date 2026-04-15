@@ -1,5 +1,6 @@
 const pool = require('./db')
 const { signNotificationLoginToken } = require('./notificationLoginToken')
+const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 
 function normalizeText(value, maxLength = 500) {
   if (value === undefined || value === null) return ''
@@ -19,8 +20,59 @@ function normalizeHttpUrl(value, maxLength = 2000) {
   }
 }
 
-function buildTargetActionUrl(actionUrl, target) {
+function isLocalHost(hostname = '') {
+  const normalized = String(hostname || '').trim().toLowerCase()
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '0.0.0.0'
+}
+
+function normalizePublicBaseUrl(value) {
+  const text = normalizeText(value, 1000)
+  if (!text) return ''
+  try {
+    const parsed = new URL(text)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
+    if (isLocalHost(parsed.hostname)) return ''
+    parsed.pathname = parsed.pathname.replace(/\/+$/g, '')
+    return parsed.toString().replace(/\/+$/g, '')
+  } catch {
+    return ''
+  }
+}
+
+function resolveNotificationPublicBaseUrl() {
+  const explicitPublic = normalizePublicBaseUrl(process.env.NOTIFICATION_PORTAL_PUBLIC_BASE_URL)
+  if (explicitPublic) return explicitPublic
+
+  const configuredBase = normalizePublicBaseUrl(process.env.NOTIFICATION_PORTAL_BASE_URL)
+  if (configuredBase) return configuredBase
+
+  const firstNonLocalOrigin = String(process.env.CLIENT_ORIGIN || '')
+    .split(',')
+    .map((item) => normalizePublicBaseUrl(item))
+    .find(Boolean)
+  if (firstNonLocalOrigin) return firstNonLocalOrigin
+
+  return DEFAULT_NOTIFICATION_PUBLIC_BASE_URL
+}
+
+function rewriteLocalActionUrlToPublic(actionUrl) {
   const normalizedActionUrl = normalizeHttpUrl(actionUrl)
+  if (!normalizedActionUrl) return ''
+  try {
+    const parsed = new URL(normalizedActionUrl)
+    if (!isLocalHost(parsed.hostname)) return parsed.toString()
+    const publicBase = resolveNotificationPublicBaseUrl()
+    const publicUrl = new URL(publicBase)
+    parsed.protocol = publicUrl.protocol
+    parsed.host = publicUrl.host
+    return parsed.toString()
+  } catch {
+    return normalizedActionUrl
+  }
+}
+
+function buildTargetActionUrl(actionUrl, target) {
+  const normalizedActionUrl = rewriteLocalActionUrlToPublic(actionUrl)
   if (!normalizedActionUrl) return ''
   if (!target || target.target_type !== 'user') return normalizedActionUrl
 
