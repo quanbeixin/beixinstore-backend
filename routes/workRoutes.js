@@ -49,6 +49,11 @@ const {
   getEfficiencyFactorSettings,
   updateEfficiencyFactorSettings,
   listDemands,
+  listDemandViews,
+  getDemandViewById,
+  createDemandView,
+  updateDemandView,
+  deleteDemandView,
   getDemandById,
   listDemandMembers,
   addDemandMember,
@@ -203,6 +208,11 @@ router.get('/efficiency-factor-settings', getEfficiencyFactorSettings)
 router.put('/efficiency-factor-settings', updateEfficiencyFactorSettings)
 
 router.get('/demands', authMiddleware.requirePermission('demand.view'), listDemands)
+router.get('/demands/views', authMiddleware.requirePermission('demand.view'), listDemandViews)
+router.get('/demands/views/:viewId', authMiddleware.requirePermission('demand.view'), getDemandViewById)
+router.post('/demands/views', authMiddleware.requirePermission('demand.view'), createDemandView)
+router.put('/demands/views/:viewId', authMiddleware.requirePermission('demand.view'), updateDemandView)
+router.delete('/demands/views/:viewId', authMiddleware.requirePermission('demand.view'), deleteDemandView)
 router.get('/demands/:id', authMiddleware.requirePermission('demand.view'), getDemandById)
 router.get('/demands/:id/workflow/node-options', authMiddleware.requirePermission('demand.view'), listDemandWorkflowNodeOptions)
 router.get('/demands/:id/bug-stats', authMiddleware.requireAnyPermission(['demand.view', 'bug.view']), getDemandBugStats)

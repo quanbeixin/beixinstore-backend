@@ -63,6 +63,15 @@ function toPositiveInt(value) {
   return Number.isInteger(num) && num > 0 ? num : null
 }
 
+function toPositiveIntList(value) {
+  const source = Array.isArray(value)
+    ? value
+    : String(value === undefined || value === null ? '' : value)
+        .split(',')
+        .map((item) => String(item || '').trim())
+  return Array.from(new Set(source.map((item) => toPositiveInt(item)).filter(Boolean)))
+}
+
 function parseAssigneeUserIdsFromBody(body = {}) {
   const list = Array.isArray(body.assignee_user_ids)
     ? body.assignee_user_ids.map((item) => toPositiveInt(item)).filter(Boolean)
@@ -776,6 +785,36 @@ function hasRole(req, roleKey) {
   return roleKeys.includes(String(roleKey || '').trim().toUpperCase())
 }
 
+function sanitizeDemandViewConfig(config = {}) {
+  return Work.sanitizeDemandViewConfig(config)
+}
+
+function normalizeDemandViewVisibility(value) {
+  return Work.normalizeDemandViewVisibility(value)
+}
+
+function canManageDemandView(req, viewRow) {
+  if (!viewRow) return false
+  if (req.userAccess?.is_super_admin) return true
+  if (hasPermission(req, 'demand.manage')) return true
+  if (hasRole(req, 'ADMIN')) return true
+  return Number(req.user?.id || 0) > 0 && Number(req.user?.id || 0) === Number(viewRow.created_by || 0)
+}
+
+function canDeleteDemandView(req, viewRow) {
+  if (!viewRow) return false
+  return Number(req.user?.id || 0) > 0 && Number(req.user?.id || 0) === Number(viewRow.created_by || 0)
+}
+
+function decorateDemandViewRow(req, row) {
+  if (!row) return null
+  return {
+    ...row,
+    can_edit: canManageDemandView(req, row),
+    can_delete: canDeleteDemandView(req, row),
+  }
+}
+
 function canTransferDemandOwner(req) {
   return hasPermission(req, 'demand.transfer_owner') || hasRole(req, 'ADMIN')
 }
@@ -1385,6 +1424,8 @@ const listDemands = async (req, res) => {
   const keyword = normalizeText(req.query.keyword, 100)
   const status = normalizeStatus(req.query.status || '')
   const priority = normalizePriority(req.query.priority || '')
+  const templateId = toPositiveInt(req.query.template_id)
+  const templateIds = toPositiveIntList(req.query.template_ids)
   const priorityOrderRaw = req.query.priority_order
   const priorityOrder = normalizePriorityOrder(priorityOrderRaw)
   const businessGroupCode = normalizeBusinessGroupCode(req.query.business_group_code)
@@ -1405,6 +1446,22 @@ const listDemands = async (req, res) => {
 
   if (businessGroupCode === '') {
     return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
+  }
+  if (
+    req.query.template_id !== undefined &&
+    req.query.template_id !== null &&
+    String(req.query.template_id).trim() !== '' &&
+    !templateId
+  ) {
+    return res.status(400).json({ success: false, message: 'template_id 无效' })
+  }
+  if (
+    req.query.template_ids !== undefined &&
+    req.query.template_ids !== null &&
+    String(Array.isArray(req.query.template_ids) ? req.query.template_ids.join(',') : req.query.template_ids).trim() !== '' &&
+    templateIds.length === 0
+  ) {
+    return res.status(400).json({ success: false, message: 'template_ids 无效' })
   }
   if (
     priorityOrderRaw !== undefined &&
@@ -1449,6 +1506,8 @@ const listDemands = async (req, res) => {
       keyword,
       status: req.query.status ? status : '',
       priority: req.query.priority ? priority : '',
+      templateId,
+      templateIds,
       priorityOrder: priorityOrder || '',
       businessGroupCode: businessGroupCode || '',
       ownerUserId,
@@ -1480,6 +1539,162 @@ const listDemands = async (req, res) => {
     })
   } catch (err) {
     console.error('获取需求池失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listDemandViews = async (req, res) => {
+  try {
+    const rows = await Work.listDemandViews({ viewerUserId: req.user.id })
+    return res.json({
+      success: true,
+      data: rows.map((item) => decorateDemandViewRow(req, item)),
+    })
+  } catch (err) {
+    console.error('获取需求池视图列表失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const getDemandViewById = async (req, res) => {
+  const viewId = toPositiveInt(req.params.viewId)
+  if (!viewId) {
+    return res.status(400).json({ success: false, message: '视图ID无效' })
+  }
+
+  try {
+    const row = await Work.getDemandViewById(viewId, { viewerUserId: req.user.id })
+    if (!row) {
+      return res.status(404).json({ success: false, message: '视图不存在或无权限查看' })
+    }
+    return res.json({
+      success: true,
+      data: decorateDemandViewRow(req, row),
+    })
+  } catch (err) {
+    console.error('获取需求池视图详情失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const createDemandView = async (req, res) => {
+  const viewName = normalizeText(req.body?.view_name || req.body?.name, 100)
+  if (!viewName) {
+    return res.status(400).json({ success: false, message: '视图名称不能为空' })
+  }
+
+  const visibility = normalizeDemandViewVisibility(req.body?.visibility)
+  const config = sanitizeDemandViewConfig(req.body?.config)
+
+  try {
+    const viewId = await Work.createDemandView({
+      viewName,
+      visibility,
+      config,
+      createdBy: req.user.id,
+      updatedBy: req.user.id,
+    })
+    if (!viewId) {
+      return res.status(400).json({ success: false, message: '创建视图失败，请检查参数' })
+    }
+
+    const row = await Work.getDemandViewById(viewId, {
+      viewerUserId: req.user.id,
+      bypassScope: true,
+    })
+    return res.status(201).json({
+      success: true,
+      message: '视图保存成功',
+      data: decorateDemandViewRow(req, row),
+    })
+  } catch (err) {
+    console.error('创建需求池视图失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const updateDemandView = async (req, res) => {
+  const viewId = toPositiveInt(req.params.viewId)
+  if (!viewId) {
+    return res.status(400).json({ success: false, message: '视图ID无效' })
+  }
+
+  try {
+    const existing = await Work.getDemandViewById(viewId, {
+      viewerUserId: req.user.id,
+      bypassScope: true,
+    })
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '视图不存在' })
+    }
+    if (!canManageDemandView(req, existing)) {
+      return res.status(403).json({ success: false, message: '无权限编辑该视图' })
+    }
+
+    const viewName = normalizeText(req.body?.view_name || req.body?.name || existing.view_name, 100)
+    if (!viewName) {
+      return res.status(400).json({ success: false, message: '视图名称不能为空' })
+    }
+
+    const visibility = normalizeDemandViewVisibility(req.body?.visibility || existing.visibility)
+    const configSource = Object.prototype.hasOwnProperty.call(req.body || {}, 'config')
+      ? req.body.config
+      : existing.config
+    const config = sanitizeDemandViewConfig(configSource)
+
+    const affected = await Work.updateDemandView(viewId, {
+      viewName,
+      visibility,
+      config,
+      updatedBy: req.user.id,
+    })
+    if (!affected) {
+      return res.status(400).json({ success: false, message: '视图更新失败' })
+    }
+
+    const row = await Work.getDemandViewById(viewId, {
+      viewerUserId: req.user.id,
+      bypassScope: true,
+    })
+    return res.json({
+      success: true,
+      message: '视图更新成功',
+      data: decorateDemandViewRow(req, row),
+    })
+  } catch (err) {
+    console.error('更新需求池视图失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const deleteDemandView = async (req, res) => {
+  const viewId = toPositiveInt(req.params.viewId)
+  if (!viewId) {
+    return res.status(400).json({ success: false, message: '视图ID无效' })
+  }
+
+  try {
+    const existing = await Work.getDemandViewById(viewId, {
+      viewerUserId: req.user.id,
+      bypassScope: true,
+    })
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '视图不存在' })
+    }
+    if (!canDeleteDemandView(req, existing)) {
+      return res.status(403).json({ success: false, message: '无权限删除该视图' })
+    }
+
+    const affected = await Work.deleteDemandView(viewId, { updatedBy: req.user.id })
+    if (!affected) {
+      return res.status(400).json({ success: false, message: '视图删除失败' })
+    }
+    return res.json({
+      success: true,
+      message: '视图删除成功',
+    })
+  } catch (err) {
+    console.error('删除需求池视图失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -5798,6 +6013,11 @@ module.exports = {
   getEfficiencyFactorSettings,
   updateEfficiencyFactorSettings,
   listDemands,
+  listDemandViews,
+  getDemandViewById,
+  createDemandView,
+  updateDemandView,
+  deleteDemandView,
   getDemandById,
   listDemandMembers,
   addDemandMember,

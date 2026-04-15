@@ -25,6 +25,15 @@ function toPositiveInt(value) {
   return Number.isInteger(num) && num > 0 ? num : null
 }
 
+function toPositiveIntList(value) {
+  const source = Array.isArray(value)
+    ? value
+    : String(value === undefined || value === null ? '' : value)
+        .split(',')
+        .map((item) => String(item || '').trim())
+  return Array.from(new Set(source.map((item) => toPositiveInt(item)).filter(Boolean)))
+}
+
 function toNumber(value, fallback = 0) {
   const num = Number(value)
   return Number.isFinite(num) ? num : fallback
@@ -254,6 +263,10 @@ function buildDemandPoolContextSummary(payload = {}, contextParams = {}) {
     keyword: normalizeText(contextParams.keyword, 100),
     activeTabLabel: normalizeText(contextParams.active_tab_label, 64),
     businessGroupLabel: normalizeText(contextParams.business_group_label, 64),
+    templateLabel: normalizeText(contextParams.template_label, 64),
+    templateLabels: Array.isArray(contextParams.template_labels)
+      ? contextParams.template_labels.map((item) => normalizeText(item, 64)).filter(Boolean)
+      : [],
     ownerLabel: normalizeText(contextParams.owner_label, 64),
     scopeLabel: normalizeText(contextParams.scope_label, 64),
     updatedRangeLabel: normalizeText(contextParams.updated_range_label, 64),
@@ -338,6 +351,7 @@ function buildDemandPoolContextSummary(payload = {}, contextParams = {}) {
     `当前场景：${filters.activeTabLabel || '需求池列表'}`,
     `筛选关键字：${filters.keyword || '无'}`,
     `业务条线：${filters.businessGroupLabel || '全部'}`,
+    `需求模板：${filters.templateLabels.length > 0 ? filters.templateLabels.join('、') : filters.templateLabel || '全部'}`,
     `负责人筛选：${filters.ownerLabel || '全部'}`,
     `查看范围：${filters.scopeLabel || '全部需求'}`,
     `更新时间范围：${filters.updatedRangeLabel || '不限'}`,
@@ -384,6 +398,8 @@ async function buildDemandPoolExecutionContext({ operatorUserId, contextParams =
     keyword: normalizeText(contextParams.keyword, 100),
     status: normalizeDemandStatus(contextParams.status),
     priority: normalizeDemandPriority(contextParams.priority),
+    templateId: toPositiveInt(contextParams.template_id),
+    templateIds: toPositiveIntList(contextParams.template_ids),
     priorityOrder:
       normalizeText(contextParams.priority_order, 8).toLowerCase() === 'desc'
         ? 'desc'

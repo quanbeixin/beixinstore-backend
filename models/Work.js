@@ -67,6 +67,14 @@ const WORK_UNIFIED_STATUS = {
   NORMAL: 'NORMAL',
 }
 const WORK_UNIFIED_STATUS_VALUES = Object.values(WORK_UNIFIED_STATUS)
+const DEMAND_VIEW_VISIBILITY = Object.freeze({
+  PRIVATE: 'PRIVATE',
+  SHARED: 'SHARED',
+})
+const DEMAND_VIEW_SCOPE_FILTER_SET = new Set(['all', 'mine'])
+const DEMAND_VIEW_ALLOWED_PRIORITY_ORDER_SET = new Set(['asc', 'desc'])
+let demandSavedViewTableReady = false
+let demandSavedViewTablePromise = null
 
 const ITEM_TYPE_LOOKUP_SQL = `
   SELECT
@@ -352,6 +360,115 @@ function normalizeDateTime(value, fallback = null) {
 function toPositiveInt(value) {
   const num = Number(value)
   return Number.isInteger(num) && num > 0 ? num : null
+}
+
+function normalizeDateText(value) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
+}
+
+function normalizeDemandViewVisibility(value) {
+  const normalized = normalizeText(value, 16).toUpperCase()
+  return normalized === DEMAND_VIEW_VISIBILITY.SHARED
+    ? DEMAND_VIEW_VISIBILITY.SHARED
+    : DEMAND_VIEW_VISIBILITY.PRIVATE
+}
+
+function normalizeDemandViewScopeFilter(value) {
+  const normalized = normalizeText(value, 16).toLowerCase()
+  return DEMAND_VIEW_SCOPE_FILTER_SET.has(normalized) ? normalized : 'all'
+}
+
+function parseJsonObject(value) {
+  if (!value) return {}
+  if (typeof value === 'object' && !Array.isArray(value)) return value
+  try {
+    const parsed = JSON.parse(String(value))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function sanitizeDemandViewConfig(config = {}) {
+  const source = config && typeof config === 'object' && !Array.isArray(config) ? config : {}
+  const templateIds = Array.from(
+    new Set(
+      (Array.isArray(source.template_ids) ? source.template_ids : [])
+        .map((item) => toPositiveInt(item))
+        .filter(Boolean),
+    ),
+  ).slice(0, 100)
+  const priorityOrder = normalizeText(source.priority_order, 8).toLowerCase()
+  const activeTabKey = normalizeText(source.active_tab_key, 64)
+
+  return {
+    keyword: normalizeText(source.keyword, 100),
+    status: source.status ? normalizeStatus(source.status) : '',
+    priority: source.priority ? normalizePriority(source.priority) : '',
+    template_ids: templateIds,
+    active_tab_key: activeTabKey || '__ALL__',
+    owner_user_id: toPositiveInt(source.owner_user_id),
+    updated_start_date: normalizeDateText(source.updated_start_date),
+    updated_end_date: normalizeDateText(source.updated_end_date),
+    scope_filter: normalizeDemandViewScopeFilter(source.scope_filter),
+    priority_order: DEMAND_VIEW_ALLOWED_PRIORITY_ORDER_SET.has(priorityOrder) ? priorityOrder : '',
+    compact_view: source.compact_view === true || source.compact_view === 1 || source.compact_view === '1',
+  }
+}
+
+function normalizeDemandViewRow(row, { viewerUserId = null } = {}) {
+  if (!row) return null
+  const creatorId = toPositiveInt(row.created_by)
+  const normalizedViewerUserId = toPositiveInt(viewerUserId)
+  const isOwner = Boolean(creatorId && normalizedViewerUserId && creatorId === normalizedViewerUserId)
+  return {
+    id: toPositiveInt(row.id),
+    view_name: normalizeText(row.view_name, 100),
+    visibility: normalizeDemandViewVisibility(row.visibility),
+    config: sanitizeDemandViewConfig(parseJsonObject(row.view_config)),
+    created_by: creatorId,
+    creator_name: normalizeText(row.creator_name, 100) || '',
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null,
+    is_owner: isOwner,
+  }
+}
+
+async function ensureDemandSavedViewTable() {
+  if (demandSavedViewTableReady) return
+  if (demandSavedViewTablePromise) {
+    await demandSavedViewTablePromise
+    return
+  }
+
+  demandSavedViewTablePromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS demand_saved_views (
+        id BIGINT NOT NULL AUTO_INCREMENT,
+        view_name VARCHAR(100) NOT NULL COMMENT '视图名称',
+        visibility VARCHAR(16) NOT NULL DEFAULT 'PRIVATE' COMMENT 'PRIVATE/SHARED',
+        view_config JSON NOT NULL COMMENT '需求池筛选配置JSON',
+        created_by BIGINT NOT NULL COMMENT '创建人用户ID',
+        updated_by BIGINT NULL COMMENT '最后修改人用户ID',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        deleted_at DATETIME NULL DEFAULT NULL,
+        PRIMARY KEY (id),
+        KEY idx_demand_saved_views_creator (created_by),
+        KEY idx_demand_saved_views_visibility (visibility),
+        KEY idx_demand_saved_views_deleted (deleted_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='需求池筛选视图'
+    `)
+    demandSavedViewTableReady = true
+  })()
+
+  try {
+    await demandSavedViewTablePromise
+  } finally {
+    demandSavedViewTablePromise = null
+  }
 }
 
 function normalizeDecimal(value, fallback = null) {
@@ -2145,12 +2262,177 @@ const Work = {
     }
   },
 
+  sanitizeDemandViewConfig(config = {}) {
+    return sanitizeDemandViewConfig(config)
+  },
+
+  normalizeDemandViewVisibility(value) {
+    return normalizeDemandViewVisibility(value)
+  },
+
+  async listDemandViews({ viewerUserId } = {}) {
+    const normalizedViewerUserId = toPositiveInt(viewerUserId)
+    if (!normalizedViewerUserId) return []
+    await ensureDemandSavedViewTable()
+
+    const [rows] = await pool.query(
+      `SELECT
+         v.id,
+         v.view_name,
+         v.visibility,
+         v.view_config,
+         v.created_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS creator_name,
+         DATE_FORMAT(v.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(v.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM demand_saved_views v
+       LEFT JOIN users u ON u.id = v.created_by
+       WHERE v.deleted_at IS NULL
+         AND (v.created_by = ? OR v.visibility = 'SHARED')
+       ORDER BY
+         CASE WHEN v.created_by = ? THEN 0 ELSE 1 END ASC,
+         v.updated_at DESC,
+         v.id DESC`,
+      [normalizedViewerUserId, normalizedViewerUserId],
+    )
+
+    return (rows || []).map((item) =>
+      normalizeDemandViewRow(item, { viewerUserId: normalizedViewerUserId }),
+    )
+  },
+
+  async getDemandViewById(viewId, { viewerUserId = null, bypassScope = false } = {}) {
+    const normalizedViewId = toPositiveInt(viewId)
+    if (!normalizedViewId) return null
+    await ensureDemandSavedViewTable()
+
+    const normalizedViewerUserId = toPositiveInt(viewerUserId)
+    let visibilityCondition = ''
+    const params = [normalizedViewId]
+
+    if (!bypassScope) {
+      if (!normalizedViewerUserId) return null
+      visibilityCondition = ' AND (v.created_by = ? OR v.visibility = ?)'
+      params.push(normalizedViewerUserId, DEMAND_VIEW_VISIBILITY.SHARED)
+    }
+
+    const [rows] = await pool.query(
+      `SELECT
+         v.id,
+         v.view_name,
+         v.visibility,
+         v.view_config,
+         v.created_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS creator_name,
+         DATE_FORMAT(v.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(v.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM demand_saved_views v
+       LEFT JOIN users u ON u.id = v.created_by
+       WHERE v.id = ?
+         AND v.deleted_at IS NULL
+         ${visibilityCondition}
+       LIMIT 1`,
+      params,
+    )
+
+    return normalizeDemandViewRow(rows?.[0], { viewerUserId: normalizedViewerUserId })
+  },
+
+  async createDemandView({
+    viewName,
+    visibility = DEMAND_VIEW_VISIBILITY.PRIVATE,
+    config = {},
+    createdBy,
+    updatedBy = null,
+  } = {}) {
+    const normalizedCreatedBy = toPositiveInt(createdBy)
+    if (!normalizedCreatedBy) return null
+    await ensureDemandSavedViewTable()
+
+    const normalizedViewName = normalizeText(viewName, 100)
+    if (!normalizedViewName) return null
+    const normalizedVisibility = normalizeDemandViewVisibility(visibility)
+    const normalizedConfig = sanitizeDemandViewConfig(config)
+    const normalizedUpdatedBy = toPositiveInt(updatedBy) || normalizedCreatedBy
+
+    const [result] = await pool.query(
+      `INSERT INTO demand_saved_views (
+         view_name,
+         visibility,
+         view_config,
+         created_by,
+         updated_by
+       ) VALUES (?, ?, CAST(? AS JSON), ?, ?)`,
+      [
+        normalizedViewName,
+        normalizedVisibility,
+        JSON.stringify(normalizedConfig),
+        normalizedCreatedBy,
+        normalizedUpdatedBy,
+      ],
+    )
+    return toPositiveInt(result?.insertId)
+  },
+
+  async updateDemandView(
+    viewId,
+    { viewName, visibility = DEMAND_VIEW_VISIBILITY.PRIVATE, config = {}, updatedBy } = {},
+  ) {
+    const normalizedViewId = toPositiveInt(viewId)
+    const normalizedUpdatedBy = toPositiveInt(updatedBy)
+    if (!normalizedViewId || !normalizedUpdatedBy) return 0
+    await ensureDemandSavedViewTable()
+
+    const normalizedViewName = normalizeText(viewName, 100)
+    if (!normalizedViewName) return 0
+    const normalizedVisibility = normalizeDemandViewVisibility(visibility)
+    const normalizedConfig = sanitizeDemandViewConfig(config)
+
+    const [result] = await pool.query(
+      `UPDATE demand_saved_views
+       SET view_name = ?,
+           visibility = ?,
+           view_config = CAST(? AS JSON),
+           updated_by = ?
+       WHERE id = ?
+         AND deleted_at IS NULL`,
+      [
+        normalizedViewName,
+        normalizedVisibility,
+        JSON.stringify(normalizedConfig),
+        normalizedUpdatedBy,
+        normalizedViewId,
+      ],
+    )
+
+    return Number(result?.affectedRows || 0)
+  },
+
+  async deleteDemandView(viewId, { updatedBy } = {}) {
+    const normalizedViewId = toPositiveInt(viewId)
+    const normalizedUpdatedBy = toPositiveInt(updatedBy)
+    if (!normalizedViewId || !normalizedUpdatedBy) return 0
+    await ensureDemandSavedViewTable()
+
+    const [result] = await pool.query(
+      `UPDATE demand_saved_views
+       SET deleted_at = NOW(),
+           updated_by = ?
+       WHERE id = ?
+         AND deleted_at IS NULL`,
+      [normalizedUpdatedBy, normalizedViewId],
+    )
+    return Number(result?.affectedRows || 0)
+  },
+
   async listDemands({
     page = 1,
     pageSize = 10,
     keyword = '',
     status = '',
     priority = '',
+    templateId = null,
+    templateIds = [],
     priorityOrder = '',
     businessGroupCode = '',
     ownerUserId = null,
@@ -2183,6 +2465,18 @@ const Work = {
     if (priority) {
       baseConditions.push('d.priority = ?')
       baseParams.push(normalizePriority(priority))
+    }
+
+    const normalizedTemplateIds = Array.from(
+      new Set((Array.isArray(templateIds) ? templateIds : []).map((item) => toPositiveInt(item)).filter(Boolean)),
+    )
+
+    if (normalizedTemplateIds.length > 0) {
+      baseConditions.push(`d.template_id IN (${normalizedTemplateIds.map(() => '?').join(', ')})`)
+      baseParams.push(...normalizedTemplateIds)
+    } else if (templateId) {
+      baseConditions.push('d.template_id = ?')
+      baseParams.push(toPositiveInt(templateId))
     }
 
     if (ownerUserId) {
