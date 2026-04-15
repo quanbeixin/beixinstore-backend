@@ -215,6 +215,20 @@ const OWNER_ESTIMATE_TOTAL_PREVIEW_SQL = `
   ) c
 `
 
+const DEMAND_NODE_SCHEDULE_FALLBACK_SQL = `
+  SELECT
+    wl.demand_id,
+    UPPER(TRIM(COALESCE(wl.phase_key, ''))) AS normalized_phase_key,
+    DATE_FORMAT(MIN(wl.expected_start_date), '%Y-%m-%d') AS derived_node_planned_start_date,
+    DATE_FORMAT(MAX(COALESCE(wl.expected_completion_date, wl.expected_start_date)), '%Y-%m-%d') AS derived_node_planned_end_date
+  FROM work_logs wl
+  WHERE wl.demand_id IS NOT NULL
+    AND TRIM(COALESCE(wl.phase_key, '')) <> ''
+    AND UPPER(TRIM(COALESCE(wl.log_status, 'IN_PROGRESS'))) <> 'CANCELLED'
+    AND (wl.expected_start_date IS NOT NULL OR wl.expected_completion_date IS NOT NULL)
+  GROUP BY wl.demand_id, UPPER(TRIM(COALESCE(wl.phase_key, '')))
+`
+
 const OWNER_ESTIMATE_DUAL_RULE_UPDATE_SQL = `
   UPDATE work_logs l
   LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) it ON it.id = l.item_type_id
@@ -2331,12 +2345,26 @@ const Work = {
           COALESCE(NULLIF(n.node_name_snapshot, ''), NULLIF(pdi_node.item_name, ''), NULLIF(pdi_phase.item_name, ''), '-') AS current_node_name,
           COALESCE(NULLIF(n.phase_key, ''), '') AS current_phase_key,
           COALESCE(pdi_phase.item_name, NULLIF(pdi_node.item_name, ''), '-') AS current_phase_name,
-          DATE_FORMAT(n.planned_start_time, '%Y-%m-%d') AS current_node_planned_start_date,
-          DATE_FORMAT(n.planned_end_time, '%Y-%m-%d') AS current_node_planned_end_date
+          COALESCE(
+            DATE_FORMAT(n.planned_start_time, '%Y-%m-%d'),
+            ns_node.derived_node_planned_start_date,
+            ns_phase.derived_node_planned_start_date
+          ) AS current_node_planned_start_date,
+          COALESCE(
+            DATE_FORMAT(n.planned_end_time, '%Y-%m-%d'),
+            ns_node.derived_node_planned_end_date,
+            ns_phase.derived_node_planned_end_date
+          ) AS current_node_planned_end_date
         FROM wf_process_instances x
         LEFT JOIN wf_process_instance_nodes n
           ON n.instance_id = x.id
          AND n.node_key = x.current_node_key
+        LEFT JOIN (${DEMAND_NODE_SCHEDULE_FALLBACK_SQL}) ns_node
+          ON ns_node.demand_id = x.biz_id
+         AND ns_node.normalized_phase_key = UPPER(TRIM(COALESCE(x.current_node_key, '')))
+        LEFT JOIN (${DEMAND_NODE_SCHEDULE_FALLBACK_SQL}) ns_phase
+          ON ns_phase.demand_id = x.biz_id
+         AND ns_phase.normalized_phase_key = UPPER(TRIM(COALESCE(n.phase_key, '')))
         LEFT JOIN config_dict_items pdi_phase
           ON pdi_phase.type_key = '${DEMAND_PHASE_DICT_KEY}'
          AND pdi_phase.item_code = n.phase_key

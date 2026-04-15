@@ -196,11 +196,106 @@ function decorateBugAttachment(attachment, options = {}) {
   }
 }
 
+function decorateBugCommentAttachment(attachment, options = {}) {
+  return decorateBugAttachment(attachment, options)
+}
+
+function buildUniqueAttachmentList(attachments = [], nextAttachment) {
+  const list = Array.isArray(attachments) ? attachments : []
+  const candidate = nextAttachment || null
+  if (!candidate) return list
+  const candidateId = Number(candidate.id || 0)
+  const candidateObjectKey = normalizeText(candidate.object_key, 500)
+  const deduped = list.filter((item) => {
+    const itemId = Number(item?.id || 0)
+    const itemObjectKey = normalizeText(item?.object_key, 500)
+    if (candidateId > 0 && itemId === candidateId) return false
+    if (candidateObjectKey && itemObjectKey === candidateObjectKey) return false
+    return true
+  })
+  return [candidate, ...deduped]
+}
+
 function decorateBugDetailAttachments(detail, options = {}) {
-  if (!detail || !Array.isArray(detail.attachments)) return detail
+  if (!detail) return detail
   return {
     ...detail,
-    attachments: detail.attachments.map((item) => decorateBugAttachment(item, options)),
+    attachments: Array.isArray(detail.attachments)
+      ? detail.attachments.map((item) => decorateBugAttachment(item, options))
+      : [],
+    status_logs: Array.isArray(detail.status_logs)
+      ? detail.status_logs.map((item) => ({
+          ...item,
+          attachments: Array.isArray(item?.attachments)
+            ? item.attachments.map((attachment) => decorateBugCommentAttachment(attachment, options))
+            : [],
+        }))
+      : [],
+  }
+}
+
+function buildBugAttachmentPolicyPayload({
+  bug,
+  fileName,
+  fileSize,
+  businessDir = 'bugs',
+  businessNo,
+} = {}) {
+  const oss = getOssConfigFromEnv()
+  if (!oss) {
+    return {
+      ok: false,
+      status: 400,
+      message: '阿里云OSS未配置，暂不可上传附件',
+    }
+  }
+
+  const normalizedFileSize = Number(fileSize || 0)
+  if (normalizedFileSize > 0 && normalizedFileSize > oss.maxFileSize) {
+    return {
+      ok: false,
+      status: 400,
+      message: `附件大小不能超过 ${Math.ceil(oss.maxFileSize / 1024 / 1024)}MB`,
+    }
+  }
+
+  const objectKey = buildOssObjectKey({
+    rootDir: oss.uploadDir,
+    businessDir,
+    businessNo: businessNo || bug?.bug_no || `BUG_${bug?.id || 'UNKNOWN'}`,
+    fileName,
+  })
+  const policyPayload = createPostPolicy({
+    accessKeyId: oss.accessKeyId,
+    accessKeySecret: oss.accessKeySecret,
+    bucketName: oss.bucketName,
+    endpoint: oss.endpoint,
+    objectKey,
+    expireSeconds: oss.expireSeconds,
+    maxFileSize: oss.maxFileSize,
+    successActionStatus: '200',
+    securityToken: oss.securityToken,
+  })
+  const objectUrl = buildPublicObjectUrl({
+    publicBaseUrl: oss.publicBaseUrl,
+    objectKey,
+  })
+
+  return {
+    ok: true,
+    data: {
+      configured: true,
+      provider: 'ALIYUN_OSS',
+      bucket_name: oss.bucketName,
+      endpoint: oss.endpoint,
+      region: oss.region,
+      object_key: objectKey,
+      object_url: objectUrl || null,
+      max_file_size: oss.maxFileSize,
+      host: policyPayload.host,
+      expire_at: policyPayload.expire_at,
+      fields: policyPayload.fields,
+    },
   }
 }
 
@@ -363,6 +458,24 @@ async function canManageBug(req, bug) {
   return false
 }
 
+async function canManageBugComment(req, bug, commentLog) {
+  if (!bug || !commentLog) return false
+  const currentUserId = Number(req.user?.id || 0)
+  if (currentUserId > 0 && currentUserId === Number(commentLog.operator_id || 0)) return true
+  return canManageBug(req, bug)
+}
+
+function isBugCommentLog(commentLog) {
+  const fromStatus = normalizeCode(commentLog?.from_status_code)
+  const toStatus = normalizeCode(commentLog?.to_status_code)
+  return Boolean(commentLog?.remark) && fromStatus && fromStatus === toStatus
+}
+
+function canEditOwnBugComment(req, commentLog) {
+  if (!commentLog) return false
+  return Number(req.user?.id || 0) > 0 && Number(req.user?.id || 0) === Number(commentLog.operator_id || 0)
+}
+
 async function ensureDemandExists(demandId) {
   if (!demandId) return null
   const demand = await Work.findDemandById(demandId)
@@ -396,6 +509,7 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
   if (!title) return { ok: false, message: 'Bug标题不能为空' }
   if (!description) return { ok: false, message: 'Bug描述不能为空' }
   if (!severityCode) return { ok: false, message: '严重程度不能为空' }
+  if (isCreate && !issueStage) return { ok: false, message: 'Bug阶段不能为空' }
   if (!assigneeId) return { ok: false, message: '处理人不能为空' }
 
   if (!(await Bug.validateDictCode('bug_severity', severityCode))) {
@@ -407,7 +521,7 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
   if (!(await Bug.validateDictCode('bug_product', productCode, { allowNull: true }))) {
     return { ok: false, message: '产品模块不存在或已停用' }
   }
-  if (!(await Bug.validateDictCode('bug_stage', issueStage, { allowNull: true }))) {
+  if (!(await Bug.validateDictCode('bug_stage', issueStage, { allowNull: !isCreate }))) {
     return { ok: false, message: 'Bug阶段不存在或已停用' }
   }
 
@@ -841,11 +955,23 @@ const createBugComment = async (req, res) => {
     return res.status(400).json({ success: false, message: '评论内容不能为空' })
   }
   const mentionUserId = toPositiveInt(req.body?.mention_user_id)
+  const parentCommentId = toPositiveInt(req.body?.parent_comment_id)
 
   try {
     const bug = await Bug.findBugById(bugId)
     if (!bug) {
       return res.status(404).json({ success: false, message: 'Bug不存在' })
+    }
+
+    let parentComment = null
+    if (parentCommentId) {
+      parentComment = await Bug.findCommentLogById(parentCommentId, { bugId })
+      if (!parentComment || !isBugCommentLog(parentComment)) {
+        return res.status(400).json({ success: false, message: '回复目标评论不存在' })
+      }
+      if (toPositiveInt(parentComment.parent_comment_id)) {
+        return res.status(400).json({ success: false, message: '当前仅支持一级回复' })
+      }
     }
 
     let mentionUser = null
@@ -865,6 +991,7 @@ const createBugComment = async (req, res) => {
       operatorId: req.user.id,
       statusCode,
       comment: commentForHistory,
+      parentCommentId,
     })
     if (!logResult?.ok) {
       if (logResult?.reason === 'not_found') {
@@ -920,11 +1047,66 @@ const createBugComment = async (req, res) => {
     return res.json({
       success: true,
       message: warnings.length ? `评论已发布（${warnings.join('；')}）` : '评论已发布',
-      data: responseData,
+      data: {
+        comment_log_id: logResult.commentLogId || null,
+        detail: responseData,
+      },
       warnings,
     })
   } catch (err) {
     console.error('Bug评论失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const updateBugComment = async (req, res) => {
+  const bugId = toPositiveInt(req.params.id)
+  const commentLogId = toPositiveInt(req.params.commentLogId)
+  if (!bugId || !commentLogId) {
+    return res.status(400).json({ success: false, message: '参数无效' })
+  }
+
+  const comment = normalizeText(req.body?.comment, 20000)
+  if (!comment) {
+    return res.status(400).json({ success: false, message: '评论内容不能为空' })
+  }
+
+  try {
+    const [bug, commentLog] = await Promise.all([
+      Bug.findBugById(bugId),
+      Bug.findCommentLogById(commentLogId, { bugId }),
+    ])
+    if (!bug) {
+      return res.status(404).json({ success: false, message: 'Bug不存在' })
+    }
+    if (!commentLog || !isBugCommentLog(commentLog)) {
+      return res.status(404).json({ success: false, message: '评论不存在' })
+    }
+    if (!canEditOwnBugComment(req, commentLog)) {
+      return res.status(403).json({ success: false, message: '仅支持编辑自己发布的评论' })
+    }
+
+    const affected = await Bug.updateCommentLog(commentLogId, { bugId, comment })
+    if (!affected) {
+      return res.status(400).json({ success: false, message: '评论更新失败' })
+    }
+
+    const latestDetail = await Bug.getBugDetail(bugId)
+    const responseData = decorateBugDetailAttachments(latestDetail, {
+      ossConfig: getOssConfigFromEnv(),
+      expireSeconds: getBugAttachmentSignExpireSeconds(),
+    })
+
+    return res.json({
+      success: true,
+      message: '评论已更新',
+      data: {
+        comment_log_id: commentLogId,
+        detail: responseData,
+      },
+    })
+  } catch (err) {
+    console.error('更新Bug评论失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -1214,63 +1396,61 @@ const getBugAttachmentPolicy = async (req, res) => {
     if (!bug) {
       return res.status(404).json({ success: false, message: 'Bug不存在' })
     }
+    const fileName = sanitizeFileName(req.body.file_name || 'file')
+    const policyResult = buildBugAttachmentPolicyPayload({
+      bug,
+      fileName,
+      fileSize: req.body.file_size,
+      businessDir: 'bugs',
+      businessNo: bug.bug_no || `BUG_${bug.id}`,
+    })
+    if (!policyResult.ok) {
+      return res.status(policyResult.status || 400).json({ success: false, message: policyResult.message || '获取上传策略失败' })
+    }
+    return res.json({ success: true, data: policyResult.data })
+  } catch (err) {
+    console.error('获取Bug附件上传策略失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
 
-    const oss = getOssConfigFromEnv()
-    if (!oss) {
-      return res.status(400).json({
-        success: false,
-        message: '阿里云OSS未配置，暂不可上传附件',
-      })
+const getBugCommentAttachmentPolicy = async (req, res) => {
+  const bugId = toPositiveInt(req.params.id)
+  const commentLogId = toPositiveInt(req.params.commentLogId)
+  if (!bugId || !commentLogId) {
+    return res.status(400).json({ success: false, message: '参数无效' })
+  }
+
+  try {
+    const [bug, commentLog] = await Promise.all([
+      Bug.findBugById(bugId),
+      Bug.findCommentLogById(commentLogId, { bugId }),
+    ])
+    if (!bug) {
+      return res.status(404).json({ success: false, message: 'Bug不存在' })
+    }
+    if (!commentLog) {
+      return res.status(404).json({ success: false, message: '评论不存在' })
+    }
+    if (!(await canManageBugComment(req, bug, commentLog))) {
+      return res.status(403).json({ success: false, message: '无权限为该评论上传附件' })
     }
 
     const fileName = sanitizeFileName(req.body.file_name || 'file')
-    const fileSize = Number(req.body.file_size || 0)
-    if (fileSize > 0 && fileSize > oss.maxFileSize) {
-      return res.status(400).json({
-        success: false,
-        message: `附件大小不能超过 ${Math.ceil(oss.maxFileSize / 1024 / 1024)}MB`,
-      })
-    }
-    const objectKey = buildOssObjectKey({
-      rootDir: oss.uploadDir,
-      businessDir: 'bugs',
-      businessNo: bug.bug_no || `BUG_${bug.id}`,
+    const policyResult = buildBugAttachmentPolicyPayload({
+      bug,
       fileName,
+      fileSize: req.body.file_size,
+      businessDir: 'bug-comments',
+      businessNo: `${bug.bug_no || `BUG_${bug.id}`}/comment_${commentLogId}`,
     })
-    const policyPayload = createPostPolicy({
-      accessKeyId: oss.accessKeyId,
-      accessKeySecret: oss.accessKeySecret,
-      bucketName: oss.bucketName,
-      endpoint: oss.endpoint,
-      objectKey,
-      expireSeconds: oss.expireSeconds,
-      maxFileSize: oss.maxFileSize,
-      successActionStatus: '200',
-      securityToken: oss.securityToken,
-    })
-    const objectUrl = buildPublicObjectUrl({
-      publicBaseUrl: oss.publicBaseUrl,
-      objectKey,
-    })
+    if (!policyResult.ok) {
+      return res.status(policyResult.status || 400).json({ success: false, message: policyResult.message || '获取上传策略失败' })
+    }
 
-    return res.json({
-      success: true,
-      data: {
-        configured: true,
-        provider: 'ALIYUN_OSS',
-        bucket_name: oss.bucketName,
-        endpoint: oss.endpoint,
-        region: oss.region,
-        object_key: objectKey,
-        object_url: objectUrl || null,
-        max_file_size: oss.maxFileSize,
-        host: policyPayload.host,
-        expire_at: policyPayload.expire_at,
-        fields: policyPayload.fields,
-      },
-    })
+    return res.json({ success: true, data: policyResult.data })
   } catch (err) {
-    console.error('获取Bug附件上传策略失败:', err)
+    console.error('获取Bug评论附件上传策略失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -1294,6 +1474,15 @@ const createBugAttachment = async (req, res) => {
     }
     if (!(await canManageBug(req, bug))) {
       return res.status(403).json({ success: false, message: '无权限维护该Bug附件' })
+    }
+
+    const existingAttachment = await Bug.findAttachmentByObjectKey(bugId, objectKey)
+    if (existingAttachment) {
+      const responseData = decorateBugAttachment(existingAttachment, {
+        ossConfig: getOssConfigFromEnv(),
+        expireSeconds: getBugAttachmentSignExpireSeconds(),
+      })
+      return res.status(200).json({ success: true, message: '附件已存在', data: responseData })
     }
 
     const attachmentId = await Bug.createAttachment(bugId, {
@@ -1322,6 +1511,74 @@ const createBugAttachment = async (req, res) => {
     return res.status(201).json({ success: true, message: '附件登记成功', data: responseData })
   } catch (err) {
     console.error('登记Bug附件失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const createBugCommentAttachment = async (req, res) => {
+  const bugId = toPositiveInt(req.params.id)
+  const commentLogId = toPositiveInt(req.params.commentLogId)
+  if (!bugId || !commentLogId) {
+    return res.status(400).json({ success: false, message: '参数无效' })
+  }
+
+  const fileName = normalizeText(req.body.file_name, 255)
+  const objectKey = normalizeText(req.body.object_key, 500)
+  if (!fileName || !objectKey) {
+    return res.status(400).json({ success: false, message: '附件文件名和对象Key不能为空' })
+  }
+
+  try {
+    const [bug, commentLog] = await Promise.all([
+      Bug.findBugById(bugId),
+      Bug.findCommentLogById(commentLogId, { bugId }),
+    ])
+    if (!bug) {
+      return res.status(404).json({ success: false, message: 'Bug不存在' })
+    }
+    if (!commentLog) {
+      return res.status(404).json({ success: false, message: '评论不存在' })
+    }
+    if (!(await canManageBugComment(req, bug, commentLog))) {
+      return res.status(403).json({ success: false, message: '无权限维护该评论附件' })
+    }
+
+    const existingAttachment = await Bug.findCommentAttachmentByObjectKey(bugId, commentLogId, objectKey)
+    if (existingAttachment) {
+      const responseData = decorateBugCommentAttachment(existingAttachment, {
+        ossConfig: getOssConfigFromEnv(),
+        expireSeconds: getBugAttachmentSignExpireSeconds(),
+      })
+      return res.status(200).json({ success: true, message: '评论附件已存在', data: responseData })
+    }
+
+    const attachmentId = await Bug.createCommentAttachment(bugId, {
+      commentLogId,
+      fileName,
+      fileExt: normalizeText(req.body.file_ext, 50) || null,
+      fileSize: req.body.file_size,
+      mimeType: normalizeText(req.body.mime_type, 100) || null,
+      storageProvider: normalizeText(req.body.storage_provider, 50) || 'ALIYUN_OSS',
+      bucketName: normalizeText(req.body.bucket_name, 100) || null,
+      objectKey,
+      objectUrl:
+        normalizeText(req.body.object_url, 1000) ||
+        buildPublicObjectUrl({
+          publicBaseUrl: getOssConfigFromEnv()?.publicBaseUrl || '',
+          objectKey,
+        }) ||
+        null,
+      uploadedBy: req.user.id,
+    })
+
+    const attachment = await Bug.findCommentAttachmentById(attachmentId)
+    const responseData = decorateBugCommentAttachment(attachment, {
+      ossConfig: getOssConfigFromEnv(),
+      expireSeconds: getBugAttachmentSignExpireSeconds(),
+    })
+    return res.status(201).json({ success: true, message: '评论附件登记成功', data: responseData })
+  } catch (err) {
+    console.error('登记Bug评论附件失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -1388,6 +1645,82 @@ const deleteBugAttachment = async (req, res) => {
   }
 }
 
+const deleteBugCommentAttachment = async (req, res) => {
+  const bugId = toPositiveInt(req.params.id)
+  const commentLogId = toPositiveInt(req.params.commentLogId)
+  const attachmentId = toPositiveInt(req.params.attachmentId)
+  if (!bugId || !commentLogId || !attachmentId) {
+    return res.status(400).json({ success: false, message: '参数无效' })
+  }
+
+  try {
+    const [bug, commentLog, attachment] = await Promise.all([
+      Bug.findBugById(bugId),
+      Bug.findCommentLogById(commentLogId, { bugId }),
+      Bug.findCommentAttachmentById(attachmentId),
+    ])
+    if (!bug) {
+      return res.status(404).json({ success: false, message: 'Bug不存在' })
+    }
+    if (!commentLog) {
+      return res.status(404).json({ success: false, message: '评论不存在' })
+    }
+    if (
+      !attachment ||
+      Number(attachment.bug_id || 0) !== bugId ||
+      Number(attachment.comment_log_id || 0) !== commentLogId
+    ) {
+      return res.status(404).json({ success: false, message: '评论附件不存在' })
+    }
+
+    const currentUserId = Number(req.user?.id || 0)
+    const canDeleteCurrentAttachment =
+      (await canManageBugComment(req, bug, commentLog)) || currentUserId === Number(attachment.uploaded_by || 0)
+    if (!canDeleteCurrentAttachment) {
+      return res.status(403).json({ success: false, message: '无权限删除该评论附件' })
+    }
+
+    let deleteWarning = ''
+    if (
+      normalizeCode(attachment.storage_provider) === 'ALIYUN_OSS' &&
+      normalizeText(attachment.object_key, 500)
+    ) {
+      const oss = getOssConfigFromEnv()
+      if (oss) {
+        try {
+          const deleteResult = await deleteOssObject({
+            accessKeyId: oss.accessKeyId,
+            accessKeySecret: oss.accessKeySecret,
+            bucketName: normalizeText(attachment.bucket_name, 100) || oss.bucketName,
+            endpoint: oss.endpoint,
+            objectKey: attachment.object_key,
+            securityToken: oss.securityToken,
+          })
+          if (!deleteResult?.ok && !deleteResult?.skipped) {
+            deleteWarning = '，OSS源文件未能同步删除'
+            console.warn('删除OSS Bug评论附件失败:', deleteResult)
+          }
+        } catch (ossErr) {
+          deleteWarning = '，OSS源文件未能同步删除'
+          console.warn('删除OSS Bug评论附件异常:', ossErr)
+        }
+      }
+    }
+
+    const affected = await Bug.deleteCommentAttachment(attachmentId, { bugId, commentLogId })
+    if (!affected) {
+      return res.status(404).json({ success: false, message: '评论附件不存在' })
+    }
+    return res.json({
+      success: true,
+      message: `评论附件删除成功${deleteWarning}`,
+    })
+  } catch (err) {
+    console.error('删除Bug评论附件失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 module.exports = {
   listBugs,
   getBugDetail,
@@ -1401,6 +1734,7 @@ module.exports = {
   rejectBug,
   transitionBugByWorkflow,
   createBugComment,
+  updateBugComment,
   listBugAssignees,
   getBugWorkflowConfig,
   updateBugWorkflowConfig,
@@ -1412,6 +1746,9 @@ module.exports = {
   getDemandBugStats,
   listDemandBugs,
   getBugAttachmentPolicy,
+  getBugCommentAttachmentPolicy,
   createBugAttachment,
+  createBugCommentAttachment,
   deleteBugAttachment,
+  deleteBugCommentAttachment,
 }

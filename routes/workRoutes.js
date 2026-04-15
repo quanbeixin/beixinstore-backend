@@ -15,6 +15,7 @@ const {
   rejectBug,
   transitionBugByWorkflow,
   createBugComment,
+  updateBugComment,
   listBugAssignees,
   getBugWorkflowConfig,
   updateBugWorkflowConfig,
@@ -26,8 +27,11 @@ const {
   getDemandBugStats,
   listDemandBugs,
   getBugAttachmentPolicy,
+  getBugCommentAttachmentPolicy,
   createBugAttachment,
+  createBugCommentAttachment,
   deleteBugAttachment,
+  deleteBugCommentAttachment,
 } = require('../controllers/bugController')
 const {
   listWorkItemTypes,
@@ -128,6 +132,22 @@ router.post('/bugs/:id/reopen', authMiddleware.requirePermission('bug.transition
 router.post('/bugs/:id/reject', authMiddleware.requirePermission('bug.transition'), rejectBug)
 router.post('/bugs/:id/transition', authMiddleware.requirePermission('bug.transition'), transitionBugByWorkflow)
 router.post('/bugs/:id/comments', authMiddleware.requirePermission('bug.view'), createBugComment)
+router.put('/bugs/:id/comments/:commentLogId', authMiddleware.requirePermission('bug.view'), updateBugComment)
+router.post(
+  '/bugs/:id/comments/:commentLogId/attachments/policy',
+  authMiddleware.requirePermission('bug.view'),
+  getBugCommentAttachmentPolicy,
+)
+router.post(
+  '/bugs/:id/comments/:commentLogId/attachments',
+  authMiddleware.requirePermission('bug.view'),
+  createBugCommentAttachment,
+)
+router.delete(
+  '/bugs/:id/comments/:commentLogId/attachments/:attachmentId',
+  authMiddleware.requirePermission('bug.view'),
+  deleteBugCommentAttachment,
+)
 router.post('/bugs/:id/attachments/policy', authMiddleware.requirePermission('bug.update'), getBugAttachmentPolicy)
 router.post('/bugs/:id/attachments', authMiddleware.requirePermission('bug.update'), createBugAttachment)
 router.delete(

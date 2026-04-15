@@ -1338,8 +1338,10 @@ const Bug = {
          l.to_status_code,
          toDict.item_name AS to_status_name,
          l.operator_id,
+         l.parent_comment_id,
          COALESCE(NULLIF(u.real_name, ''), u.username) AS operator_name,
          l.remark,
+         DATE_FORMAT(l.edited_at, '%Y-%m-%d %H:%i:%s') AS edited_at,
          DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
        FROM bug_status_logs l
        LEFT JOIN config_dict_items fromDict
@@ -1383,6 +1385,60 @@ const Bug = {
     return rows || []
   },
 
+  async findCommentLogById(commentLogId, { bugId = null } = {}) {
+    const normalizedCommentLogId = toPositiveInt(commentLogId)
+    const normalizedBugId = toPositiveInt(bugId)
+    if (!normalizedCommentLogId) return null
+    const params = [normalizedCommentLogId]
+    const bugCondition = normalizedBugId ? ' AND l.bug_id = ?' : ''
+    if (normalizedBugId) params.push(normalizedBugId)
+    const [rows] = await pool.query(
+      `SELECT
+         l.id,
+         l.bug_id,
+         l.from_status_code,
+         l.to_status_code,
+         l.operator_id,
+         l.parent_comment_id,
+         l.remark,
+         DATE_FORMAT(l.edited_at, '%Y-%m-%d %H:%i:%s') AS edited_at,
+         DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM bug_status_logs l
+       WHERE l.id = ?${bugCondition}
+       LIMIT 1`,
+      params,
+    )
+    return rows[0] || null
+  },
+
+  async listBugCommentAttachmentsByCommentIds(commentLogIds = []) {
+    const normalizedCommentLogIds = normalizePositiveIntList(commentLogIds)
+    if (normalizedCommentLogIds.length === 0) return []
+    const [rows] = await pool.query(
+      `SELECT
+         a.id,
+         a.bug_id,
+         a.comment_log_id,
+         a.file_name,
+         a.file_ext,
+         a.file_size,
+         a.mime_type,
+         a.storage_provider,
+         a.bucket_name,
+         a.object_key,
+         a.object_url,
+         a.uploaded_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS uploaded_by_name,
+         DATE_FORMAT(a.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM bug_comment_attachments a
+       LEFT JOIN users u ON u.id = a.uploaded_by
+       WHERE a.comment_log_id IN (?)
+       ORDER BY a.id ASC`,
+      [normalizedCommentLogIds],
+    )
+    return rows || []
+  },
+
   async getBugDetail(bugId) {
     const bug = await this.findBugById(bugId)
     if (!bug) return null
@@ -1390,9 +1446,22 @@ const Bug = {
       this.listBugStatusLogs(bugId),
       this.listBugAttachments(bugId),
     ])
+    const commentLogIds = (logs || []).map((item) => item.id)
+    const commentAttachments = await this.listBugCommentAttachmentsByCommentIds(commentLogIds)
+    const commentAttachmentMap = new Map()
+    commentAttachments.forEach((item) => {
+      const commentLogId = Number(item.comment_log_id || 0)
+      if (!commentLogId) return
+      const list = commentAttachmentMap.get(commentLogId) || []
+      list.push(item)
+      commentAttachmentMap.set(commentLogId, list)
+    })
     return {
       ...bug,
-      status_logs: logs,
+      status_logs: (logs || []).map((item) => ({
+        ...item,
+        attachments: commentAttachmentMap.get(Number(item.id || 0)) || [],
+      })),
       attachments,
     }
   },
@@ -1687,11 +1756,12 @@ const Bug = {
     }
   },
 
-  async addBugCommentLog(bugId, { operatorId, comment, statusCode = null } = {}) {
+  async addBugCommentLog(bugId, { operatorId, comment, statusCode = null, parentCommentId = null } = {}) {
     const normalizedBugId = toPositiveInt(bugId)
     const normalizedOperatorId = toPositiveInt(operatorId)
     const normalizedComment = normalizeNullableText(comment, 20000)
     const preferredStatus = normalizeCode(statusCode)
+    const normalizedParentCommentId = toPositiveInt(parentCommentId)
     if (!normalizedBugId || !normalizedOperatorId || !normalizedComment) {
       return { ok: false, reason: 'invalid_input' }
     }
@@ -1719,19 +1789,20 @@ const Bug = {
         return { ok: false, reason: 'status_invalid' }
       }
 
-      await conn.query(
+      const [result] = await conn.query(
         `INSERT INTO bug_status_logs (
            bug_id,
            from_status_code,
            to_status_code,
            operator_id,
-           remark
-         ) VALUES (?, ?, ?, ?, ?)`,
-        [normalizedBugId, currentStatus, currentStatus, normalizedOperatorId, normalizedComment],
+           remark,
+           parent_comment_id
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+        [normalizedBugId, currentStatus, currentStatus, normalizedOperatorId, normalizedComment, normalizedParentCommentId],
       )
 
       await conn.commit()
-      return { ok: true, statusCode: currentStatus }
+      return { ok: true, statusCode: currentStatus, commentLogId: Number(result.insertId || 0) || null }
     } catch (error) {
       await conn.rollback()
       throw error
@@ -1813,6 +1884,71 @@ const Bug = {
     return Number(result.insertId)
   },
 
+  async updateCommentLog(commentLogId, { bugId = null, comment } = {}) {
+    const normalizedCommentLogId = toPositiveInt(commentLogId)
+    const normalizedBugId = toPositiveInt(bugId)
+    const normalizedComment = normalizeNullableText(comment, 20000)
+    if (!normalizedCommentLogId || !normalizedComment) return 0
+    const params = [normalizedComment, normalizedCommentLogId]
+    const bugCondition = normalizedBugId ? ' AND bug_id = ?' : ''
+    if (normalizedBugId) params.push(normalizedBugId)
+    const [result] = await pool.query(
+      `UPDATE bug_status_logs
+       SET remark = ?,
+           edited_at = NOW()
+       WHERE id = ?${bugCondition}`,
+      params,
+    )
+    return Number(result.affectedRows || 0)
+  },
+
+  async createCommentAttachment(bugId, {
+    commentLogId,
+    fileName,
+    fileExt = null,
+    fileSize = null,
+    mimeType = null,
+    storageProvider = 'ALIYUN_OSS',
+    bucketName = null,
+    objectKey,
+    objectUrl = null,
+    uploadedBy,
+  }) {
+    const normalizedBugId = toPositiveInt(bugId)
+    const normalizedCommentLogId = toPositiveInt(commentLogId)
+    const normalizedUploadedBy = toPositiveInt(uploadedBy)
+    if (!normalizedBugId || !normalizedCommentLogId || !normalizedUploadedBy) return null
+    const [result] = await pool.query(
+      `INSERT INTO bug_comment_attachments (
+         bug_id,
+         comment_log_id,
+         file_name,
+         file_ext,
+         file_size,
+         mime_type,
+         storage_provider,
+         bucket_name,
+         object_key,
+         object_url,
+         uploaded_by
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        normalizedBugId,
+        normalizedCommentLogId,
+        normalizeText(fileName, 255),
+        normalizeNullableText(fileExt, 50),
+        fileSize === null || fileSize === undefined ? null : Number(fileSize),
+        normalizeNullableText(mimeType, 100),
+        normalizeText(storageProvider, 50) || 'ALIYUN_OSS',
+        normalizeNullableText(bucketName, 100),
+        normalizeText(objectKey, 500),
+        normalizeNullableText(objectUrl, 1000),
+        normalizedUploadedBy,
+      ],
+    )
+    return Number(result.insertId)
+  },
+
   async deleteAttachment(attachmentId, { bugId = null } = {}) {
     const normalizedAttachmentId = toPositiveInt(attachmentId)
     const normalizedBugId = toPositiveInt(bugId)
@@ -1823,6 +1959,30 @@ const Bug = {
     const [result] = await pool.query(
       `DELETE FROM bug_attachments
        WHERE id = ?${bugCondition}`,
+      params,
+    )
+    return Number(result.affectedRows || 0)
+  },
+
+  async deleteCommentAttachment(attachmentId, { bugId = null, commentLogId = null } = {}) {
+    const normalizedAttachmentId = toPositiveInt(attachmentId)
+    const normalizedBugId = toPositiveInt(bugId)
+    const normalizedCommentLogId = toPositiveInt(commentLogId)
+    if (!normalizedAttachmentId) return 0
+    const params = [normalizedAttachmentId]
+    const conditions = []
+    if (normalizedBugId) {
+      conditions.push('bug_id = ?')
+      params.push(normalizedBugId)
+    }
+    if (normalizedCommentLogId) {
+      conditions.push('comment_log_id = ?')
+      params.push(normalizedCommentLogId)
+    }
+    const extraWhere = conditions.length > 0 ? ` AND ${conditions.join(' AND ')}` : ''
+    const [result] = await pool.query(
+      `DELETE FROM bug_comment_attachments
+       WHERE id = ?${extraWhere}`,
       params,
     )
     return Number(result.affectedRows || 0)
@@ -1849,6 +2009,91 @@ const Bug = {
        WHERE id = ?
        LIMIT 1`,
       [normalizedAttachmentId],
+    )
+    return rows[0] || null
+  },
+
+  async findAttachmentByObjectKey(bugId, objectKey) {
+    const normalizedBugId = toPositiveInt(bugId)
+    const normalizedObjectKey = normalizeText(objectKey, 500)
+    if (!normalizedBugId || !normalizedObjectKey) return null
+    const [rows] = await pool.query(
+      `SELECT
+         id,
+         bug_id,
+         file_name,
+         file_ext,
+         file_size,
+         mime_type,
+         storage_provider,
+         bucket_name,
+         object_key,
+         object_url,
+         uploaded_by,
+         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM bug_attachments
+       WHERE bug_id = ?
+         AND object_key = ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [normalizedBugId, normalizedObjectKey],
+    )
+    return rows[0] || null
+  },
+
+  async findCommentAttachmentById(attachmentId) {
+    const normalizedAttachmentId = toPositiveInt(attachmentId)
+    if (!normalizedAttachmentId) return null
+    const [rows] = await pool.query(
+      `SELECT
+         id,
+         bug_id,
+         comment_log_id,
+         file_name,
+         file_ext,
+         file_size,
+         mime_type,
+         storage_provider,
+         bucket_name,
+         object_key,
+         object_url,
+         uploaded_by,
+         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM bug_comment_attachments
+       WHERE id = ?
+       LIMIT 1`,
+      [normalizedAttachmentId],
+    )
+    return rows[0] || null
+  },
+
+  async findCommentAttachmentByObjectKey(bugId, commentLogId, objectKey) {
+    const normalizedBugId = toPositiveInt(bugId)
+    const normalizedCommentLogId = toPositiveInt(commentLogId)
+    const normalizedObjectKey = normalizeText(objectKey, 500)
+    if (!normalizedBugId || !normalizedCommentLogId || !normalizedObjectKey) return null
+    const [rows] = await pool.query(
+      `SELECT
+         id,
+         bug_id,
+         comment_log_id,
+         file_name,
+         file_ext,
+         file_size,
+         mime_type,
+         storage_provider,
+         bucket_name,
+         object_key,
+         object_url,
+         uploaded_by,
+         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM bug_comment_attachments
+       WHERE bug_id = ?
+         AND comment_log_id = ?
+         AND object_key = ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [normalizedBugId, normalizedCommentLogId, normalizedObjectKey],
     )
     return rows[0] || null
   },
