@@ -1,5 +1,6 @@
 const pool = require('./db')
 const { signNotificationLoginToken } = require('./notificationLoginToken')
+const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 
 function normalizeText(value, maxLength = 500) {
   if (value === undefined || value === null) return ''
@@ -19,8 +20,59 @@ function normalizeHttpUrl(value, maxLength = 2000) {
   }
 }
 
-function buildTargetActionUrl(actionUrl, target) {
+function isLocalHost(hostname = '') {
+  const normalized = String(hostname || '').trim().toLowerCase()
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '0.0.0.0'
+}
+
+function normalizePublicBaseUrl(value) {
+  const text = normalizeText(value, 1000)
+  if (!text) return ''
+  try {
+    const parsed = new URL(text)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
+    if (isLocalHost(parsed.hostname)) return ''
+    parsed.pathname = parsed.pathname.replace(/\/+$/g, '')
+    return parsed.toString().replace(/\/+$/g, '')
+  } catch {
+    return ''
+  }
+}
+
+function resolveNotificationPublicBaseUrl() {
+  const explicitPublic = normalizePublicBaseUrl(process.env.NOTIFICATION_PORTAL_PUBLIC_BASE_URL)
+  if (explicitPublic) return explicitPublic
+
+  const configuredBase = normalizePublicBaseUrl(process.env.NOTIFICATION_PORTAL_BASE_URL)
+  if (configuredBase) return configuredBase
+
+  const firstNonLocalOrigin = String(process.env.CLIENT_ORIGIN || '')
+    .split(',')
+    .map((item) => normalizePublicBaseUrl(item))
+    .find(Boolean)
+  if (firstNonLocalOrigin) return firstNonLocalOrigin
+
+  return DEFAULT_NOTIFICATION_PUBLIC_BASE_URL
+}
+
+function rewriteLocalActionUrlToPublic(actionUrl) {
   const normalizedActionUrl = normalizeHttpUrl(actionUrl)
+  if (!normalizedActionUrl) return ''
+  try {
+    const parsed = new URL(normalizedActionUrl)
+    if (!isLocalHost(parsed.hostname)) return parsed.toString()
+    const publicBase = resolveNotificationPublicBaseUrl()
+    const publicUrl = new URL(publicBase)
+    parsed.protocol = publicUrl.protocol
+    parsed.host = publicUrl.host
+    return parsed.toString()
+  } catch {
+    return normalizedActionUrl
+  }
+}
+
+function buildTargetActionUrl(actionUrl, target) {
+  const normalizedActionUrl = rewriteLocalActionUrlToPublic(actionUrl)
   if (!normalizedActionUrl) return ''
   if (!target || target.target_type !== 'user') return normalizedActionUrl
 
@@ -412,6 +464,77 @@ function buildInteractiveCardPayload({ title, markdown, actionUrl, actionText })
       ],
     })
   }
+
+  return {
+    msg_type: 'interactive',
+    content: JSON.stringify({
+      config: {
+        wide_screen_mode: true,
+      },
+      header: {
+        template: 'blue',
+        title: {
+          tag: 'plain_text',
+          content: normalizeText(title, 100) || '系统通知',
+        },
+      },
+      elements,
+    }),
+  }
+}
+
+function buildBugCommentReplyCardPayload({
+  title,
+  markdown,
+  detailUrl,
+  detailActionText,
+  bugId,
+}) {
+  const normalizedDetailUrl = normalizeHttpUrl(detailUrl)
+  const normalizedBugId = Number(bugId)
+  const bugIdValue = Number.isInteger(normalizedBugId) && normalizedBugId > 0 ? normalizedBugId : null
+
+  const elements = [
+    {
+      tag: 'markdown',
+      content: String(markdown || ''),
+    },
+    {
+      tag: 'input',
+      name: 'reply_comment',
+      required: false,
+      placeholder: {
+        tag: 'plain_text',
+        content: '请输入回复内容',
+      },
+    },
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button',
+          text: {
+            tag: 'plain_text',
+            content: normalizeText(detailActionText, 20) || '查看详情',
+          },
+          type: 'default',
+          ...(normalizedDetailUrl ? { url: normalizedDetailUrl } : {}),
+        },
+        {
+          tag: 'button',
+          text: {
+            tag: 'plain_text',
+            content: '提交回复',
+          },
+          type: 'primary',
+          value: {
+            action: 'bug_comment_reply_submit',
+            bug_id: bugIdValue,
+          },
+        },
+      ],
+    },
+  ]
 
   return {
     msg_type: 'interactive',
@@ -864,16 +987,26 @@ async function sendByFeishuApp({ title, content, targets, metadata }) {
 
     try {
       const targetActionUrl = buildTargetActionUrl(detailUrl, target)
+      const isBugCommentMention = String(metadata?.source || '').trim().toLowerCase() === 'bug_comment_mention'
+      const bugId = Number(metadata?.bug_id || 0)
       let sent = await sendFeishuMessage({
         token: tokenResult.token,
         receiveIdType,
         receiveId: target.target_id,
-        messageBody: buildInteractiveCardPayload({
-          title,
-          markdown,
-          actionUrl: targetActionUrl,
-          actionText: metadata?.detail_action_text || '查看详情',
-        }),
+        messageBody: isBugCommentMention
+          ? buildBugCommentReplyCardPayload({
+              title,
+              markdown,
+              detailUrl: targetActionUrl,
+              detailActionText: metadata?.detail_action_text || '查看详情',
+              bugId,
+            })
+          : buildInteractiveCardPayload({
+              title,
+              markdown,
+              actionUrl: targetActionUrl,
+              actionText: metadata?.detail_action_text || '查看详情',
+            }),
         timeoutMs,
       })
 

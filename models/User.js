@@ -191,7 +191,7 @@ const User = {
 
     let rows
     try {
-      ;[rows] = await pool.query(primarySql, [like, like, like, pageSize, offset])
+      [rows] = await pool.query(primarySql, [like, like, like, pageSize, offset])
     } catch (err) {
       if (!isMissingColumnError(err)) throw err
       ;[rows] = await pool.query(fallbackSql, [like, like, pageSize, offset])
@@ -229,7 +229,7 @@ const User = {
     let result
 
     try {
-      ;[result] = await pool.query(
+      [result] = await pool.query(
         'INSERT INTO users (username, password, real_name, email, department_id, job_level, status_code, include_in_metrics) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         [
           username,
@@ -246,7 +246,7 @@ const User = {
       if (!isMissingColumnError(err)) throw err
 
       try {
-        ;[result] = await pool.query(
+        [result] = await pool.query(
           'INSERT INTO users (username, password, real_name, email, department_id) VALUES (?, ?, ?, ?, ?)',
           [username, password, real_name || null, email, department_id],
         )
@@ -254,7 +254,7 @@ const User = {
         if (!isMissingColumnError(innerErr)) throw innerErr
 
         try {
-          ;[result] = await pool.query(
+          [result] = await pool.query(
             'INSERT INTO users (username, password, email, department_id, status_code) VALUES (?, ?, ?, ?, ?)',
             [username, password, email, department_id, status_code],
           )
@@ -281,7 +281,7 @@ const User = {
     let result
 
     try {
-      ;[result] = await pool.query(
+      [result] = await pool.query(
         'UPDATE users SET real_name = ?, email = ?, department_id = ?, job_level = ?, status_code = ?, include_in_metrics = ? WHERE id = ?',
         [real_name || null, email, department_id, job_level, status_code, Number(include_in_metrics) === 1 ? 1 : 0, id],
       )
@@ -289,7 +289,7 @@ const User = {
       if (!isMissingColumnError(err)) throw err
 
       try {
-        ;[result] = await pool.query('UPDATE users SET real_name = ?, email = ?, department_id = ? WHERE id = ?', [
+        [result] = await pool.query('UPDATE users SET real_name = ?, email = ?, department_id = ? WHERE id = ?', [
           real_name || null,
           email,
           department_id,
@@ -298,7 +298,7 @@ const User = {
       } catch (innerErr) {
         if (!isMissingColumnError(innerErr)) throw innerErr
         try {
-          ;[result] = await pool.query(
+          [result] = await pool.query(
             'UPDATE users SET email = ?, department_id = ?, status_code = ? WHERE id = ?',
             [email, department_id, status_code, id],
           )
@@ -335,7 +335,7 @@ const User = {
   updateSelfProfile: async (id, { real_name = undefined, email = null }) => {
     let result
     try {
-      ;[result] = await pool.query('UPDATE users SET real_name = ?, email = ? WHERE id = ?', [
+      [result] = await pool.query('UPDATE users SET real_name = ?, email = ? WHERE id = ?', [
         real_name === undefined ? null : real_name || null,
         email || null,
         id,

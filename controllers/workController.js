@@ -57,6 +57,7 @@ const QUICK_ADD_DEFAULT_ITEM_TYPE_KEYS = Array.from(
   ),
 )
 const DAILY_ACTUAL_MAX_LIMIT_HOURS = 8.5
+const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -110,10 +111,39 @@ function normalizeDemandId(value) {
   return id || null
 }
 
+function isLocalHost(hostname = '') {
+  const normalized = String(hostname || '').trim().toLowerCase()
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '0.0.0.0'
+}
+
+function normalizePublicBaseUrl(value) {
+  const text = normalizeText(value, 1000)
+  if (!text) return ''
+  try {
+    const parsed = new URL(text)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
+    if (isLocalHost(parsed.hostname)) return ''
+    parsed.pathname = parsed.pathname.replace(/\/+$/g, '')
+    return parsed.toString().replace(/\/+$/g, '')
+  } catch {
+    return ''
+  }
+}
+
 function normalizeNotificationPortalBaseUrl() {
-  const baseUrl = normalizeText(process.env.NOTIFICATION_PORTAL_BASE_URL, 500)
-  if (!baseUrl) return ''
-  return baseUrl.replace(/\/+$/g, '')
+  const explicitPublic = normalizePublicBaseUrl(process.env.NOTIFICATION_PORTAL_PUBLIC_BASE_URL)
+  if (explicitPublic) return explicitPublic
+
+  const configuredBase = normalizePublicBaseUrl(process.env.NOTIFICATION_PORTAL_BASE_URL)
+  if (configuredBase) return configuredBase
+
+  const firstNonLocalOrigin = String(process.env.CLIENT_ORIGIN || '')
+    .split(',')
+    .map((item) => normalizePublicBaseUrl(item))
+    .find(Boolean)
+  if (firstNonLocalOrigin) return firstNonLocalOrigin
+
+  return DEFAULT_NOTIFICATION_PUBLIC_BASE_URL
 }
 
 function buildDemandDetailUrl(demandId) {
