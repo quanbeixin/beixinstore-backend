@@ -1177,6 +1177,16 @@ function resolveEffectivePlanEndDate(expectedCompletionDate, { logStatus = '', l
   return normalizedCompletedDate < normalizedExpectedEnd ? normalizedCompletedDate : normalizedExpectedEnd
 }
 
+function resolveMemberRhythmBucketDate(row) {
+  if (!row || typeof row !== 'object') return ''
+
+  return (
+    normalizeDateOnly(row.expected_start_date) ||
+    normalizeDateOnly(row.expected_completion_date) ||
+    normalizeDateOnly(row.log_date)
+  )
+}
+
 function getTodayPlannedHoursSql(dateExpr = 'CURDATE()') {
   return `CASE
     WHEN COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'
@@ -8637,7 +8647,7 @@ const Work = {
     function ensureMemberAgg(userId) {
       if (!memberAggByUser.has(userId)) {
         memberAggByUser.set(userId, {
-          filled_days_set: new Set(),
+          actual_filled_days_set: new Set(),
           demand_ids: new Set(),
           item_scope_keys: new Set(),
           item_count: 0,
@@ -8652,7 +8662,7 @@ const Work = {
           total_personal_estimate_hours: 0,
           total_actual_hours: 0,
           unestimated_item_count: 0,
-          last_log_date: '',
+          last_actual_log_date: '',
         })
       }
       return memberAggByUser.get(userId)
@@ -8722,7 +8732,7 @@ const Work = {
     normalizedLogRows.forEach((row) => {
       const userId = Number(row.user_id)
       const logId = Number(row.id)
-      const logDate = normalizeDateOnly(row.log_date)
+      const bucketDate = resolveMemberRhythmBucketDate(row)
       if (!userId || !logId) return
       const memberAgg = ensureMemberAgg(userId)
       memberAgg.item_count += 1
@@ -8732,7 +8742,7 @@ const Work = {
       memberAgg.owner_estimate_non_owner_item_count += Number(row.owner_estimate_non_owner || 0)
       memberAgg.personal_estimate_item_count += Number(row.personal_estimate_covered || 0)
 
-      if (logDate && logDate >= startDate && logDate <= endDate) {
+      if (bucketDate && bucketDate >= startDate && bucketDate <= endDate) {
         memberAgg.total_owner_estimate_hours = toDecimal1(
           Number(memberAgg.total_owner_estimate_hours || 0) + Number(row.owner_estimate_hours || 0),
         )
@@ -8742,10 +8752,8 @@ const Work = {
         memberAgg.total_personal_estimate_hours = toDecimal1(
           Number(memberAgg.total_personal_estimate_hours || 0) + Number(row.personal_estimate_hours || 0),
         )
-        memberAgg.filled_days_set.add(logDate)
-        memberAgg.last_log_date = memberAgg.last_log_date && memberAgg.last_log_date > logDate ? memberAgg.last_log_date : logDate
 
-        const estimateItem = ensureDailyItem(userId, logDate, row)
+        const estimateItem = ensureDailyItem(userId, bucketDate, row)
         estimateItem.owner_estimate_hours = toDecimal1(
           Number(estimateItem.owner_estimate_hours || 0) + Number(row.owner_estimate_hours || 0),
         )
@@ -8799,9 +8807,11 @@ const Work = {
           Number(memberAgg.total_owner_comparable_actual_hours || 0) + actualHours,
         )
       }
-      memberAgg.filled_days_set.add(entryDate)
-      memberAgg.last_log_date =
-        memberAgg.last_log_date && memberAgg.last_log_date > entryDate ? memberAgg.last_log_date : entryDate
+      memberAgg.actual_filled_days_set.add(entryDate)
+      memberAgg.last_actual_log_date =
+        memberAgg.last_actual_log_date && memberAgg.last_actual_log_date > entryDate
+          ? memberAgg.last_actual_log_date
+          : entryDate
 
       const actualItem = ensureDailyItem(userId, entryDate, sourceLog)
       actualItem.actual_hours = toDecimal1(Number(actualItem.actual_hours || 0) + actualHours)
@@ -8815,10 +8825,20 @@ const Work = {
     normalizedLogRows.forEach((row) => {
       const userId = Number(row.user_id)
       const logId = Number(row.id)
-      const logDate = normalizeDateOnly(row.log_date)
+      const bucketDate = resolveMemberRhythmBucketDate(row)
       const hasExplicitEntry = Number(explicitEntryCountByLog.get(logId) || 0) > 0
       const fallbackActualHours = Number(row.actual_hours || 0)
-      if (!userId || !logId || hasExplicitEntry || !logDate || logDate < startDate || logDate > endDate || fallbackActualHours <= 0) return
+      if (
+        !userId ||
+        !logId ||
+        hasExplicitEntry ||
+        !bucketDate ||
+        bucketDate < startDate ||
+        bucketDate > endDate ||
+        fallbackActualHours <= 0
+      ) {
+        return
+      }
 
       const memberAgg = ensureMemberAgg(userId)
       memberAgg.total_actual_hours = toDecimal1(Number(memberAgg.total_actual_hours || 0) + fallbackActualHours)
@@ -8827,11 +8847,13 @@ const Work = {
           Number(memberAgg.total_owner_comparable_actual_hours || 0) + fallbackActualHours,
         )
       }
-      memberAgg.filled_days_set.add(logDate)
-      memberAgg.last_log_date =
-        memberAgg.last_log_date && memberAgg.last_log_date > logDate ? memberAgg.last_log_date : logDate
+      memberAgg.actual_filled_days_set.add(bucketDate)
+      memberAgg.last_actual_log_date =
+        memberAgg.last_actual_log_date && memberAgg.last_actual_log_date > bucketDate
+          ? memberAgg.last_actual_log_date
+          : bucketDate
 
-      const actualItem = ensureDailyItem(userId, logDate, row)
+      const actualItem = ensureDailyItem(userId, bucketDate, row)
       actualItem.actual_hours = toDecimal1(Number(actualItem.actual_hours || 0) + fallbackActualHours)
       if (Number(row.owner_estimate_covered || 0) > 0) {
         actualItem.owner_comparable_actual_hours = toDecimal1(
@@ -8848,19 +8870,21 @@ const Work = {
       if (!dailyByUser.has(userId)) {
         dailyByUser.set(userId, [])
       }
-      const normalizedItems = (items || []).map((item) => ({
-        ...item,
-        owner_estimate_required: Number(item.owner_estimate_required || 0),
-        owner_estimate_covered: Number(item.owner_estimate_covered || 0),
-        owner_estimate_missing: Number(item.owner_estimate_missing || 0),
-        owner_estimate_non_owner: Number(item.owner_estimate_non_owner || 0),
-        personal_estimate_covered: Number(item.personal_estimate_covered || 0),
-        owner_baseline_hours: toDecimal1(item.owner_baseline_hours),
-        owner_comparable_actual_hours: toDecimal1(item.owner_comparable_actual_hours),
-        owner_estimate_hours: toDecimal1(item.owner_estimate_hours),
-        personal_estimate_hours: toDecimal1(item.personal_estimate_hours),
-        actual_hours: toDecimal1(item.actual_hours),
-      }))
+      const normalizedItems = (items || [])
+        .map((item) => ({
+          ...item,
+          owner_estimate_required: Number(item.owner_estimate_required || 0),
+          owner_estimate_covered: Number(item.owner_estimate_covered || 0),
+          owner_estimate_missing: Number(item.owner_estimate_missing || 0),
+          owner_estimate_non_owner: Number(item.owner_estimate_non_owner || 0),
+          personal_estimate_covered: Number(item.personal_estimate_covered || 0),
+          owner_baseline_hours: toDecimal1(item.owner_baseline_hours),
+          owner_comparable_actual_hours: toDecimal1(item.owner_comparable_actual_hours),
+          owner_estimate_hours: toDecimal1(item.owner_estimate_hours),
+          personal_estimate_hours: toDecimal1(item.personal_estimate_hours),
+          actual_hours: toDecimal1(item.actual_hours),
+        }))
+        .filter((item) => Number(item.actual_hours || 0) > 0)
       const ownerEstimateHours = toDecimal1(
         normalizedItems.reduce((sum, item) => sum + Number(item.owner_estimate_hours || 0), 0),
       )
@@ -8897,7 +8921,7 @@ const Work = {
     const memberListBase = scopedUserRows.map((userRow) => {
       const userId = Number(userRow.user_id)
       const aggRow = memberAggByUser.get(userId) || {}
-      const recordedDays = Number((aggRow.filled_days_set && aggRow.filled_days_set.size) || 0)
+      const recordedDays = Number((aggRow.actual_filled_days_set && aggRow.actual_filled_days_set.size) || 0)
       const totalOwner = Number(aggRow.total_owner_estimate_hours || 0)
       const totalOwnerBaseline = Number(aggRow.total_owner_baseline_hours || 0)
       const totalOwnerComparableActual = Number(aggRow.total_owner_comparable_actual_hours || 0)
@@ -8982,7 +9006,7 @@ const Work = {
         overload_days: overloadDays,
         low_load_days: lowLoadDays,
         unestimated_item_count: Number(aggRow.unestimated_item_count || 0),
-        last_log_date: aggRow.last_log_date || null,
+        last_log_date: aggRow.last_actual_log_date || null,
         daily_stats: dailyStats,
       }
     })
