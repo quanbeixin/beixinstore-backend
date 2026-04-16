@@ -680,8 +680,6 @@ async function activateGraphNode(conn, {
     )
     instanceNode.status = NODE_STATUS.IN_PROGRESS
   }
-
-  await ensureNextNodeTask(conn, instanceNode, demandId, operatorUserId, taskSource)
   return [normalizedNodeKey]
 }
 
@@ -949,8 +947,6 @@ async function rejectNodeByGraph(conn, {
   )
   previousNode.status = NODE_STATUS.IN_PROGRESS
 
-  await ensureNextNodeTask(conn, previousNode, demandId, operatorUserId, 'REJECT_RETURN')
-
   await conn.query(
     `INSERT INTO node_status_logs (
        node_id, from_status, to_status, operator_id, operation_type, remark
@@ -1031,18 +1027,8 @@ async function createTaskForNode(
   )
 
   const taskId = Number(result.insertId)
-
-  await ensureAutoWorkLogForTask(conn, {
-    taskId,
-    demandId,
-    phaseKey,
-    nodeName,
-    assigneeUserId: normalizedAssignee,
-    dueAt: normalizedDueAt,
-    expectedStartDate,
-    assignedByUserId,
-    ownerEstimateRequired,
-  })
+  // Workflow node tasks now stay inside the workflow domain.
+  // Only explicitly created execution items should sync into work_logs/workbench.
 
   return taskId
 }
@@ -1662,38 +1648,6 @@ async function findPreviousNodeForUpdate(conn, instanceId, currentSortOrder) {
   return rows[0] || null
 }
 
-async function ensureNextNodeTask(conn, nextNode, demandId, operatorUserId, sourceType = 'WORKFLOW') {
-  if (!nextNode || !toPositiveInt(nextNode.assignee_user_id)) return null
-  const nextNodeMeta = parseWorkflowGraphMeta(nextNode?.remark)
-
-  const [[countRow]] = await conn.query(
-    `SELECT COUNT(*) AS total
-     FROM wf_process_tasks
-     WHERE instance_node_id = ?
-       AND assignee_user_id = ?
-       AND status IN (?, ?)`,
-    [nextNode.id, nextNode.assignee_user_id, TASK_STATUS.TODO, TASK_STATUS.IN_PROGRESS],
-  )
-
-  if (Number(countRow?.total || 0) > 0) return null
-
-  return createTaskForNode(conn, {
-    instanceId: nextNode.instance_id,
-    instanceNodeId: nextNode.id,
-    demandId,
-    phaseKey: nextNode.phase_key,
-    nodeName: nextNode.node_name_snapshot,
-    assigneeUserId: nextNode.assignee_user_id,
-    dueAt: nextNode.due_at || null,
-    ownerEstimateRequired: normalizeOwnerEstimateRequired(
-      nextNodeMeta?.owner_estimate_required ?? nextNodeMeta?.ownerEstimateRequired,
-      true,
-    ),
-    createdBy: operatorUserId,
-    sourceType,
-  })
-}
-
 function normalizeNodeMatchName(value) {
   return String(value || '')
     .trim()
@@ -2042,22 +1996,6 @@ const Workflow = {
             [normalizedOwnerUserId, activeRow.id],
           )
           activeRow.assignee_user_id = normalizedOwnerUserId
-
-          await createTaskForNode(conn, {
-            instanceId,
-            instanceNodeId: activeRow.id,
-            demandId: normalizedDemandId,
-            phaseKey: activeRow.phase_key,
-            nodeName: activeRow.node_name_snapshot,
-            assigneeUserId: normalizedOwnerUserId,
-            ownerEstimateRequired: normalizeOwnerEstimateRequired(
-              parseWorkflowGraphMeta(activeRow?.remark)?.owner_estimate_required,
-              true,
-            ),
-            createdBy: normalizedOperatorUserId,
-            sourceType: 'SYSTEM_INIT',
-            sourceId: activeRow.id,
-          })
 
           await insertAction(conn, {
             instanceId,

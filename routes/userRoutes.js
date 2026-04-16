@@ -6,7 +6,7 @@ const authMiddleware = require('../middleware/auth')
 
 router.use(authMiddleware)
 
-router.get('/', authMiddleware.requirePermission('user.view'), getUsers)
+router.get('/', getUsers)
 router.get('/change-logs', authMiddleware.requirePermission('user.view'), listUserChangeLogs)
 router.get('/:id', authMiddleware.requirePermission('user.view'), getUserById)
 router.post('/', authMiddleware.requirePermission('user.create'), createUser)

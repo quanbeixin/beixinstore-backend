@@ -117,7 +117,7 @@ const { getHumanGantt } = require('../controllers/humanGanttController')
 
 router.use(authMiddleware)
 
-router.get('/bugs/assignees', authMiddleware.requirePermission('bug.view'), listBugAssignees)
+router.get('/bugs/assignees', listBugAssignees)
 router.get('/bugs/workflow/config', authMiddleware.requirePermission('bug.view'), getBugWorkflowConfig)
 router.put('/bugs/workflow/config', authMiddleware.requirePermission('bug.manage'), updateBugWorkflowConfig)
 router.get('/bugs/views', authMiddleware.requirePermission('bug.view'), listBugViews)
