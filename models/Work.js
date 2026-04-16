@@ -29,6 +29,8 @@ const NET_EFFICIENCY_FORMULA_VARIABLES = Object.freeze({
   OWNER_HOURS: 'OWNER_HOURS',
   PERSONAL_HOURS: 'PERSONAL_HOURS',
   ACTUAL_HOURS: 'ACTUAL_HOURS',
+  OWNER_BASELINE_HOURS: 'OWNER_BASELINE_HOURS',
+  OWNER_COMPARABLE_ACTUAL_HOURS: 'OWNER_COMPARABLE_ACTUAL_HOURS',
   TASK_DIFFICULTY_COEFF: 'TASK_DIFFICULTY_COEFF',
   JOB_LEVEL_COEFF: 'JOB_LEVEL_COEFF',
 })
@@ -39,6 +41,15 @@ const NET_EFFICIENCY_FORMULA_OPERATORS = Object.freeze({
   DIV: 'DIV',
 })
 const DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS = Object.freeze([
+  NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_COMPARABLE_ACTUAL_HOURS,
+  NET_EFFICIENCY_FORMULA_OPERATORS.SUB,
+  NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_BASELINE_HOURS,
+  NET_EFFICIENCY_FORMULA_OPERATORS.MUL,
+  NET_EFFICIENCY_FORMULA_VARIABLES.TASK_DIFFICULTY_COEFF,
+  NET_EFFICIENCY_FORMULA_OPERATORS.DIV,
+  NET_EFFICIENCY_FORMULA_VARIABLES.JOB_LEVEL_COEFF,
+])
+const LEGACY_DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS = Object.freeze([
   NET_EFFICIENCY_FORMULA_VARIABLES.ACTUAL_HOURS,
   NET_EFFICIENCY_FORMULA_OPERATORS.MUL,
   NET_EFFICIENCY_FORMULA_VARIABLES.TASK_DIFFICULTY_COEFF,
@@ -49,6 +60,8 @@ const NET_EFFICIENCY_FORMULA_TOKEN_LABELS = Object.freeze({
   [NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_HOURS]: 'Owner预估总工时',
   [NET_EFFICIENCY_FORMULA_VARIABLES.PERSONAL_HOURS]: '个人预估总工时',
   [NET_EFFICIENCY_FORMULA_VARIABLES.ACTUAL_HOURS]: '实际总工时',
+  [NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_BASELINE_HOURS]: 'Owner真实基线',
+  [NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_COMPARABLE_ACTUAL_HOURS]: 'Owner可比实际',
   [NET_EFFICIENCY_FORMULA_VARIABLES.TASK_DIFFICULTY_COEFF]: '任务难度系数',
   [NET_EFFICIENCY_FORMULA_VARIABLES.JOB_LEVEL_COEFF]: '职级权重系数',
   [NET_EFFICIENCY_FORMULA_OPERATORS.ADD]: '+',
@@ -1318,6 +1331,22 @@ function getDefaultNetEfficiencyFormulaTokens() {
   return [...DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS]
 }
 
+function isSameNetEfficiencyExpression(left = [], right = []) {
+  if (!Array.isArray(left) || !Array.isArray(right)) return false
+  if (left.length !== right.length) return false
+  return left.every((token, index) => String(token || '').trim().toUpperCase() === String(right[index] || '').trim().toUpperCase())
+}
+
+function usesOwnerComparableNetEfficiencyVariables(tokens = []) {
+  const normalizedTokens = Array.isArray(tokens)
+    ? tokens.map((item) => String(item || '').trim().toUpperCase()).filter(Boolean)
+    : []
+  return (
+    normalizedTokens.includes(NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_BASELINE_HOURS)
+    || normalizedTokens.includes(NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_COMPARABLE_ACTUAL_HOURS)
+  )
+}
+
 function parseNetEfficiencyFormulaExpression(value) {
   if (Array.isArray(value)) {
     return value.map((item) => String(item || '').trim().toUpperCase()).filter(Boolean)
@@ -1371,7 +1400,22 @@ function buildNetEfficiencyFormulaConfig(storedRows = []) {
       String(item?.factor_type || '').trim().toUpperCase() === EFFICIENCY_FACTOR_TYPES.NET_EFFICIENCY_FORMULA &&
       String(item?.item_code || '').trim().toUpperCase() === NET_EFFICIENCY_FORMULA_ITEM_CODE,
   )
-  const expression = normalizeNetEfficiencyFormulaTokens(formulaRow?.remark || getDefaultNetEfficiencyFormulaTokens())
+  const storedExpression = formulaRow?.remark
+    ? normalizeNetEfficiencyFormulaTokens(formulaRow.remark)
+    : []
+  const expression =
+    storedExpression.length === 0
+      ? getDefaultNetEfficiencyFormulaTokens()
+      : (
+          usesOwnerComparableNetEfficiencyVariables(storedExpression)
+          || isSameNetEfficiencyExpression(storedExpression, LEGACY_DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS)
+        )
+          ? (
+              isSameNetEfficiencyExpression(storedExpression, LEGACY_DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS)
+                ? getDefaultNetEfficiencyFormulaTokens()
+                : storedExpression
+            )
+          : getDefaultNetEfficiencyFormulaTokens()
   return {
     factor_type: EFFICIENCY_FACTOR_TYPES.NET_EFFICIENCY_FORMULA,
     item_code: NET_EFFICIENCY_FORMULA_ITEM_CODE,
@@ -1413,6 +1457,8 @@ function buildNetEfficiencyContext({
   totalOwnerEstimateHours = 0,
   totalPersonalEstimateHours = 0,
   totalActualHours = 0,
+  totalOwnerBaselineHours = 0,
+  totalOwnerComparableActualHours = 0,
   taskDifficultyCoefficient = 1,
   jobLevelWeightCoefficient = 1,
 } = {}) {
@@ -1420,6 +1466,8 @@ function buildNetEfficiencyContext({
     [NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_HOURS]: Number(totalOwnerEstimateHours || 0),
     [NET_EFFICIENCY_FORMULA_VARIABLES.PERSONAL_HOURS]: Number(totalPersonalEstimateHours || 0),
     [NET_EFFICIENCY_FORMULA_VARIABLES.ACTUAL_HOURS]: Number(totalActualHours || 0),
+    [NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_BASELINE_HOURS]: Number(totalOwnerBaselineHours || 0),
+    [NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_COMPARABLE_ACTUAL_HOURS]: Number(totalOwnerComparableActualHours || 0),
     [NET_EFFICIENCY_FORMULA_VARIABLES.TASK_DIFFICULTY_COEFF]: Number(taskDifficultyCoefficient || 1) || 1,
     [NET_EFFICIENCY_FORMULA_VARIABLES.JOB_LEVEL_COEFF]: Number(jobLevelWeightCoefficient || 1) || 1,
   }
@@ -7804,9 +7852,25 @@ const Work = {
         job_level: row.job_level || null,
         job_level_name: row.job_level_name || row.job_level || '-',
         filled_days: Number(row.filled_days ?? row.recorded_days ?? 0),
+        item_count: Number(row.item_count || 0),
+        owner_required_item_count: Number(row.owner_required_item_count || 0),
+        owner_estimate_covered_item_count: Number(row.owner_estimate_covered_item_count || 0),
+        owner_estimate_missing_item_count: Number(row.owner_estimate_missing_item_count || 0),
+        owner_estimate_non_owner_item_count: Number(row.owner_estimate_non_owner_item_count || 0),
+        owner_estimate_coverage_rate: toPercent2(row.owner_estimate_coverage_rate || 0),
+        personal_estimate_item_count: Number(row.personal_estimate_item_count || 0),
+        personal_estimate_coverage_rate: toPercent2(row.personal_estimate_coverage_rate || 0),
+        total_owner_baseline_hours: toDecimal1(row.total_owner_baseline_hours),
+        total_owner_comparable_actual_hours: toDecimal1(row.total_owner_comparable_actual_hours),
         total_owner_estimate_hours: toDecimal1(row.total_owner_estimate_hours),
         total_personal_estimate_hours: toDecimal1(row.total_personal_estimate_hours),
         total_actual_hours: toDecimal1(totalActualHours),
+        variance_owner_baseline_hours: toDecimal1(row.variance_owner_baseline_hours),
+        variance_owner_baseline_rate:
+          row.variance_owner_baseline_rate === null || row.variance_owner_baseline_rate === undefined
+            ? null
+            : toPercent2(row.variance_owner_baseline_rate),
+        variance_personal_hours: toDecimal1(row.variance_personal_hours),
         task_difficulty_coefficient: toDecimal4(taskDifficultyCoefficient),
         job_level_weight_coefficient: toDecimal4(jobLevelWeightCoefficient),
         net_efficiency_value: evaluateNetEfficiencyByFormula(
@@ -7815,6 +7879,8 @@ const Work = {
             totalOwnerEstimateHours: row.total_owner_estimate_hours,
             totalPersonalEstimateHours: row.total_personal_estimate_hours,
             totalActualHours,
+            totalOwnerBaselineHours: row.total_owner_baseline_hours,
+            totalOwnerComparableActualHours: row.total_owner_comparable_actual_hours,
             taskDifficultyCoefficient,
             jobLevelWeightCoefficient,
           }),
@@ -7844,19 +7910,28 @@ const Work = {
       )
     }
 
-    rows = [...rows].sort((left, right) => {
+    function compareNetEfficiencyPriority(left, right) {
       const leftValue = Number(left?.net_efficiency_value)
       const rightValue = Number(right?.net_efficiency_value)
-      const normalizedLeft = Number.isFinite(leftValue) ? leftValue : (normalizedSortOrder === 'ASC' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY)
-      const normalizedRight = Number.isFinite(rightValue) ? rightValue : (normalizedSortOrder === 'ASC' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY)
+      const normalizedLeft = Number.isFinite(leftValue) ? leftValue : Number.NEGATIVE_INFINITY
+      const normalizedRight = Number.isFinite(rightValue) ? rightValue : Number.NEGATIVE_INFINITY
       if (normalizedLeft !== normalizedRight) {
-        return normalizedSortOrder === 'ASC' ? normalizedLeft - normalizedRight : normalizedRight - normalizedLeft
+        return normalizedRight - normalizedLeft
       }
 
       const leftActualHours = Number(left?.total_actual_hours || 0)
       const rightActualHours = Number(right?.total_actual_hours || 0)
       if (leftActualHours !== rightActualHours) {
-        return normalizedSortOrder === 'ASC' ? leftActualHours - rightActualHours : rightActualHours - leftActualHours
+        return rightActualHours - leftActualHours
+      }
+
+      return Number(left?.user_id || 0) - Number(right?.user_id || 0)
+    }
+
+    rows = [...rows].sort((left, right) => {
+      const netEfficiencyResult = compareNetEfficiencyPriority(left, right)
+      if (netEfficiencyResult !== 0) {
+        return normalizedSortOrder === 'ASC' ? -netEfficiencyResult : netEfficiencyResult
       }
 
       return Number(left?.user_id || 0) - Number(right?.user_id || 0)
@@ -7870,11 +7945,35 @@ const Work = {
     const totalOwnerEstimateHours = toDecimal1(
       rows.reduce((sum, row) => sum + Number(row.total_owner_estimate_hours || 0), 0),
     )
+    const totalOwnerBaselineHours = toDecimal1(
+      rows.reduce((sum, row) => sum + Number(row.total_owner_baseline_hours || 0), 0),
+    )
+    const totalOwnerComparableActualHours = toDecimal1(
+      rows.reduce((sum, row) => sum + Number(row.total_owner_comparable_actual_hours || 0), 0),
+    )
     const totalPersonalEstimateHours = toDecimal1(
       rows.reduce((sum, row) => sum + Number(row.total_personal_estimate_hours || 0), 0),
     )
     const totalActualHours = toDecimal1(
       rows.reduce((sum, row) => sum + Number(row.total_actual_hours || 0), 0),
+    )
+    const totalItemCount = rows.reduce((sum, row) => sum + Number(row.item_count || 0), 0)
+    const totalOwnerRequiredItemCount = rows.reduce((sum, row) => sum + Number(row.owner_required_item_count || 0), 0)
+    const totalOwnerEstimateCoveredItemCount = rows.reduce(
+      (sum, row) => sum + Number(row.owner_estimate_covered_item_count || 0),
+      0,
+    )
+    const totalOwnerEstimateMissingItemCount = rows.reduce(
+      (sum, row) => sum + Number(row.owner_estimate_missing_item_count || 0),
+      0,
+    )
+    const totalOwnerEstimateNonOwnerItemCount = rows.reduce(
+      (sum, row) => sum + Number(row.owner_estimate_non_owner_item_count || 0),
+      0,
+    )
+    const totalPersonalEstimateItemCount = rows.reduce(
+      (sum, row) => sum + Number(row.personal_estimate_item_count || 0),
+      0,
     )
     const avgTaskDifficultyCoefficient = calcActualWeightedCoefficient(rows, 'task_difficulty_coefficient')
     const avgJobLevelWeightCoefficient = calcActualWeightedCoefficient(rows, 'job_level_weight_coefficient')
@@ -7895,6 +7994,20 @@ const Work = {
         department_name: departmentName,
         member_count: rows.length,
         avg_actual_hours: rows.length > 0 ? toDecimal1(totalActualHours / rows.length) : 0,
+        total_item_count: totalItemCount,
+        total_owner_required_item_count: totalOwnerRequiredItemCount,
+        total_owner_estimate_covered_item_count: totalOwnerEstimateCoveredItemCount,
+        total_owner_estimate_missing_item_count: totalOwnerEstimateMissingItemCount,
+        total_owner_estimate_non_owner_item_count: totalOwnerEstimateNonOwnerItemCount,
+        owner_estimate_coverage_rate:
+          totalOwnerRequiredItemCount > 0 ? toPercent2((totalOwnerEstimateCoveredItemCount / totalOwnerRequiredItemCount) * 100) : 0,
+        total_owner_baseline_hours: totalOwnerBaselineHours,
+        total_owner_comparable_actual_hours: totalOwnerComparableActualHours,
+        variance_owner_baseline_hours: toDecimal1(totalOwnerComparableActualHours - totalOwnerBaselineHours),
+        variance_owner_baseline_rate: calcVarianceRate(totalOwnerComparableActualHours, totalOwnerBaselineHours),
+        total_personal_estimate_item_count: totalPersonalEstimateItemCount,
+        personal_estimate_coverage_rate:
+          totalItemCount > 0 ? toPercent2((totalPersonalEstimateItemCount / totalItemCount) * 100) : 0,
         total_owner_estimate_hours: totalOwnerEstimateHours,
         total_personal_estimate_hours: totalPersonalEstimateHours,
         total_actual_hours: totalActualHours,
@@ -7907,6 +8020,8 @@ const Work = {
             totalOwnerEstimateHours,
             totalPersonalEstimateHours,
             totalActualHours,
+            totalOwnerBaselineHours,
+            totalOwnerComparableActualHours,
             taskDifficultyCoefficient: avgTaskDifficultyCoefficient,
             jobLevelWeightCoefficient: avgJobLevelWeightCoefficient,
           }),
@@ -7944,8 +8059,36 @@ const Work = {
       ELSE 0
     END`
 
+    const demandInsightOwnerCoveredByLogSql = `CASE
+      WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1
+       AND COALESCE(l.owner_estimate_hours, 0) > 0
+        THEN 1
+      ELSE 0
+    END`
+
+    const demandInsightOwnerMissingByLogSql = `CASE
+      WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1
+       AND (l.owner_estimate_hours IS NULL OR COALESCE(l.owner_estimate_hours, 0) <= 0)
+        THEN 1
+      ELSE 0
+    END`
+
     const demandInsightNonOwnerByLogSql = `CASE
       WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 0 THEN 1
+      ELSE 0
+    END`
+
+    const demandInsightOwnerBaselineHoursSql = `CASE
+      WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1
+       AND COALESCE(l.owner_estimate_hours, 0) > 0
+        THEN COALESCE(l.owner_estimate_hours, 0)
+      ELSE 0
+    END`
+
+    const demandInsightOwnerComparableActualHoursSql = `CASE
+      WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1
+       AND COALESCE(l.owner_estimate_hours, 0) > 0
+        THEN COALESCE(l.actual_hours, 0)
       ELSE 0
     END`
 
@@ -7982,12 +8125,20 @@ const Work = {
         COALESCE(NULLIF(ou.real_name, ''), ou.username) AS owner_name,
         d.business_group_code,
         bg.item_name AS business_group_name,
+        COUNT(*) AS total_item_count,
         COUNT(DISTINCT l.user_id) AS member_count,
         COUNT(DISTINCT COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__')) AS phase_count,
+        SUM(CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 THEN 1 ELSE 0 END) AS owner_required_item_count,
+        SUM(${demandInsightOwnerCoveredByLogSql}) AS owner_estimate_covered_item_count,
+        SUM(${demandInsightOwnerMissingByLogSql}) AS owner_estimate_missing_item_count,
         ROUND(COALESCE(SUM(${demandInsightEffectiveOwnerEstimateHoursSql}), 0), 1) AS total_owner_estimate_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.owner_estimate_hours, 0)), 0), 1) AS total_raw_owner_estimate_hours,
+        ROUND(COALESCE(SUM(${demandInsightOwnerBaselineHoursSql}), 0), 1) AS total_owner_baseline_hours,
+        ROUND(COALESCE(SUM(${demandInsightOwnerComparableActualHoursSql}), 0), 1) AS total_owner_comparable_actual_hours,
         ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - (${demandInsightEffectiveOwnerEstimateHoursSql})), 0), 1) AS variance_owner_hours,
+        ROUND(COALESCE(SUM(${demandInsightOwnerComparableActualHoursSql} - ${demandInsightOwnerBaselineHoursSql}), 0), 1) AS variance_owner_baseline_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS variance_personal_hours,
         SUM(CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND l.owner_estimate_hours IS NULL THEN 1 ELSE 0 END) AS unestimated_item_count,
         SUM(${demandInsightFallbackByLogSql}) AS owner_estimate_fallback_item_count,
@@ -8150,16 +8301,29 @@ const Work = {
         owner_name: row.owner_name || '-',
         business_group_code: row.business_group_code || null,
         business_group_name: row.business_group_name || row.business_group_code || '-',
+        total_item_count: Number(row.total_item_count || 0),
         member_count: Number(row.member_count || 0),
         phase_count: Number(row.phase_count || 0),
+        owner_required_item_count: Number(row.owner_required_item_count || 0),
+        owner_estimate_covered_item_count: Number(row.owner_estimate_covered_item_count || 0),
+        owner_estimate_missing_item_count: Number(row.owner_estimate_missing_item_count || 0),
+        owner_estimate_coverage_rate:
+          Number(row.owner_required_item_count || 0) > 0
+            ? toPercent2((Number(row.owner_estimate_covered_item_count || 0) / Number(row.owner_required_item_count || 0)) * 100)
+            : 0,
         total_owner_estimate_hours: toDecimal1(row.total_owner_estimate_hours),
+        total_raw_owner_estimate_hours: toDecimal1(row.total_raw_owner_estimate_hours),
+        total_owner_baseline_hours: toDecimal1(row.total_owner_baseline_hours),
+        total_owner_comparable_actual_hours: toDecimal1(row.total_owner_comparable_actual_hours),
         total_personal_estimate_hours: toDecimal1(row.total_personal_estimate_hours),
         total_actual_hours: toDecimal1(row.total_actual_hours),
         variance_owner_hours: toDecimal1(row.variance_owner_hours),
+        variance_owner_baseline_hours: toDecimal1(row.variance_owner_baseline_hours),
         variance_personal_hours: toDecimal1(row.variance_personal_hours),
         owner_estimate_fallback_item_count: Number(row.owner_estimate_fallback_item_count || 0),
         owner_estimate_non_owner_item_count: Number(row.owner_estimate_non_owner_item_count || 0),
         variance_owner_rate: calcVarianceRate(row.total_actual_hours, row.total_owner_estimate_hours),
+        variance_owner_baseline_rate: calcVarianceRate(row.total_owner_comparable_actual_hours, row.total_owner_baseline_hours),
         variance_personal_rate: calcVarianceRate(row.total_actual_hours, row.total_personal_estimate_hours),
         unestimated_item_count: Number(row.unestimated_item_count || 0),
         last_log_date: row.last_log_date || null,
@@ -8305,6 +8469,17 @@ const Work = {
           total_workday_count: 0,
           workday_count: workdayCountPerMember,
           calendar_day_count: Number(calendarRange?.calendar_day_count || 0),
+          total_item_count: 0,
+          total_owner_required_item_count: 0,
+          total_owner_estimate_covered_item_count: 0,
+          total_owner_estimate_missing_item_count: 0,
+          total_owner_estimate_non_owner_item_count: 0,
+          owner_estimate_coverage_rate: 0,
+          total_owner_baseline_hours: 0,
+          total_owner_comparable_actual_hours: 0,
+          variance_owner_baseline_hours: 0,
+          total_personal_estimate_item_count: 0,
+          personal_estimate_coverage_rate: 0,
           total_owner_estimate_hours: 0,
           total_personal_estimate_hours: 0,
           total_actual_hours: 0,
@@ -8368,6 +8543,8 @@ const Work = {
         DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
         l.demand_id,
         COALESCE(d.name, '无需求') AS demand_name,
+        d.business_group_code,
+        COALESCE(bg.item_name, d.business_group_code, '-') AS business_group_name,
         l.description,
         l.phase_key,
         COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
@@ -8379,16 +8556,26 @@ const Work = {
         ${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL} AS effective_task_difficulty_code,
         COALESCE(etd.item_name, ${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL}, NULL) AS effective_task_difficulty_name,
         ROUND(COALESCE(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}, 0), 1) AS owner_estimate_hours,
+        ROUND(COALESCE(l.owner_estimate_hours, 0), 1) AS raw_owner_estimate_hours,
         ROUND(COALESCE(l.personal_estimate_hours, 0), 1) AS personal_estimate_hours,
         ROUND(COALESCE(l.actual_hours, 0), 1) AS actual_hours,
         COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
         DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 THEN 1 ELSE 0 END AS owner_estimate_required,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND COALESCE(l.owner_estimate_hours, 0) > 0 THEN 1 ELSE 0 END AS owner_estimate_covered,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (l.owner_estimate_hours IS NULL OR COALESCE(l.owner_estimate_hours, 0) <= 0) THEN 1 ELSE 0 END AS owner_estimate_missing,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 0 THEN 1 ELSE 0 END AS owner_estimate_non_owner,
+        ROUND(CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND COALESCE(l.owner_estimate_hours, 0) > 0 THEN COALESCE(l.owner_estimate_hours, 0) ELSE 0 END, 1) AS owner_baseline_hours,
+        CASE WHEN COALESCE(l.personal_estimate_hours, 0) > 0 THEN 1 ELSE 0 END AS personal_estimate_covered,
         CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND l.owner_estimate_hours IS NULL THEN 1 ELSE 0 END AS owner_pending
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN config_dict_items bg
+        ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
+       AND bg.item_code = d.business_group_code
       LEFT JOIN config_dict_items pdi
         ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
        AND pdi.item_code = l.phase_key
@@ -8453,6 +8640,14 @@ const Work = {
           filled_days_set: new Set(),
           demand_ids: new Set(),
           item_scope_keys: new Set(),
+          item_count: 0,
+          owner_required_item_count: 0,
+          owner_estimate_covered_item_count: 0,
+          owner_estimate_missing_item_count: 0,
+          owner_estimate_non_owner_item_count: 0,
+          personal_estimate_item_count: 0,
+          total_owner_baseline_hours: 0,
+          total_owner_comparable_actual_hours: 0,
           total_owner_estimate_hours: 0,
           total_personal_estimate_hours: 0,
           total_actual_hours: 0,
@@ -8477,6 +8672,8 @@ const Work = {
           log_date: row.log_date || null,
           demand_id: row.demand_id || null,
           demand_name: row.demand_name || '无需求',
+          business_group_code: row.business_group_code || null,
+          business_group_name: row.business_group_name || row.business_group_code || '-',
           description: row.description || '',
           phase_key: row.phase_key || '',
           phase_name: row.phase_name || '',
@@ -8491,6 +8688,13 @@ const Work = {
             row.effective_task_difficulty_name || row.effective_task_difficulty_code || DEFAULT_TASK_DIFFICULTY_CODE,
           expected_start_date: row.expected_start_date || null,
           expected_completion_date: row.expected_completion_date || null,
+          owner_estimate_required: 0,
+          owner_estimate_covered: 0,
+          owner_estimate_missing: 0,
+          owner_estimate_non_owner: 0,
+          owner_baseline_hours: 0,
+          owner_comparable_actual_hours: 0,
+          personal_estimate_covered: 0,
           owner_estimate_hours: 0,
           personal_estimate_hours: 0,
           actual_hours: 0,
@@ -8521,10 +8725,19 @@ const Work = {
       const logDate = normalizeDateOnly(row.log_date)
       if (!userId || !logId) return
       const memberAgg = ensureMemberAgg(userId)
+      memberAgg.item_count += 1
+      memberAgg.owner_required_item_count += Number(row.owner_estimate_required || 0)
+      memberAgg.owner_estimate_covered_item_count += Number(row.owner_estimate_covered || 0)
+      memberAgg.owner_estimate_missing_item_count += Number(row.owner_estimate_missing || 0)
+      memberAgg.owner_estimate_non_owner_item_count += Number(row.owner_estimate_non_owner || 0)
+      memberAgg.personal_estimate_item_count += Number(row.personal_estimate_covered || 0)
 
       if (logDate && logDate >= startDate && logDate <= endDate) {
         memberAgg.total_owner_estimate_hours = toDecimal1(
           Number(memberAgg.total_owner_estimate_hours || 0) + Number(row.owner_estimate_hours || 0),
+        )
+        memberAgg.total_owner_baseline_hours = toDecimal1(
+          Number(memberAgg.total_owner_baseline_hours || 0) + Number(row.owner_baseline_hours || 0),
         )
         memberAgg.total_personal_estimate_hours = toDecimal1(
           Number(memberAgg.total_personal_estimate_hours || 0) + Number(row.personal_estimate_hours || 0),
@@ -8536,8 +8749,31 @@ const Work = {
         estimateItem.owner_estimate_hours = toDecimal1(
           Number(estimateItem.owner_estimate_hours || 0) + Number(row.owner_estimate_hours || 0),
         )
+        estimateItem.owner_baseline_hours = toDecimal1(
+          Number(estimateItem.owner_baseline_hours || 0) + Number(row.owner_baseline_hours || 0),
+        )
         estimateItem.personal_estimate_hours = toDecimal1(
           Number(estimateItem.personal_estimate_hours || 0) + Number(row.personal_estimate_hours || 0),
+        )
+        estimateItem.owner_estimate_required = Math.max(
+          Number(estimateItem.owner_estimate_required || 0),
+          Number(row.owner_estimate_required || 0),
+        )
+        estimateItem.owner_estimate_covered = Math.max(
+          Number(estimateItem.owner_estimate_covered || 0),
+          Number(row.owner_estimate_covered || 0),
+        )
+        estimateItem.owner_estimate_missing = Math.max(
+          Number(estimateItem.owner_estimate_missing || 0),
+          Number(row.owner_estimate_missing || 0),
+        )
+        estimateItem.owner_estimate_non_owner = Math.max(
+          Number(estimateItem.owner_estimate_non_owner || 0),
+          Number(row.owner_estimate_non_owner || 0),
+        )
+        estimateItem.personal_estimate_covered = Math.max(
+          Number(estimateItem.personal_estimate_covered || 0),
+          Number(row.personal_estimate_covered || 0),
         )
       }
 
@@ -8558,12 +8794,22 @@ const Work = {
       const memberAgg = ensureMemberAgg(userId)
       const actualHours = Number(row.actual_hours || 0)
       memberAgg.total_actual_hours = toDecimal1(Number(memberAgg.total_actual_hours || 0) + actualHours)
+      if (Number(sourceLog?.owner_estimate_covered || 0) > 0) {
+        memberAgg.total_owner_comparable_actual_hours = toDecimal1(
+          Number(memberAgg.total_owner_comparable_actual_hours || 0) + actualHours,
+        )
+      }
       memberAgg.filled_days_set.add(entryDate)
       memberAgg.last_log_date =
         memberAgg.last_log_date && memberAgg.last_log_date > entryDate ? memberAgg.last_log_date : entryDate
 
       const actualItem = ensureDailyItem(userId, entryDate, sourceLog)
       actualItem.actual_hours = toDecimal1(Number(actualItem.actual_hours || 0) + actualHours)
+      if (Number(sourceLog?.owner_estimate_covered || 0) > 0) {
+        actualItem.owner_comparable_actual_hours = toDecimal1(
+          Number(actualItem.owner_comparable_actual_hours || 0) + actualHours,
+        )
+      }
     })
 
     normalizedLogRows.forEach((row) => {
@@ -8576,12 +8822,22 @@ const Work = {
 
       const memberAgg = ensureMemberAgg(userId)
       memberAgg.total_actual_hours = toDecimal1(Number(memberAgg.total_actual_hours || 0) + fallbackActualHours)
+      if (Number(row.owner_estimate_covered || 0) > 0) {
+        memberAgg.total_owner_comparable_actual_hours = toDecimal1(
+          Number(memberAgg.total_owner_comparable_actual_hours || 0) + fallbackActualHours,
+        )
+      }
       memberAgg.filled_days_set.add(logDate)
       memberAgg.last_log_date =
         memberAgg.last_log_date && memberAgg.last_log_date > logDate ? memberAgg.last_log_date : logDate
 
       const actualItem = ensureDailyItem(userId, logDate, row)
       actualItem.actual_hours = toDecimal1(Number(actualItem.actual_hours || 0) + fallbackActualHours)
+      if (Number(row.owner_estimate_covered || 0) > 0) {
+        actualItem.owner_comparable_actual_hours = toDecimal1(
+          Number(actualItem.owner_comparable_actual_hours || 0) + fallbackActualHours,
+        )
+      }
     })
 
     const dailyByUser = new Map()
@@ -8594,6 +8850,13 @@ const Work = {
       }
       const normalizedItems = (items || []).map((item) => ({
         ...item,
+        owner_estimate_required: Number(item.owner_estimate_required || 0),
+        owner_estimate_covered: Number(item.owner_estimate_covered || 0),
+        owner_estimate_missing: Number(item.owner_estimate_missing || 0),
+        owner_estimate_non_owner: Number(item.owner_estimate_non_owner || 0),
+        personal_estimate_covered: Number(item.personal_estimate_covered || 0),
+        owner_baseline_hours: toDecimal1(item.owner_baseline_hours),
+        owner_comparable_actual_hours: toDecimal1(item.owner_comparable_actual_hours),
         owner_estimate_hours: toDecimal1(item.owner_estimate_hours),
         personal_estimate_hours: toDecimal1(item.personal_estimate_hours),
         actual_hours: toDecimal1(item.actual_hours),
@@ -8636,8 +8899,16 @@ const Work = {
       const aggRow = memberAggByUser.get(userId) || {}
       const recordedDays = Number((aggRow.filled_days_set && aggRow.filled_days_set.size) || 0)
       const totalOwner = Number(aggRow.total_owner_estimate_hours || 0)
+      const totalOwnerBaseline = Number(aggRow.total_owner_baseline_hours || 0)
+      const totalOwnerComparableActual = Number(aggRow.total_owner_comparable_actual_hours || 0)
       const totalPersonal = Number(aggRow.total_personal_estimate_hours || 0)
       const totalActual = Number(aggRow.total_actual_hours || 0)
+      const itemCount = Number(aggRow.item_count || 0)
+      const ownerRequiredItemCount = Number(aggRow.owner_required_item_count || 0)
+      const ownerCoveredItemCount = Number(aggRow.owner_estimate_covered_item_count || 0)
+      const ownerMissingItemCount = Number(aggRow.owner_estimate_missing_item_count || 0)
+      const ownerNonOwnerItemCount = Number(aggRow.owner_estimate_non_owner_item_count || 0)
+      const personalEstimateItemCount = Number(aggRow.personal_estimate_item_count || 0)
       const capacityHours = workdayCountPerMember * DEFAULT_DAILY_CAPACITY_HOURS
       const avgActualPerDay = workdayCountPerMember > 0 ? totalActual / workdayCountPerMember : 0
       const avgSaturationRate = workdayCountPerMember > 0 ? (totalActual / capacityHours) * 100 : 0
@@ -8684,10 +8955,24 @@ const Work = {
         recorded_days: recordedDays,
         workday_count: workdayCountPerMember,
         demand_count: Number((aggRow.demand_ids && aggRow.demand_ids.size) || 0),
+        item_count: itemCount,
         item_scope_count: Number((aggRow.item_scope_keys && aggRow.item_scope_keys.size) || 0),
+        owner_required_item_count: ownerRequiredItemCount,
+        owner_estimate_covered_item_count: ownerCoveredItemCount,
+        owner_estimate_missing_item_count: ownerMissingItemCount,
+        owner_estimate_non_owner_item_count: ownerNonOwnerItemCount,
+        owner_estimate_coverage_rate:
+          ownerRequiredItemCount > 0 ? toPercent2((ownerCoveredItemCount / ownerRequiredItemCount) * 100) : 0,
+        personal_estimate_item_count: personalEstimateItemCount,
+        personal_estimate_coverage_rate:
+          itemCount > 0 ? toPercent2((personalEstimateItemCount / itemCount) * 100) : 0,
+        total_owner_baseline_hours: toDecimal1(totalOwnerBaseline),
+        total_owner_comparable_actual_hours: toDecimal1(totalOwnerComparableActual),
         total_owner_estimate_hours: toDecimal1(totalOwner),
         total_personal_estimate_hours: toDecimal1(totalPersonal),
         total_actual_hours: toDecimal1(totalActual),
+        variance_owner_baseline_hours: toDecimal1(totalOwnerComparableActual - totalOwnerBaseline),
+        variance_owner_baseline_rate: calcVarianceRate(totalOwnerComparableActual, totalOwnerBaseline),
         variance_owner_hours: toDecimal1(totalActual - totalOwner),
         variance_personal_hours: toDecimal1(totalActual - totalPersonal),
         variance_owner_rate: calcVarianceRate(totalActual, totalOwner),
@@ -8717,6 +9002,18 @@ const Work = {
 
     const totalRecordedDays = memberList.reduce((sum, item) => sum + Number(item.recorded_days || 0), 0)
     const totalWorkdayCount = memberList.reduce((sum, item) => sum + Number(item.workday_count || 0), 0)
+    const totalItemCount = memberList.reduce((sum, item) => sum + Number(item.item_count || 0), 0)
+    const totalOwnerRequiredItemCount = memberList.reduce((sum, item) => sum + Number(item.owner_required_item_count || 0), 0)
+    const totalOwnerEstimateCoveredItemCount = memberList.reduce((sum, item) => sum + Number(item.owner_estimate_covered_item_count || 0), 0)
+    const totalOwnerEstimateMissingItemCount = memberList.reduce((sum, item) => sum + Number(item.owner_estimate_missing_item_count || 0), 0)
+    const totalOwnerEstimateNonOwnerItemCount = memberList.reduce((sum, item) => sum + Number(item.owner_estimate_non_owner_item_count || 0), 0)
+    const totalPersonalEstimateItemCount = memberList.reduce((sum, item) => sum + Number(item.personal_estimate_item_count || 0), 0)
+    const totalOwnerBaselineHours = toDecimal1(
+      memberList.reduce((sum, item) => sum + Number(item.total_owner_baseline_hours || 0), 0),
+    )
+    const totalOwnerComparableActualHours = toDecimal1(
+      memberList.reduce((sum, item) => sum + Number(item.total_owner_comparable_actual_hours || 0), 0),
+    )
     const totalOwnerEstimateHours = toDecimal1(
       memberList.reduce((sum, item) => sum + Number(item.total_owner_estimate_hours || 0), 0),
     )
@@ -8749,6 +9046,19 @@ const Work = {
         total_workday_count: totalWorkdayCount,
         workday_count: workdayCountPerMember,
         calendar_day_count: Number(calendarRange?.calendar_day_count || 0),
+        total_item_count: totalItemCount,
+        total_owner_required_item_count: totalOwnerRequiredItemCount,
+        total_owner_estimate_covered_item_count: totalOwnerEstimateCoveredItemCount,
+        total_owner_estimate_missing_item_count: totalOwnerEstimateMissingItemCount,
+        total_owner_estimate_non_owner_item_count: totalOwnerEstimateNonOwnerItemCount,
+        owner_estimate_coverage_rate:
+          totalOwnerRequiredItemCount > 0 ? toPercent2((totalOwnerEstimateCoveredItemCount / totalOwnerRequiredItemCount) * 100) : 0,
+        total_owner_baseline_hours: totalOwnerBaselineHours,
+        total_owner_comparable_actual_hours: totalOwnerComparableActualHours,
+        variance_owner_baseline_hours: toDecimal1(totalOwnerComparableActualHours - totalOwnerBaselineHours),
+        total_personal_estimate_item_count: totalPersonalEstimateItemCount,
+        personal_estimate_coverage_rate:
+          totalItemCount > 0 ? toPercent2((totalPersonalEstimateItemCount / totalItemCount) * 100) : 0,
         total_owner_estimate_hours: totalOwnerEstimateHours,
         total_personal_estimate_hours: totalPersonalEstimateHours,
         total_actual_hours: totalActualHours,
@@ -8789,6 +9099,17 @@ const Work = {
           department_id: null,
           department_name: '-',
           member_count: 0,
+          total_item_count: 0,
+          total_owner_required_item_count: 0,
+          total_owner_estimate_covered_item_count: 0,
+          total_owner_estimate_missing_item_count: 0,
+          total_owner_estimate_non_owner_item_count: 0,
+          owner_estimate_coverage_rate: 0,
+          total_owner_baseline_hours: 0,
+          total_owner_comparable_actual_hours: 0,
+          variance_owner_baseline_hours: 0,
+          total_personal_estimate_item_count: 0,
+          personal_estimate_coverage_rate: 0,
           total_owner_estimate_hours: 0,
           total_personal_estimate_hours: 0,
           total_actual_hours: 0,
@@ -8904,10 +9225,23 @@ const Work = {
       ? demandInsight.demand_list.slice(0, 10).map((item) => ({
           demand_id: item.demand_id,
           demand_name: item.demand_name,
+          description: item.description || '',
+          business_group_name: item.business_group_name || '-',
+          total_item_count: Number(item.total_item_count || 0),
           member_count: Number(item.member_count || 0),
+          owner_required_item_count: Number(item.owner_required_item_count || 0),
+          owner_estimate_covered_item_count: Number(item.owner_estimate_covered_item_count || 0),
+          owner_estimate_missing_item_count: Number(item.owner_estimate_missing_item_count || 0),
+          owner_estimate_non_owner_item_count: Number(item.owner_estimate_non_owner_item_count || 0),
+          owner_estimate_coverage_rate: toPercent2(item.owner_estimate_coverage_rate || 0),
           total_owner_estimate_hours: toDecimal1(item.total_owner_estimate_hours),
+          total_raw_owner_estimate_hours: toDecimal1(item.total_raw_owner_estimate_hours),
+          total_owner_baseline_hours: toDecimal1(item.total_owner_baseline_hours),
+          total_owner_comparable_actual_hours: toDecimal1(item.total_owner_comparable_actual_hours),
           total_personal_estimate_hours: toDecimal1(item.total_personal_estimate_hours),
           total_actual_hours: toDecimal1(item.total_actual_hours),
+          variance_owner_baseline_hours: toDecimal1(item.variance_owner_baseline_hours),
+          variance_personal_hours: toDecimal1(item.variance_personal_hours),
           last_log_date: item.last_log_date || null,
         }))
       : []
@@ -8954,6 +9288,17 @@ const Work = {
         department_id: normalizedDepartmentId,
         department_name: summary.department_name || `部门#${normalizedDepartmentId}`,
         member_count: Number(summary.member_count || 0),
+        total_item_count: Number(summary.total_item_count || 0),
+        total_owner_required_item_count: Number(summary.total_owner_required_item_count || 0),
+        total_owner_estimate_covered_item_count: Number(summary.total_owner_estimate_covered_item_count || 0),
+        total_owner_estimate_missing_item_count: Number(summary.total_owner_estimate_missing_item_count || 0),
+        total_owner_estimate_non_owner_item_count: Number(summary.total_owner_estimate_non_owner_item_count || 0),
+        owner_estimate_coverage_rate: toPercent2(summary.owner_estimate_coverage_rate || 0),
+        total_owner_baseline_hours: toDecimal1(summary.total_owner_baseline_hours),
+        total_owner_comparable_actual_hours: toDecimal1(summary.total_owner_comparable_actual_hours),
+        variance_owner_baseline_hours: toDecimal1(summary.variance_owner_baseline_hours),
+        total_personal_estimate_item_count: Number(summary.total_personal_estimate_item_count || 0),
+        personal_estimate_coverage_rate: toPercent2(summary.personal_estimate_coverage_rate || 0),
         total_owner_estimate_hours: toDecimal1(summary.total_owner_estimate_hours),
         total_personal_estimate_hours: toDecimal1(summary.total_personal_estimate_hours),
         total_actual_hours: toDecimal1(summary.total_actual_hours),
@@ -9020,6 +9365,17 @@ const Work = {
           job_level: null,
           job_level_name: '-',
           filled_days: 0,
+          total_item_count: 0,
+          total_owner_required_item_count: 0,
+          total_owner_estimate_covered_item_count: 0,
+          total_owner_estimate_missing_item_count: 0,
+          total_owner_estimate_non_owner_item_count: 0,
+          owner_estimate_coverage_rate: 0,
+          total_owner_baseline_hours: 0,
+          total_owner_comparable_actual_hours: 0,
+          variance_owner_baseline_hours: 0,
+          total_personal_estimate_item_count: 0,
+          personal_estimate_coverage_rate: 0,
           total_owner_estimate_hours: 0,
           total_personal_estimate_hours: 0,
           total_actual_hours: 0,
@@ -9037,7 +9393,158 @@ const Work = {
     }
 
     const storedRowsPromise = this.listEfficiencyFactorSettings()
-    const [userRows, memberInsight, demandInsight, storedRows] = await Promise.all([
+    const logConditions = ['l.user_id = ?']
+    const logParams = [normalizedUserId]
+    if (startDate && endDate) {
+      logConditions.push(
+        `(
+          l.log_date BETWEEN ? AND ?
+          OR EXISTS (
+            SELECT 1
+            FROM work_log_daily_entries e
+            WHERE e.log_id = l.id
+              AND e.user_id = l.user_id
+              AND e.entry_date BETWEEN ? AND ?
+          )
+        )`,
+      )
+      logParams.push(startDate, endDate, startDate, endDate)
+    } else if (startDate) {
+      logConditions.push(
+        `(
+          l.log_date >= ?
+          OR EXISTS (
+            SELECT 1
+            FROM work_log_daily_entries e
+            WHERE e.log_id = l.id
+              AND e.user_id = l.user_id
+              AND e.entry_date >= ?
+          )
+        )`,
+      )
+      logParams.push(startDate, startDate)
+    } else if (endDate) {
+      logConditions.push(
+        `(
+          l.log_date <= ?
+          OR EXISTS (
+            SELECT 1
+            FROM work_log_daily_entries e
+            WHERE e.log_id = l.id
+              AND e.user_id = l.user_id
+              AND e.entry_date <= ?
+          )
+        )`,
+      )
+      logParams.push(endDate, endDate)
+    }
+    if (completedOnly) {
+      logConditions.push("COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'")
+    }
+    const logWhereSql = logConditions.join(' AND ')
+    const logSql = `
+      SELECT
+        l.id AS log_id,
+        l.item_type_id,
+        DATE_FORMAT(l.log_date, '%Y-%m-%d') AS log_date,
+        l.demand_id,
+        COALESCE(d.name, '无需求') AS demand_name,
+        d.business_group_code,
+        COALESCE(bg.item_name, d.business_group_code, '-') AS business_group_name,
+        l.description,
+        l.phase_key,
+        COALESCE(${buildWorkflowNodeNameSql('l')}, pdi.item_name, l.phase_key, '-') AS phase_name,
+        COALESCE(t.name, '其他') AS item_type_name,
+        l.task_difficulty_code,
+        COALESCE(td.item_name, l.task_difficulty_code, NULL) AS task_difficulty_name,
+        l.self_task_difficulty_code,
+        COALESCE(std.item_name, l.self_task_difficulty_code, NULL) AS self_task_difficulty_name,
+        ${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL} AS effective_task_difficulty_code,
+        COALESCE(etd.item_name, ${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL}, NULL) AS effective_task_difficulty_name,
+        ROUND(COALESCE(${EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL}, 0), 1) AS owner_estimate_hours,
+        ROUND(COALESCE(l.owner_estimate_hours, 0), 1) AS raw_owner_estimate_hours,
+        ROUND(COALESCE(l.personal_estimate_hours, 0), 1) AS personal_estimate_hours,
+        ROUND(COALESCE(l.actual_hours, 0), 1) AS actual_hours,
+        COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
+        DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
+        DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 THEN 1 ELSE 0 END AS owner_estimate_required,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND COALESCE(l.owner_estimate_hours, 0) > 0 THEN 1 ELSE 0 END AS owner_estimate_covered,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (l.owner_estimate_hours IS NULL OR COALESCE(l.owner_estimate_hours, 0) <= 0) THEN 1 ELSE 0 END AS owner_estimate_missing,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 0 THEN 1 ELSE 0 END AS owner_estimate_non_owner,
+        ROUND(
+          CASE
+            WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND COALESCE(l.owner_estimate_hours, 0) > 0
+              THEN COALESCE(l.owner_estimate_hours, 0)
+            ELSE 0
+          END,
+          1
+        ) AS owner_baseline_hours,
+        ROUND(
+          CASE
+            WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND COALESCE(l.owner_estimate_hours, 0) > 0
+              THEN COALESCE(l.actual_hours, 0)
+            ELSE 0
+          END,
+          1
+        ) AS owner_comparable_actual_hours,
+        CASE WHEN COALESCE(l.personal_estimate_hours, 0) > 0 THEN 1 ELSE 0 END AS personal_estimate_covered
+      FROM work_logs l
+      LEFT JOIN work_demands d ON d.id = l.demand_id
+      LEFT JOIN config_dict_items bg
+        ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
+       AND bg.item_code = d.business_group_code
+      LEFT JOIN config_dict_items pdi
+        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
+       AND pdi.item_code = l.phase_key
+      LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
+      LEFT JOIN config_dict_items td
+        ON td.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+       AND td.item_code = l.task_difficulty_code
+      LEFT JOIN config_dict_items std
+        ON std.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+       AND std.item_code = l.self_task_difficulty_code
+      LEFT JOIN config_dict_items etd
+        ON etd.type_key = '${TASK_DIFFICULTY_DICT_KEY}'
+       AND etd.item_code = ${EFFECTIVE_TASK_DIFFICULTY_CODE_SQL}
+      WHERE ${logWhereSql}
+      ORDER BY l.log_date DESC, l.id DESC
+      LIMIT 5000`
+
+    const entryConditions = ['l.user_id = ?']
+    const entryParams = [normalizedUserId]
+    if (startDate) {
+      entryConditions.push('e.entry_date >= ?')
+      entryParams.push(startDate)
+    }
+    if (endDate) {
+      entryConditions.push('e.entry_date <= ?')
+      entryParams.push(endDate)
+    }
+    if (completedOnly) {
+      entryConditions.push("COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'")
+    }
+    const entryWhereSql = entryConditions.join(' AND ')
+    const entrySql = `
+      SELECT
+        e.log_id,
+        ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS actual_hours,
+        COUNT(*) AS entry_count,
+        DATE_FORMAT(MIN(e.entry_date), '%Y-%m-%d') AS first_entry_date,
+        DATE_FORMAT(MAX(e.entry_date), '%Y-%m-%d') AS last_entry_date
+      FROM work_log_daily_entries e
+      INNER JOIN (
+        SELECT log_id, entry_date, MAX(id) AS latest_id
+        FROM work_log_daily_entries
+        GROUP BY log_id, entry_date
+      ) le ON le.latest_id = e.id
+      INNER JOIN work_logs l ON l.id = e.log_id
+      WHERE ${entryWhereSql}
+      GROUP BY e.log_id
+      ORDER BY MAX(e.entry_date) DESC, e.log_id DESC
+      LIMIT 5000`
+
+    const [userRows, storedRows, logRows, entryRows] = await Promise.all([
       pool.query(
         `SELECT
            u.id AS user_id,
@@ -9055,26 +9562,12 @@ const Work = {
          LIMIT 1`,
         [normalizedUserId],
       ).then((r) => r[0] || []),
-      this.getMemberInsight({
-        startDate,
-        endDate,
-        memberUserId: normalizedUserId,
-        completedOnly,
-      }),
-      this.getDemandInsight({
-        startDate,
-        endDate,
-        memberUserId: normalizedUserId,
-        completedOnly,
-      }),
       storedRowsPromise,
+      pool.query(logSql, logParams).then((r) => r[0] || []),
+      pool.query(entrySql, entryParams).then((r) => r[0] || []),
     ])
 
     const userInfo = userRows?.[0] || {}
-    const memberSummary = Array.isArray(memberInsight?.member_list)
-      ? memberInsight.member_list.find((item) => Number(item.user_id) === normalizedUserId) || {}
-      : {}
-    const dailyStats = Array.isArray(memberSummary?.daily_stats) ? memberSummary.daily_stats : []
     const netEfficiencyFormula = buildNetEfficiencyFormulaConfig(storedRows)
     const enabledRows = Array.isArray(storedRows) ? storedRows.filter((item) => Number(item?.enabled || 0) === 1) : []
     const taskDifficultyCoefficientByCode = new Map(
@@ -9088,17 +9581,106 @@ const Work = {
         .map((item) => [String(item?.item_code || '').trim().toUpperCase(), toDecimal4(item?.coefficient || 1)]),
     )
     const normalizedJobLevelCode =
-      String(userInfo.job_level || memberSummary.job_level || '').trim().toUpperCase() || '__NO_JOB_LEVEL__'
+      String(userInfo.job_level || '').trim().toUpperCase() || '__NO_JOB_LEVEL__'
     const memberJobLevelWeightCoefficient = Number(jobLevelCoefficientByCode.get(normalizedJobLevelCode) || 1)
-
-    const trendMap = new Map(
-      dailyStats.map((row) => [
-        String(row?.log_date || ''),
+    const entryAggByLogId = new Map(
+      (Array.isArray(entryRows) ? entryRows : []).map((row) => [
+        Number(row.log_id),
         {
-          date: row?.log_date || null,
-          owner_estimate_hours: toDecimal1(row?.owner_estimate_hours),
-          personal_estimate_hours: toDecimal1(row?.personal_estimate_hours),
-          actual_hours: toDecimal1(row?.actual_hours),
+          actual_hours: toDecimal1(row.actual_hours),
+          entry_count: Number(row.entry_count || 0),
+          first_entry_date: row.first_entry_date || null,
+          last_entry_date: row.last_entry_date || null,
+        },
+      ]),
+    )
+
+    const workItemList = (Array.isArray(logRows) ? logRows : [])
+      .map((item) => {
+        const logId = Number(item?.log_id || 0)
+        const logDate = normalizeDateOnly(item?.log_date)
+        const entryAgg = entryAggByLogId.get(logId)
+        const hasExplicitEntry = Number(entryAgg?.entry_count || 0) > 0
+        const logDateInRange =
+          Boolean(logDate)
+          && (!startDate || logDate >= startDate)
+          && (!endDate || logDate <= endDate)
+        const normalizedTaskDifficultyCode =
+          String(item?.effective_task_difficulty_code || DEFAULT_TASK_DIFFICULTY_CODE).trim().toUpperCase()
+          || DEFAULT_TASK_DIFFICULTY_CODE
+        const taskDifficultyCoefficient = Number(taskDifficultyCoefficientByCode.get(normalizedTaskDifficultyCode) || 1)
+        const ownerEstimateHours = logDateInRange ? toDecimal1(item.owner_estimate_hours) : 0
+        const rawOwnerEstimateHours = logDateInRange ? toDecimal1(item.raw_owner_estimate_hours) : 0
+        const personalEstimateHours = logDateInRange ? toDecimal1(item.personal_estimate_hours) : 0
+        const ownerBaselineHours = logDateInRange ? toDecimal1(item.owner_baseline_hours) : 0
+        const actualHours = hasExplicitEntry
+          ? toDecimal1(entryAgg.actual_hours)
+          : (logDateInRange ? toDecimal1(item.actual_hours) : 0)
+        const ownerComparableActualHours =
+          Number(item?.owner_estimate_covered || 0) > 0 ? toDecimal1(actualHours) : 0
+        const effectiveLogDate =
+          hasExplicitEntry && !logDateInRange
+            ? (entryAgg?.last_entry_date || entryAgg?.first_entry_date || item.log_date)
+            : item.log_date
+        return {
+          ...item,
+          log_date: effectiveLogDate,
+          item_type_id: toPositiveInt(item?.item_type_id),
+          owner_baseline_hours: ownerBaselineHours,
+          owner_comparable_actual_hours: ownerComparableActualHours,
+          owner_estimate_hours: ownerEstimateHours,
+          raw_owner_estimate_hours: rawOwnerEstimateHours,
+          personal_estimate_hours: personalEstimateHours,
+          actual_hours: actualHours,
+          variance_owner_baseline_hours: toDecimal1(ownerComparableActualHours - ownerBaselineHours),
+          variance_personal_hours: toDecimal1(actualHours - personalEstimateHours),
+          task_difficulty_coefficient: toDecimal4(taskDifficultyCoefficient),
+          net_efficiency_value: evaluateNetEfficiencyByFormula(
+            netEfficiencyFormula.expression,
+            buildNetEfficiencyContext({
+              totalOwnerEstimateHours: ownerEstimateHours,
+              totalPersonalEstimateHours: personalEstimateHours,
+              totalActualHours: actualHours,
+              totalOwnerBaselineHours: ownerBaselineHours,
+              totalOwnerComparableActualHours: ownerComparableActualHours,
+              taskDifficultyCoefficient,
+              jobLevelWeightCoefficient: memberJobLevelWeightCoefficient,
+            }),
+          ),
+        }
+      })
+      .sort((left, right) => {
+        const leftDate = String(left?.log_date || '')
+        const rightDate = String(right?.log_date || '')
+        if (leftDate !== rightDate) return rightDate.localeCompare(leftDate)
+        return Number(right?.log_id || 0) - Number(left?.log_id || 0)
+      })
+
+    const trendTotals = new Map()
+    workItemList.forEach((item) => {
+      const dateKey = String(item?.log_date || '').trim()
+      if (!dateKey) return
+      if (!trendTotals.has(dateKey)) {
+        trendTotals.set(dateKey, {
+          date: dateKey,
+          owner_estimate_hours: 0,
+          personal_estimate_hours: 0,
+          actual_hours: 0,
+        })
+      }
+      const trendRow = trendTotals.get(dateKey)
+      trendRow.owner_estimate_hours += Number(item.owner_estimate_hours || 0)
+      trendRow.personal_estimate_hours += Number(item.personal_estimate_hours || 0)
+      trendRow.actual_hours += Number(item.actual_hours || 0)
+    })
+    const trendMap = new Map(
+      Array.from(trendTotals.values()).map((row) => [
+        String(row.date || ''),
+        {
+          date: row.date,
+          owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
+          personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
+          actual_hours: toDecimal1(row.actual_hours),
         },
       ]),
     )
@@ -9114,84 +9696,56 @@ const Work = {
       )
     })
 
-    const workItemMap = new Map()
-    dailyStats.forEach((dailyRow) => {
-      const items = Array.isArray(dailyRow?.items) ? dailyRow.items : []
-      items.forEach((rawItem) => {
-        const logId = Number(rawItem?.log_id || 0)
-        if (!Number.isInteger(logId) || logId <= 0) return
-        if (!workItemMap.has(logId)) {
-          workItemMap.set(logId, {
-            log_id: logId,
-            log_date: rawItem?.log_date || null,
-            item_type_name: rawItem?.item_type_name || '-',
-            log_status: rawItem?.log_status || 'IN_PROGRESS',
-            task_difficulty_code: rawItem?.task_difficulty_code || null,
-            task_difficulty_name: rawItem?.task_difficulty_name || rawItem?.task_difficulty_code || null,
-            self_task_difficulty_code: rawItem?.self_task_difficulty_code || null,
-            self_task_difficulty_name: rawItem?.self_task_difficulty_name || rawItem?.self_task_difficulty_code || null,
-            effective_task_difficulty_code: rawItem?.effective_task_difficulty_code || DEFAULT_TASK_DIFFICULTY_CODE,
-            effective_task_difficulty_name:
-              rawItem?.effective_task_difficulty_name
-              || rawItem?.effective_task_difficulty_code
-              || DEFAULT_TASK_DIFFICULTY_CODE,
-            demand_id: rawItem?.demand_id || null,
-            demand_name: rawItem?.demand_name || null,
-            phase_key: rawItem?.phase_key || '',
-            phase_name: rawItem?.phase_name || rawItem?.phase_key || '-',
-            description: rawItem?.description || '',
-            owner_estimate_hours: 0,
-            personal_estimate_hours: 0,
-            actual_hours: 0,
-            expected_start_date: rawItem?.expected_start_date || null,
-            expected_completion_date: rawItem?.expected_completion_date || null,
-            last_log_date: rawItem?.log_date || null,
-          })
-        }
-        const target = workItemMap.get(logId)
-        target.owner_estimate_hours += Number(rawItem?.owner_estimate_hours || 0)
-        target.personal_estimate_hours += Number(rawItem?.personal_estimate_hours || 0)
-        target.actual_hours += Number(rawItem?.actual_hours || 0)
-        const rowLogDate = String(rawItem?.log_date || '').trim()
-        if (!target.last_log_date || (rowLogDate && rowLogDate > String(target.last_log_date || ''))) {
-          target.last_log_date = rowLogDate || target.last_log_date
-        }
-      })
+    const demandSummaryMap = new Map()
+    workItemList.forEach((item) => {
+      const demandKey = String(item.demand_id || '').trim() || `NO_DEMAND#${item.log_id || demandSummaryMap.size + 1}`
+      if (!demandSummaryMap.has(demandKey)) {
+        demandSummaryMap.set(demandKey, {
+          demand_id: item.demand_id || null,
+          demand_name: item.demand_name || '无需求',
+          description: item.description || '',
+          business_group_code: item.business_group_code || null,
+          business_group_name: item.business_group_name || item.business_group_code || '-',
+          phase_keys: new Set(),
+          total_item_count: 0,
+          owner_required_item_count: 0,
+          owner_estimate_covered_item_count: 0,
+          owner_estimate_missing_item_count: 0,
+          owner_estimate_non_owner_item_count: 0,
+          total_owner_baseline_hours: 0,
+          total_owner_comparable_actual_hours: 0,
+          total_raw_owner_estimate_hours: 0,
+          total_personal_estimate_item_count: 0,
+          total_owner_estimate_hours: 0,
+          total_personal_estimate_hours: 0,
+          total_actual_hours: 0,
+          last_log_date: item.last_log_date || item.log_date || null,
+        })
+      }
+      const target = demandSummaryMap.get(demandKey)
+      target.total_item_count += 1
+      target.owner_required_item_count += Number(item.owner_estimate_required || 0)
+      target.owner_estimate_covered_item_count += Number(item.owner_estimate_covered || 0)
+      target.owner_estimate_missing_item_count += Number(item.owner_estimate_missing || 0)
+      target.owner_estimate_non_owner_item_count += Number(item.owner_estimate_non_owner || 0)
+      target.total_personal_estimate_item_count += Number(item.personal_estimate_covered || 0)
+      target.total_owner_baseline_hours += Number(item.owner_baseline_hours || 0)
+      target.total_owner_comparable_actual_hours += Number(item.owner_comparable_actual_hours || 0)
+      target.total_raw_owner_estimate_hours += Number(item.raw_owner_estimate_hours || 0)
+      target.total_owner_estimate_hours += Number(item.owner_estimate_hours || 0)
+      target.total_personal_estimate_hours += Number(item.personal_estimate_hours || 0)
+      target.total_actual_hours += Number(item.actual_hours || 0)
+      if (item.phase_key || item.phase_name) {
+        target.phase_keys.add(String(item.phase_key || item.phase_name))
+      }
+      const itemDate = String(item.last_log_date || item.log_date || '').trim()
+      if (!target.last_log_date || (itemDate && itemDate > String(target.last_log_date || ''))) {
+        target.last_log_date = itemDate || target.last_log_date
+      }
+      if (!target.description && item.description) {
+        target.description = item.description
+      }
     })
-
-    const workItemList = Array.from(workItemMap.values())
-      .map((item) => {
-        const normalizedTaskDifficultyCode =
-          String(item?.effective_task_difficulty_code || DEFAULT_TASK_DIFFICULTY_CODE).trim().toUpperCase()
-          || DEFAULT_TASK_DIFFICULTY_CODE
-        const taskDifficultyCoefficient = Number(taskDifficultyCoefficientByCode.get(normalizedTaskDifficultyCode) || 1)
-        const ownerEstimateHours = toDecimal1(item.owner_estimate_hours)
-        const personalEstimateHours = toDecimal1(item.personal_estimate_hours)
-        const actualHours = toDecimal1(item.actual_hours)
-        return {
-          ...item,
-          owner_estimate_hours: ownerEstimateHours,
-          personal_estimate_hours: personalEstimateHours,
-          actual_hours: actualHours,
-          task_difficulty_coefficient: toDecimal4(taskDifficultyCoefficient),
-          net_efficiency_value: evaluateNetEfficiencyByFormula(
-            netEfficiencyFormula.expression,
-            buildNetEfficiencyContext({
-              totalOwnerEstimateHours: ownerEstimateHours,
-              totalPersonalEstimateHours: personalEstimateHours,
-              totalActualHours: actualHours,
-              taskDifficultyCoefficient,
-              jobLevelWeightCoefficient: memberJobLevelWeightCoefficient,
-            }),
-          ),
-        }
-      })
-      .sort((left, right) => {
-        const leftDate = String(left?.log_date || '')
-        const rightDate = String(right?.log_date || '')
-        if (leftDate !== rightDate) return rightDate.localeCompare(leftDate)
-        return Number(right?.log_id || 0) - Number(left?.log_id || 0)
-      })
 
     const workTypeMap = new Map()
     const phaseMap = new Map()
@@ -9202,6 +9756,7 @@ const Work = {
           item_type_id: null,
           item_type_name: item.item_type_name || '-',
           task_count: 0,
+          raw_owner_estimate_hours: 0,
           owner_estimate_hours: 0,
           personal_estimate_hours: 0,
           actual_hours: 0,
@@ -9209,6 +9764,7 @@ const Work = {
       }
       const workType = workTypeMap.get(typeKey)
       workType.task_count += 1
+      workType.raw_owner_estimate_hours += Number(item.raw_owner_estimate_hours || 0)
       workType.owner_estimate_hours += Number(item.owner_estimate_hours || 0)
       workType.personal_estimate_hours += Number(item.personal_estimate_hours || 0)
       workType.actual_hours += Number(item.actual_hours || 0)
@@ -9233,6 +9789,7 @@ const Work = {
         item_type_id: toPositiveInt(row.item_type_id),
         item_type_name: row.item_type_name || '-',
         task_count: Number(row.task_count || 0),
+        raw_owner_estimate_hours: toDecimal1(row.raw_owner_estimate_hours),
         owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
         personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
         actual_hours: toDecimal1(row.actual_hours),
@@ -9253,6 +9810,48 @@ const Work = {
       'task_difficulty_coefficient',
       'actual_hours',
     )
+    const filledDayCount = new Set(
+      workItemList.map((item) => String(item?.log_date || '').trim()).filter(Boolean),
+    ).size
+    const totalItemCount = workItemList.length
+    const totalOwnerRequiredItemCount = workItemList.reduce(
+      (sum, item) => sum + Number(item.owner_estimate_required || 0),
+      0,
+    )
+    const totalOwnerEstimateCoveredItemCount = workItemList.reduce(
+      (sum, item) => sum + Number(item.owner_estimate_covered || 0),
+      0,
+    )
+    const totalOwnerEstimateMissingItemCount = workItemList.reduce(
+      (sum, item) => sum + Number(item.owner_estimate_missing || 0),
+      0,
+    )
+    const totalOwnerEstimateNonOwnerItemCount = workItemList.reduce(
+      (sum, item) => sum + Number(item.owner_estimate_non_owner || 0),
+      0,
+    )
+    const totalPersonalEstimateItemCount = workItemList.reduce(
+      (sum, item) => sum + Number(item.personal_estimate_covered || 0),
+      0,
+    )
+    const totalOwnerEstimateHours = toDecimal1(
+      workItemList.reduce((sum, item) => sum + Number(item.owner_estimate_hours || 0), 0),
+    )
+    const totalRawOwnerEstimateHours = toDecimal1(
+      workItemList.reduce((sum, item) => sum + Number(item.raw_owner_estimate_hours || 0), 0),
+    )
+    const totalOwnerBaselineHours = toDecimal1(
+      workItemList.reduce((sum, item) => sum + Number(item.owner_baseline_hours || 0), 0),
+    )
+    const totalOwnerComparableActualHours = toDecimal1(
+      workItemList.reduce((sum, item) => sum + Number(item.owner_comparable_actual_hours || 0), 0),
+    )
+    const totalPersonalEstimateHours = toDecimal1(
+      workItemList.reduce((sum, item) => sum + Number(item.personal_estimate_hours || 0), 0),
+    )
+    const totalActualHours = toDecimal1(
+      workItemList.reduce((sum, item) => sum + Number(item.actual_hours || 0), 0),
+    )
 
     return {
       filters: {
@@ -9263,46 +9862,98 @@ const Work = {
       },
       summary: {
         user_id: normalizedUserId,
-        username: userInfo.username || memberSummary.username || `用户${normalizedUserId}`,
+        username: userInfo.username || `用户${normalizedUserId}`,
         department_id: toPositiveInt(userInfo.department_id),
-        department_name: userInfo.department_name || memberSummary.department_name || '-',
+        department_name: userInfo.department_name || '-',
         job_level: userInfo.job_level || null,
         job_level_name: userInfo.job_level_name || userInfo.job_level || '-',
-        filled_days: Number(memberSummary.filled_days || 0),
-        total_owner_estimate_hours: toDecimal1(memberSummary.total_owner_estimate_hours),
-        total_personal_estimate_hours: toDecimal1(memberSummary.total_personal_estimate_hours),
-        total_actual_hours: toDecimal1(memberSummary.total_actual_hours),
+        filled_days: filledDayCount,
+        total_item_count: totalItemCount,
+        total_owner_required_item_count: totalOwnerRequiredItemCount,
+        total_owner_estimate_covered_item_count: totalOwnerEstimateCoveredItemCount,
+        total_owner_estimate_missing_item_count: totalOwnerEstimateMissingItemCount,
+        total_owner_estimate_non_owner_item_count: totalOwnerEstimateNonOwnerItemCount,
+        owner_estimate_coverage_rate:
+          totalOwnerRequiredItemCount > 0
+            ? toPercent2((totalOwnerEstimateCoveredItemCount / totalOwnerRequiredItemCount) * 100)
+            : 0,
+        total_raw_owner_estimate_hours: totalRawOwnerEstimateHours,
+        total_owner_baseline_hours: totalOwnerBaselineHours,
+        total_owner_comparable_actual_hours: totalOwnerComparableActualHours,
+        variance_owner_baseline_hours: toDecimal1(totalOwnerComparableActualHours - totalOwnerBaselineHours),
+        total_personal_estimate_item_count: totalPersonalEstimateItemCount,
+        personal_estimate_coverage_rate:
+          totalItemCount > 0 ? toPercent2((totalPersonalEstimateItemCount / totalItemCount) * 100) : 0,
+        total_owner_estimate_hours: totalOwnerEstimateHours,
+        total_personal_estimate_hours: totalPersonalEstimateHours,
+        total_actual_hours: totalActualHours,
         task_difficulty_coefficient: toDecimal4(summaryTaskDifficultyCoefficient || 1),
         job_level_weight_coefficient: toDecimal4(memberJobLevelWeightCoefficient || 1),
+        net_efficiency_formula_expression: Array.isArray(netEfficiencyFormula.expression) ? [...netEfficiencyFormula.expression] : [],
+        net_efficiency_formula_text: netEfficiencyFormula.expression_text || formatNetEfficiencyFormulaTokens(netEfficiencyFormula.expression),
         net_efficiency_value: evaluateNetEfficiencyByFormula(
           netEfficiencyFormula.expression,
           buildNetEfficiencyContext({
-            totalOwnerEstimateHours: memberSummary.total_owner_estimate_hours,
-            totalPersonalEstimateHours: memberSummary.total_personal_estimate_hours,
-            totalActualHours: memberSummary.total_actual_hours,
+            totalOwnerEstimateHours,
+            totalPersonalEstimateHours,
+            totalActualHours,
+            totalOwnerBaselineHours,
+            totalOwnerComparableActualHours,
             taskDifficultyCoefficient: summaryTaskDifficultyCoefficient || 1,
             jobLevelWeightCoefficient: memberJobLevelWeightCoefficient || 1,
           }),
         ),
-        avg_actual_hours_per_day: toDecimal1(memberSummary.avg_actual_hours_per_day),
+        avg_actual_hours_per_day: filledDayCount > 0 ? toDecimal1(totalActualHours / filledDayCount) : 0,
       },
       work_type_distribution: workTypeDistribution,
-      demand_summary_list: Array.isArray(demandInsight?.demand_list)
-        ? demandInsight.demand_list.map((item) => ({
-            demand_id: item.demand_id,
-            demand_name: item.demand_name,
-            description: item.description || '',
-            business_group_code: item.business_group_code || null,
-            business_group_name: item.business_group_name || '-',
-            phase_count: Number(item.phase_count || 0),
-            total_owner_estimate_hours: toDecimal1(item.total_owner_estimate_hours),
-            total_personal_estimate_hours: toDecimal1(item.total_personal_estimate_hours),
-            total_actual_hours: toDecimal1(item.total_actual_hours),
-            variance_owner_hours: toDecimal1(item.variance_owner_hours),
-            variance_personal_hours: toDecimal1(item.variance_personal_hours),
-            last_log_date: item.last_log_date || null,
-          }))
-        : [],
+      demand_summary_list: Array.from(demandSummaryMap.values())
+        .map((item) => ({
+          demand_id: item.demand_id,
+          demand_name: item.demand_name,
+          description: item.description || '',
+          business_group_code: item.business_group_code || null,
+          business_group_name: item.business_group_name || '-',
+          phase_count: item.phase_keys.size,
+          total_item_count: Number(item.total_item_count || 0),
+          owner_required_item_count: Number(item.owner_required_item_count || 0),
+          owner_estimate_covered_item_count: Number(item.owner_estimate_covered_item_count || 0),
+          owner_estimate_missing_item_count: Number(item.owner_estimate_missing_item_count || 0),
+          owner_estimate_non_owner_item_count: Number(item.owner_estimate_non_owner_item_count || 0),
+          owner_estimate_coverage_rate:
+            Number(item.owner_required_item_count || 0) > 0
+              ? toPercent2((Number(item.owner_estimate_covered_item_count || 0) / Number(item.owner_required_item_count || 0)) * 100)
+              : 0,
+          total_raw_owner_estimate_hours: toDecimal1(item.total_raw_owner_estimate_hours),
+          total_owner_baseline_hours: toDecimal1(item.total_owner_baseline_hours),
+          total_owner_comparable_actual_hours: toDecimal1(item.total_owner_comparable_actual_hours),
+          variance_owner_baseline_hours: toDecimal1(
+            Number(item.total_owner_comparable_actual_hours || 0) - Number(item.total_owner_baseline_hours || 0),
+          ),
+          total_personal_estimate_item_count: Number(item.total_personal_estimate_item_count || 0),
+          personal_estimate_coverage_rate:
+            Number(item.total_item_count || 0) > 0
+              ? toPercent2((Number(item.total_personal_estimate_item_count || 0) / Number(item.total_item_count || 0)) * 100)
+              : 0,
+          total_owner_estimate_hours: toDecimal1(item.total_owner_estimate_hours),
+          total_personal_estimate_hours: toDecimal1(item.total_personal_estimate_hours),
+          total_actual_hours: toDecimal1(item.total_actual_hours),
+          variance_owner_hours: toDecimal1(
+            Number(item.total_actual_hours || 0) - Number(item.total_owner_estimate_hours || 0),
+          ),
+          variance_personal_hours: toDecimal1(
+            Number(item.total_actual_hours || 0) - Number(item.total_personal_estimate_hours || 0),
+          ),
+          last_log_date: item.last_log_date || null,
+        }))
+        .sort((left, right) => {
+          const leftCoverage = Number(left.owner_estimate_coverage_rate || 0)
+          const rightCoverage = Number(right.owner_estimate_coverage_rate || 0)
+          if (leftCoverage !== rightCoverage) return leftCoverage - rightCoverage
+          const leftVarianceAbs = Math.abs(Number(left.variance_owner_baseline_hours || 0))
+          const rightVarianceAbs = Math.abs(Number(right.variance_owner_baseline_hours || 0))
+          if (leftVarianceAbs !== rightVarianceAbs) return rightVarianceAbs - leftVarianceAbs
+          return String(right.last_log_date || '').localeCompare(String(left.last_log_date || ''))
+        }),
       work_item_list: workItemList,
       trend,
       phase_distribution: phaseDistribution,
