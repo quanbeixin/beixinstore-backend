@@ -4705,6 +4705,134 @@ const assignDemandWorkflowNode = async (req, res) => {
   }
 }
 
+const remindDemandWorkflowNodeStatus = async (req, res) => {
+  const demandId = normalizeDemandId(req.params.id)
+  const nodeKey = normalizePhaseKey(req.params.nodeKey)
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+  if (!nodeKey) {
+    return res.status(400).json({ success: false, message: '节点标识无效' })
+  }
+
+  try {
+    const demand = await Work.findDemandById(demandId)
+    if (!demand) {
+      return res.status(404).json({ success: false, message: '需求不存在' })
+    }
+
+    const workflow = await Workflow.getDemandWorkflowByDemandId(demandId, { includeActionsLimit: 0 })
+    if (!workflow) {
+      return res.status(404).json({ success: false, message: '流程实例不存在，请先初始化流程' })
+    }
+
+    const targetNode = (Array.isArray(workflow?.nodes) ? workflow.nodes : []).find(
+      (item) => normalizePhaseKey(item?.node_key) === nodeKey,
+    )
+    if (!targetNode) {
+      return res.status(404).json({ success: false, message: '流程节点不存在' })
+    }
+
+    const candidateUserIds = new Set()
+    const directAssigneeUserId = toPositiveInt(targetNode?.assignee_user_id)
+    if (directAssigneeUserId) {
+      candidateUserIds.add(directAssigneeUserId)
+    }
+    const targetNodeId = toPositiveInt(targetNode?.id)
+    if (targetNodeId) {
+      const openTasks = (Array.isArray(workflow?.tasks) ? workflow.tasks : []).filter(
+        (task) => toPositiveInt(task?.instance_node_id) === targetNodeId && isTaskOpenStatus(task?.status),
+      )
+      openTasks.forEach((task) => {
+        const assigneeUserId = toPositiveInt(task?.assignee_user_id)
+        if (assigneeUserId) candidateUserIds.add(assigneeUserId)
+      })
+    }
+
+    if (candidateUserIds.size === 0) {
+      return res.status(400).json({ success: false, message: '当前节点暂无负责人，无法发送提醒' })
+    }
+
+    const targets = []
+    const receiverNames = []
+    for (const userId of candidateUserIds) {
+      const user = await User.findById(userId)
+      if (!user) continue
+      const openId = normalizeText(user?.feishu_open_id, 128)
+      if (!openId) continue
+      const userName = normalizeText(user?.real_name || user?.username, 100) || `用户${userId}`
+      receiverNames.push(userName)
+      targets.push({
+        target_type: 'user',
+        target_id: openId,
+        target_name: userName,
+        extra: { user_id: userId },
+      })
+    }
+
+    if (targets.length === 0) {
+      return res.status(400).json({ success: false, message: '节点负责人未绑定飞书 OpenID，无法发送提醒' })
+    }
+
+    const nodeName = normalizeText(targetNode?.node_name_snapshot || targetNode?.node_name, 100) || nodeKey
+    const demandName = normalizeText(demand?.name, 200) || ''
+    const content = [
+      '辛苦及时更新项目节点状态~',
+      `需求ID：${demandId}`,
+      `需求名称：${demandName || '-'}`,
+      `节点名称：${nodeName}`,
+    ].join('\n')
+
+    const sendResult = await sendNotification({
+      channelType: 'feishu',
+      title: '项目节点状态更新提醒',
+      content,
+      targets,
+      metadata: {
+        source: 'workflow_node_status_remind',
+        demand_id: demandId,
+        demand_name: demandName,
+        node_key: nodeKey,
+        node_name: nodeName,
+      },
+    })
+
+    if (sendResult?.skipped) {
+      return res.status(400).json({
+        success: false,
+        message: sendResult?.error_message || '发送被策略跳过',
+        code: sendResult?.error_code || 'SEND_SKIPPED',
+      })
+    }
+    if (!sendResult?.success) {
+      return res.status(500).json({
+        success: false,
+        message: sendResult?.error_message || '节点提醒发送失败',
+        code: sendResult?.error_code || 'SEND_FAILED',
+      })
+    }
+
+    return res.json({
+      success: true,
+      message: '节点负责人提醒已发送',
+      data: {
+        demand_id: demandId,
+        demand_name: demandName,
+        node_key: nodeKey,
+        node_name: nodeName,
+        receiver_names: Array.from(new Set(receiverNames)),
+        receiver_count: targets.length,
+      },
+    })
+  } catch (err) {
+    if (isWorkflowTablesMissing(err)) {
+      return res.status(500).json({ success: false, message: '流程表尚未初始化，请先执行数据库补丁' })
+    }
+    console.error('发送需求流程节点状态提醒失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const submitDemandWorkflowCurrentNode = async (req, res) => {
   const demandId = normalizeDemandId(req.params.id)
   if (!demandId) {
@@ -6101,6 +6229,7 @@ module.exports = {
   getDemandWorkflow,
   assignDemandWorkflowCurrentNode,
   assignDemandWorkflowNode,
+  remindDemandWorkflowNodeStatus,
   submitDemandWorkflowCurrentNode,
   submitDemandWorkflowNode,
   rejectDemandWorkflowCurrentNode,

@@ -1,9 +1,11 @@
+const fs = require('fs')
+const path = require('path')
 const Bug = require('../models/Bug')
 const Work = require('../models/Work')
 const User = require('../models/User')
 const NotificationEvent = require('../models/NotificationEvent')
 const pool = require('../utils/db')
-const { sendNotification } = require('../utils/notificationSender')
+const { sendNotification, buildBugCommentReplyCardPayload } = require('../utils/notificationSender')
 const {
   buildOssObjectKey,
   buildPublicObjectUrl,
@@ -14,6 +16,7 @@ const {
   sanitizeFileName,
 } = require('../utils/oss')
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
+const FEISHU_CARD_DEBUG_LOG_PATH = path.resolve(__dirname, '../logs/feishu-card-action.log')
 
 const BUG_STATUS = Object.freeze({
   NEW: 'NEW',
@@ -386,7 +389,11 @@ function pickFirstNonEmptyText(candidates = [], maxLen = 20000) {
 }
 
 function parseFeishuCardCommentText(payload = {}) {
-  const formValue = payload?.action?.form_value || payload?.form_value || {}
+  const formValue =
+    payload?.action?.form_value ||
+    payload?.event?.action?.form_value ||
+    payload?.form_value ||
+    {}
   const rawValue = formValue?.reply_comment
   if (rawValue && typeof rawValue === 'object') {
     return pickFirstNonEmptyText(
@@ -398,7 +405,7 @@ function parseFeishuCardCommentText(payload = {}) {
 }
 
 function parseFeishuCardActionValue(payload = {}) {
-  const actionValue = payload?.action?.value
+  const actionValue = payload?.action?.value ?? payload?.event?.action?.value
   if (!actionValue) return {}
   if (typeof actionValue === 'object') return actionValue
   try {
@@ -409,6 +416,23 @@ function parseFeishuCardActionValue(payload = {}) {
   }
 }
 
+function parseFeishuCardActionName(payload = {}) {
+  return pickFirstNonEmptyText(
+    [payload?.action?.name, payload?.event?.action?.name],
+    80,
+  )
+}
+
+function parseBugReplyIdsFromActionName(actionName = '') {
+  const normalized = String(actionName || '').trim()
+  const matched = /^(?:bug_reply_submit|bug_reply_form)_(\d+)_(\d+)$/i.exec(normalized)
+  if (!matched) return { bugId: null, parentCommentId: null }
+  return {
+    bugId: toPositiveInt(matched[1]),
+    parentCommentId: toPositiveInt(matched[2]),
+  }
+}
+
 function parseFeishuOperatorOpenId(payload = {}) {
   return pickFirstNonEmptyText(
     [
@@ -416,10 +440,34 @@ function parseFeishuOperatorOpenId(payload = {}) {
       payload?.operator?.open_id,
       payload?.event?.open_id,
       payload?.event?.operator?.open_id,
+      payload?.operator?.operator_id?.open_id,
       payload?.user?.open_id,
     ],
     128,
   )
+}
+
+function appendFeishuCardDebugLog(label, payload = {}) {
+  try {
+    const line = `${new Date().toISOString()} [${label}] ${JSON.stringify(payload)}\n`
+    fs.mkdirSync(path.dirname(FEISHU_CARD_DEBUG_LOG_PATH), { recursive: true })
+    fs.appendFileSync(FEISHU_CARD_DEBUG_LOG_PATH, line, 'utf8')
+  } catch {
+    // ignore debug log errors
+  }
+}
+
+function buildFeishuCardUpdateResponse(rawCard, toast = null) {
+  if (!rawCard || typeof rawCard !== 'object') {
+    return toast ? { toast } : { ok: true }
+  }
+  return {
+    ...(toast ? { toast } : {}),
+    card: {
+      type: 'raw',
+      data: rawCard,
+    },
+  }
 }
 
 async function resolveBusinessLineId(demandId) {
@@ -1101,6 +1149,7 @@ const createBugComment = async (req, res) => {
             bug_no: normalizeText(bug?.bug_no, 64) || null,
             detail_url: buildBugDetailUrl(bugId),
             detail_action_text: '查看详情',
+            source_comment_log_id: logResult.commentLogId || null,
             mention_user_id: mentionUserId,
             mention_user_name: mentionDisplayName || null,
           },
@@ -1142,13 +1191,61 @@ const receiveFeishuBugCommentAction = async (req, res) => {
   }
 
   const actionValue = parseFeishuCardActionValue(payload)
-  const actionKey = normalizeText(actionValue?.action, 80).toLowerCase()
+  const actionName = parseFeishuCardActionName(payload)
+  const actionNameIds = parseBugReplyIdsFromActionName(actionName)
+  let actionKey = normalizeText(actionValue?.action || actionValue?.action_key, 80).toLowerCase()
+  if (!actionKey && actionNameIds.bugId) {
+    actionKey = 'bug_comment_reply_submit'
+  }
+  const incomingDebugPayload = {
+    action_key: actionKey || '',
+    action_name: actionName || '',
+    action_value: actionValue || {},
+    action_name_bug_id: actionNameIds.bugId || null,
+    action_name_parent_comment_id: actionNameIds.parentCommentId || null,
+    has_form_value: Boolean(payload?.action?.form_value || payload?.event?.action?.form_value),
+  }
+  console.log('[FeishuCardAction] incoming', JSON.stringify(incomingDebugPayload))
+  appendFeishuCardDebugLog('incoming', incomingDebugPayload)
+  if (actionKey === 'bug_comment_reply_open') {
+    const bugId = toPositiveInt(actionValue?.bug_id)
+    const cardPayload = buildBugCommentReplyCardPayload({
+      title: `Bug评论提醒 ${bugId ? `#${bugId}` : ''}`.trim(),
+      markdown: '请填写回复内容并提交。',
+      detailUrl: buildBugDetailUrl(bugId),
+      detailActionText: '查看详情',
+      bugId,
+      mode: 'replying',
+    })
+    let nextCard = null
+    try {
+      nextCard = JSON.parse(cardPayload.content)
+    } catch {
+      nextCard = null
+    }
+    return res.json(buildFeishuCardUpdateResponse(nextCard))
+  }
+
   if (actionKey !== 'bug_comment_reply_submit') {
+    if (payload?.action) {
+      console.warn('收到未识别的飞书卡片动作:', {
+        action_value: actionValue,
+        payload_action: payload.action,
+      })
+    }
     return res.json({ ok: true })
   }
 
-  const bugId = toPositiveInt(actionValue?.bug_id)
+  const bugId = toPositiveInt(actionValue?.bug_id) || actionNameIds.bugId
+  const parentCommentId = toPositiveInt(actionValue?.parent_comment_id) || actionNameIds.parentCommentId
   const comment = parseFeishuCardCommentText(payload)
+  const parsedDebugPayload = {
+    bug_id: bugId || null,
+    parent_comment_id: parentCommentId || null,
+    comment_len: comment ? comment.length : 0,
+  }
+  console.log('[FeishuCardAction] parsed', JSON.stringify(parsedDebugPayload))
+  appendFeishuCardDebugLog('parsed', parsedDebugPayload)
   if (!bugId || !comment) {
     return res.json({
       toast: {
@@ -1196,12 +1293,22 @@ const receiveFeishuBugCommentAction = async (req, res) => {
       })
     }
 
+    let normalizedParentCommentId = parentCommentId
+    if (normalizedParentCommentId) {
+      const parentComment = await Bug.findCommentLogById(normalizedParentCommentId, { bugId })
+      if (!parentComment || !isBugCommentLog(parentComment)) {
+        normalizedParentCommentId = null
+      } else if (toPositiveInt(parentComment.parent_comment_id)) {
+        normalizedParentCommentId = toPositiveInt(parentComment.parent_comment_id)
+      }
+    }
+
     const statusCode = normalizeCode(bug?.status_code) || BUG_STATUS.NEW
     const result = await Bug.addBugCommentLog(bugId, {
       operatorId,
       statusCode,
       comment,
-      parentCommentId: null,
+      parentCommentId: normalizedParentCommentId,
     })
     if (!result?.ok) {
       return res.json({
