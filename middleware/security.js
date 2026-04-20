@@ -1,4 +1,5 @@
 const rateLimit = require('express-rate-limit')
+const { verifyToken } = require('../utils/jwt')
 
 function parsePositiveInt(rawValue, fallbackValue) {
   const parsed = Number.parseInt(String(rawValue || '').trim(), 10)
@@ -22,10 +23,43 @@ const apiSkipLogin = parseBoolean(process.env.API_RATE_LIMIT_SKIP_LOGIN, true)
 const loginWindowMs = parsePositiveInt(process.env.LOGIN_RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000)
 const loginMax = parsePositiveInt(process.env.LOGIN_RATE_LIMIT_MAX, 20)
 
+function resolveBearerToken(req) {
+  const authHeader = String(req?.headers?.authorization || '').trim()
+  if (!authHeader.startsWith('Bearer ')) return ''
+  return authHeader.slice(7).trim()
+}
+
+function resolveRateLimitUserKey(req) {
+  const explicitUserId = Number(req?.user?.id)
+  if (Number.isInteger(explicitUserId) && explicitUserId > 0) {
+    return `user:${explicitUserId}`
+  }
+
+  const token = resolveBearerToken(req)
+  if (!token) return ''
+
+  try {
+    const decoded = verifyToken(token)
+    const tokenUserId = Number(decoded?.id || decoded?.user_id)
+    if (Number.isInteger(tokenUserId) && tokenUserId > 0) {
+      return `user:${tokenUserId}`
+    }
+  } catch {
+    return ''
+  }
+
+  return ''
+}
+
 // API请求频率限制
 const apiLimiter = rateLimit({
   windowMs: apiWindowMs,
   max: apiMax,
+  keyGenerator: (req) => {
+    const userKey = resolveRateLimitUserKey(req)
+    if (userKey) return userKey
+    return req.ip || req.headers['x-forwarded-for'] || 'unknown'
+  },
   skip: (req) => {
     if (apiSkipOptions && req.method === 'OPTIONS') return true
     if (apiSkipLogin && req.path === '/auth/login') return true

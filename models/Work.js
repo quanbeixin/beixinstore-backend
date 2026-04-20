@@ -41,6 +41,15 @@ const NET_EFFICIENCY_FORMULA_OPERATORS = Object.freeze({
   DIV: 'DIV',
 })
 const DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS = Object.freeze([
+  NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_BASELINE_HOURS,
+  NET_EFFICIENCY_FORMULA_OPERATORS.SUB,
+  NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_COMPARABLE_ACTUAL_HOURS,
+  NET_EFFICIENCY_FORMULA_OPERATORS.MUL,
+  NET_EFFICIENCY_FORMULA_VARIABLES.TASK_DIFFICULTY_COEFF,
+  NET_EFFICIENCY_FORMULA_OPERATORS.DIV,
+  NET_EFFICIENCY_FORMULA_VARIABLES.JOB_LEVEL_COEFF,
+])
+const PREVIOUS_DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS = Object.freeze([
   NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_COMPARABLE_ACTUAL_HOURS,
   NET_EFFICIENCY_FORMULA_OPERATORS.SUB,
   NET_EFFICIENCY_FORMULA_VARIABLES.OWNER_BASELINE_HOURS,
@@ -1419,9 +1428,11 @@ function buildNetEfficiencyFormulaConfig(storedRows = []) {
       : (
           usesOwnerComparableNetEfficiencyVariables(storedExpression)
           || isSameNetEfficiencyExpression(storedExpression, LEGACY_DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS)
+          || isSameNetEfficiencyExpression(storedExpression, PREVIOUS_DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS)
         )
           ? (
               isSameNetEfficiencyExpression(storedExpression, LEGACY_DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS)
+              || isSameNetEfficiencyExpression(storedExpression, PREVIOUS_DEFAULT_NET_EFFICIENCY_FORMULA_TOKENS)
                 ? getDefaultNetEfficiencyFormulaTokens()
                 : storedExpression
             )
