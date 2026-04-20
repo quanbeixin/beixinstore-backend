@@ -1580,7 +1580,6 @@ const Bug = {
       assigneeIds = [],
       watcherIds = [],
       fixSolution,
-      verifyResult,
     },
   ) {
     const normalizedBugId = toPositiveInt(bugId)
@@ -1616,7 +1615,6 @@ const Bug = {
            demand_id = ?,
            assignee_id = ?,
            fix_solution = ?,
-           verify_result = ?,
            updated_at = NOW()
          WHERE id = ?
            AND deleted_at IS NULL`,
@@ -1635,7 +1633,6 @@ const Bug = {
           normalizeDemandId(demandId),
           toPositiveInt(finalAssigneeIds[0]),
           normalizeNullableText(fixSolution, 20000),
-          normalizeNullableText(verifyResult, 20000),
           normalizedBugId,
         ],
       )
@@ -1671,7 +1668,7 @@ const Bug = {
     return Number(result.affectedRows || 0)
   },
 
-  async transitionBug(bugId, { toStatusCode, operatorId, remark = null, fixSolution, verifyResult } = {}) {
+  async transitionBug(bugId, { toStatusCode, operatorId, remark = null, fixSolution } = {}) {
     const normalizedBugId = toPositiveInt(bugId)
     const normalizedOperatorId = toPositiveInt(operatorId)
     const normalizedToStatus = normalizeCode(toStatusCode)
@@ -1682,7 +1679,7 @@ const Bug = {
       await conn.beginTransaction()
 
       const [rows] = await conn.query(
-        `SELECT id, status_code, fix_solution, verify_result
+        `SELECT id, status_code, fix_solution
          FROM bugs
          WHERE id = ?
            AND deleted_at IS NULL
@@ -1716,15 +1713,9 @@ const Bug = {
         patchParams.push(normalizeNullableText(fixSolution, 20000))
       }
       if (normalizedToStatus === 'CLOSED') {
-        patchFields.push('verify_result = ?')
-        patchParams.push(normalizeNullableText(verifyResult, 20000))
         patchFields.push('closed_at = NOW()')
       } else if (normalizedToStatus !== 'CLOSED') {
         patchFields.push('closed_at = NULL')
-      }
-      if (normalizedToStatus === 'REOPENED' && verifyResult !== undefined) {
-        patchFields.push('verify_result = ?')
-        patchParams.push(normalizeNullableText(verifyResult, 20000))
       }
 
       patchParams.push(normalizedBugId)

@@ -166,6 +166,8 @@ const BUSINESS_ROLE_RECEIVER_KEYS = new Set([
   'demand_owner',
   'node_owner',
   'node_assignee',
+  'bug_assignee',
+  'bug_reporter',
   'bug_watcher',
   'daily_report_team_all',
   'daily_report_scheduled',
@@ -588,8 +590,14 @@ async function resolveUserOpenId(userId) {
   }
 }
 
-function excludeOperatorSelfTargets(targets, operatorContext) {
+function excludeOperatorSelfTargets(targets, operatorContext, { allowSelfTargets = false } = {}) {
   const inputTargets = Array.isArray(targets) ? targets : []
+  if (allowSelfTargets) {
+    return {
+      targets: inputTargets,
+      removed_count: 0,
+    }
+  }
   const operatorUserId = toNullableInt(operatorContext?.user_id)
   const operatorOpenId = normalizeText(operatorContext?.open_id, 128)
 
@@ -749,6 +757,29 @@ async function resolveBusinessRoleUserIds(roleKeys, eventData) {
         toNullableInt(getValueByPath(eventData, 'to_assignee_id')) ||
         toNullableInt(getValueByPath(eventData, 'task_assignee_id'))
       if (nodeOwnerUserId) userIds.push(nodeOwnerUserId)
+      continue
+    }
+
+    if (key === 'bug_assignee') {
+      const bugAssigneeIds = [
+        ...toNullableIntList(getValueByPath(eventData, 'to_assignee_ids')),
+        ...toNullableIntList(getValueByPath(eventData, 'assignee_ids')),
+      ]
+      if (bugAssigneeIds.length > 0) {
+        userIds.push(...bugAssigneeIds)
+        continue
+      }
+
+      const bugAssigneeId =
+        toNullableInt(getValueByPath(eventData, 'to_assignee_id')) ||
+        toNullableInt(getValueByPath(eventData, 'assignee_id'))
+      if (bugAssigneeId) userIds.push(bugAssigneeId)
+      continue
+    }
+
+    if (key === 'bug_reporter') {
+      const reporterId = toNullableInt(getValueByPath(eventData, 'reporter_id'))
+      if (reporterId) userIds.push(reporterId)
       continue
     }
 
@@ -1062,7 +1093,9 @@ const NotificationEvent = {
         errorMessage = '规则未配置可发送文案'
       } else {
         const resolvedTargets = await resolveTargets(rule, data)
-        const filteredTargetsResult = excludeOperatorSelfTargets(resolvedTargets, operatorContext)
+        const filteredTargetsResult = excludeOperatorSelfTargets(resolvedTargets, operatorContext, {
+          allowSelfTargets: normalizedEventType.startsWith('bug_'),
+        })
         const targets = filteredTargetsResult.targets
         const removedSelfCount = Number(filteredTargetsResult.removed_count || 0)
 

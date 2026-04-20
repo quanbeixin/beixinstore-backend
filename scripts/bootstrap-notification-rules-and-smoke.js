@@ -203,8 +203,8 @@ const EVENT_SPECS = [
   {
     scene_code: 'bug_status_change',
     rule_name: 'Bug状态变更通知',
-    receiver_type: 'field',
-    receiver_config_json: { user_id_field: 'assignee_id' },
+    receiver_type: 'role',
+    receiver_config_json: { business_roles: ['bug_reporter'] },
     message_title: 'Bug状态更新：${bug_no}',
     message_content: '${bug_title}\n状态从 ${from_status} 变更为 ${to_status}${reject_reason_display}',
     condition_config_json: null,

@@ -28,11 +28,11 @@ const BUG_STATUS = Object.freeze({
 })
 
 const DEFAULT_ACTION_REQUIREMENTS = Object.freeze({
-  start: { requireRemark: false, requireFixSolution: false, requireVerifyResult: false },
-  fix: { requireRemark: false, requireFixSolution: true, requireVerifyResult: false },
-  verify: { requireRemark: false, requireFixSolution: false, requireVerifyResult: false },
-  reopen: { requireRemark: true, requireFixSolution: false, requireVerifyResult: false },
-  reject: { requireRemark: true, requireFixSolution: false, requireVerifyResult: false },
+  start: { requireRemark: false, requireFixSolution: false },
+  fix: { requireRemark: false, requireFixSolution: true },
+  verify: { requireRemark: false, requireFixSolution: false },
+  reopen: { requireRemark: true, requireFixSolution: false },
+  reject: { requireRemark: true, requireFixSolution: false },
 })
 
 function toPositiveInt(value) {
@@ -649,10 +649,7 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
   }
   const assigneeId = assigneeIds[0] || null
   const watcherIds = normalizePositiveIntList(payload.watcher_ids)
-  const assigneeIdSet = new Set(assigneeIds)
-  const sanitizedWatcherIds = watcherIds.filter((item) => !assigneeIdSet.has(item))
   const fixSolution = normalizeText(payload.fix_solution, 20000)
-  const verifyResult = normalizeText(payload.verify_result, 20000)
 
   if (!title) return { ok: false, message: 'Bug标题不能为空' }
   if (!description || !hasMeaningfulBugDescription(description)) return { ok: false, message: 'Bug描述不能为空' }
@@ -694,9 +691,8 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
       demandId: demandId || null,
       assigneeId,
       assigneeIds,
-      watcherIds: sanitizedWatcherIds,
+      watcherIds,
       fixSolution: isCreate ? null : fixSolution || null,
-      verifyResult: isCreate ? null : verifyResult || null,
       demand,
     },
   }
@@ -708,7 +704,6 @@ function buildTransitionPayload(targetStatus, req) {
     operatorId: req.user.id,
     remark: normalizeText(req.body.remark, 20000) || null,
     fixSolution: normalizeText(req.body.fix_solution, 20000) || null,
-    verifyResult: normalizeText(req.body.verify_result, 20000) || null,
   }
 }
 
@@ -915,7 +910,7 @@ const updateBug = async (req, res) => {
     // debug: log incoming watcher payload to help diagnose missing watchers
     try {
       console.debug('updateBug incoming watcher_ids (raw):', req.body?.watcher_ids)
-      console.debug('updateBug sanitized watcherIds:', validation.data?.watcherIds)
+      console.debug('updateBug watcherIds:', validation.data?.watcherIds)
     } catch (e) {
       // ignore
     }
@@ -1012,7 +1007,6 @@ async function handleTransition(
     actionKey = '',
     requireFixSolution = false,
     requireRemark = false,
-    requireVerifyResult = false,
     successMessage,
   },
 ) {
@@ -1059,13 +1053,11 @@ async function handleTransition(
     const defaultRequirements = DEFAULT_ACTION_REQUIREMENTS[normalizedActionKey] || {
       requireRemark,
       requireFixSolution,
-      requireVerifyResult,
     }
     const resolvedRequirements = workflowRule
       ? {
           requireRemark: Number(workflowRule.require_remark) === 1,
           requireFixSolution: Number(workflowRule.require_fix_solution) === 1,
-          requireVerifyResult: Number(workflowRule.require_verify_result) === 1,
         }
       : defaultRequirements
 
@@ -1075,9 +1067,6 @@ async function handleTransition(
     }
     if (resolvedRequirements.requireRemark && !payload.remark) {
       return res.status(400).json({ success: false, message: '备注不能为空' })
-    }
-    if (resolvedRequirements.requireVerifyResult && !payload.verifyResult) {
-      return res.status(400).json({ success: false, message: '验证结果不能为空' })
     }
 
     const result = await Bug.transitionBug(bugId, payload)
@@ -1190,14 +1179,12 @@ const transitionBugByWorkflow = async (req, res) => {
   const defaults = DEFAULT_ACTION_REQUIREMENTS[actionKey] || {
     requireRemark: false,
     requireFixSolution: false,
-    requireVerifyResult: false,
   }
 
   return handleTransition(req, res, targetStatus, {
     actionKey,
     requireRemark: defaults.requireRemark,
     requireFixSolution: defaults.requireFixSolution,
-    requireVerifyResult: defaults.requireVerifyResult,
     successMessage: 'Bug状态已更新',
   })
 }
