@@ -9477,46 +9477,33 @@ const Work = {
     const storedRowsPromise = this.listEfficiencyFactorSettings()
     const logConditions = ['l.user_id = ?']
     const logParams = [normalizedUserId]
+    const plannedStartDateSql = 'COALESCE(l.expected_start_date, l.expected_completion_date)'
+    const plannedEndDateSql = 'COALESCE(l.expected_completion_date, l.expected_start_date)'
     if (startDate && endDate) {
       logConditions.push(
         `(
-          EXISTS (
-            SELECT 1
-            FROM work_log_daily_entries e
-            WHERE e.log_id = l.id
-              AND e.user_id = l.user_id
-              AND e.entry_date BETWEEN ? AND ?
+          (
+            ${plannedStartDateSql} IS NOT NULL
+            AND ${plannedStartDateSql} <= ?
+            AND ${plannedEndDateSql} >= ?
           )
           OR (
-            l.log_date BETWEEN ? AND ?
-            AND NOT EXISTS (
-              SELECT 1
-              FROM work_log_daily_entries ae
-              WHERE ae.log_id = l.id
-                AND ae.user_id = l.user_id
-            )
+            ${plannedStartDateSql} IS NULL
+            AND l.log_date BETWEEN ? AND ?
           )
         )`,
       )
-      logParams.push(startDate, endDate, startDate, endDate)
+      logParams.push(endDate, startDate, startDate, endDate)
     } else if (startDate) {
       logConditions.push(
         `(
-          EXISTS (
-            SELECT 1
-            FROM work_log_daily_entries e
-            WHERE e.log_id = l.id
-              AND e.user_id = l.user_id
-              AND e.entry_date >= ?
+          (
+            ${plannedEndDateSql} IS NOT NULL
+            AND ${plannedEndDateSql} >= ?
           )
           OR (
+            ${plannedEndDateSql} IS NULL
             l.log_date >= ?
-            AND NOT EXISTS (
-              SELECT 1
-              FROM work_log_daily_entries ae
-              WHERE ae.log_id = l.id
-                AND ae.user_id = l.user_id
-            )
           )
         )`,
       )
@@ -9524,21 +9511,13 @@ const Work = {
     } else if (endDate) {
       logConditions.push(
         `(
-          EXISTS (
-            SELECT 1
-            FROM work_log_daily_entries e
-            WHERE e.log_id = l.id
-              AND e.user_id = l.user_id
-              AND e.entry_date <= ?
+          (
+            ${plannedStartDateSql} IS NOT NULL
+            AND ${plannedStartDateSql} <= ?
           )
           OR (
+            ${plannedStartDateSql} IS NULL
             l.log_date <= ?
-            AND NOT EXISTS (
-              SELECT 1
-              FROM work_log_daily_entries ae
-              WHERE ae.log_id = l.id
-                AND ae.user_id = l.user_id
-            )
           )
         )`,
       )
@@ -9714,13 +9693,23 @@ const Work = {
       .map((item) => {
         const logId = Number(item?.log_id || 0)
         const logDate = normalizeDateOnly(item?.log_date)
+        const expectedStartDate = normalizeDateOnly(item?.expected_start_date)
+        const expectedCompletionDate = normalizeDateOnly(item?.expected_completion_date)
+        const plannedStartDate = expectedStartDate || expectedCompletionDate
+        const plannedEndDate = expectedCompletionDate || expectedStartDate
         const entryAgg = entryAggByLogId.get(logId)
         const hasExplicitEntry = Number(entryAgg?.entry_count || 0) > 0
         const logDateInRange =
           Boolean(logDate)
           && (!startDate || logDate >= startDate)
           && (!endDate || logDate <= endDate)
-        const itemInSelectedRange = hasExplicitEntry || logDateInRange
+        const scheduleInRange = Boolean(
+          plannedStartDate
+          && plannedEndDate
+          && (!startDate || plannedEndDate >= startDate)
+          && (!endDate || plannedStartDate <= endDate),
+        )
+        const itemInSelectedRange = scheduleInRange || (!plannedStartDate && logDateInRange)
         const normalizedTaskDifficultyCode =
           String(item?.effective_task_difficulty_code || DEFAULT_TASK_DIFFICULTY_CODE).trim().toUpperCase()
           || DEFAULT_TASK_DIFFICULTY_CODE
@@ -9732,10 +9721,10 @@ const Work = {
         const actualHours = itemInSelectedRange ? toDecimal1(item.actual_hours) : 0
         const ownerComparableActualHours =
           Number(item?.owner_estimate_covered || 0) > 0 ? toDecimal1(actualHours) : 0
-        const effectiveLogDate =
-          hasExplicitEntry && !logDateInRange
+        const effectiveLogDate = plannedStartDate
+          || (hasExplicitEntry && !logDateInRange
             ? (entryAgg?.last_entry_date || entryAgg?.first_entry_date || item.log_date)
-            : item.log_date
+            : item.log_date)
         return {
           ...item,
           log_date: effectiveLogDate,
