@@ -1723,10 +1723,28 @@ function buildDemandInsightWhere({
     'l.demand_id IS NOT NULL',
     "COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'",
     'COALESCE(u.include_in_metrics, 1) = 1',
-    'l.log_date >= ?',
-    'l.log_date <= ?',
+    `(
+      EXISTS (
+        SELECT 1
+        FROM work_log_daily_entries e
+        WHERE e.log_id = l.id
+          AND e.user_id = l.user_id
+          AND e.entry_date >= ?
+          AND e.entry_date <= ?
+      )
+      OR (
+        l.log_date >= ?
+        AND l.log_date <= ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM work_log_daily_entries ae
+          WHERE ae.log_id = l.id
+            AND ae.user_id = l.user_id
+        )
+      )
+    )`,
   ]
-  const params = [startDate, endDate]
+  const params = [startDate, endDate, startDate, endDate]
 
   if (departmentId) {
     conditions.push('u.department_id = ?')
@@ -7758,24 +7776,8 @@ const Work = {
            l.user_id,
            COALESCE(
              ROUND(
-               COALESCE(
-                 SUM(
-                   (CASE
-                     WHEN COALESCE(pa.entry_day_count, 0) > 0 THEN COALESCE(pa.entry_actual_hours, 0)
-                     ELSE COALESCE(l.actual_hours, 0)
-                   END) * COALESCE(tdw.coefficient, 1)
-                 ),
-                 0
-               )
-               / NULLIF(
-                   SUM(
-                     CASE
-                       WHEN COALESCE(pa.entry_day_count, 0) > 0 THEN COALESCE(pa.entry_actual_hours, 0)
-                       ELSE COALESCE(l.actual_hours, 0)
-                     END
-                   ),
-                   0
-                 ),
+               COALESCE(SUM(COALESCE(l.actual_hours, 0) * COALESCE(tdw.coefficient, 1)), 0)
+               / NULLIF(SUM(COALESCE(l.actual_hours, 0)), 0),
                4
              ),
              1
@@ -7807,8 +7809,17 @@ const Work = {
            AND COALESCE(u.include_in_metrics, 1) = 1
            ${departmentScopeConditionSql}
            AND (
-             (l.log_date >= ? AND l.log_date <= ?)
-             OR COALESCE(pa.entry_day_count, 0) > 0
+             COALESCE(pa.entry_day_count, 0) > 0
+             OR (
+               l.log_date >= ?
+               AND l.log_date <= ?
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM work_log_daily_entries ae
+                 WHERE ae.log_id = l.id
+                   AND ae.user_id = l.user_id
+               )
+             )
            )
            ${normalizedCompletedOnly ? "AND COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'" : ''}
          GROUP BY
@@ -8051,6 +8062,7 @@ const Work = {
     keyword = '',
     completedOnly = false,
   } = {}) {
+    await ensureDailyTables()
     const { whereSql, params } = buildDemandInsightWhere({
       startDate,
       endDate,
@@ -8529,13 +8541,21 @@ const Work = {
     }
     logConditions.push(
       `(
-        l.log_date BETWEEN ? AND ?
-        OR EXISTS (
+        EXISTS (
           SELECT 1
           FROM work_log_daily_entries e
           WHERE e.log_id = l.id
             AND e.user_id = l.user_id
             AND e.entry_date BETWEEN ? AND ?
+        )
+        OR (
+          l.log_date BETWEEN ? AND ?
+          AND NOT EXISTS (
+            SELECT 1
+            FROM work_log_daily_entries ae
+            WHERE ae.log_id = l.id
+              AND ae.user_id = l.user_id
+          )
         )
       )`,
     )
@@ -8641,8 +8661,8 @@ const Work = {
 
     const memberAggByUser = new Map()
     const dailyItemsByUserDate = new Map()
-    const explicitEntryByLogDate = new Map()
     const explicitEntryCountByLog = new Map()
+    const includedLogIds = new Set()
 
     function ensureMemberAgg(userId) {
       if (!memberAggByUser.has(userId)) {
@@ -8708,6 +8728,13 @@ const Work = {
           owner_estimate_hours: 0,
           personal_estimate_hours: 0,
           actual_hours: 0,
+          full_owner_estimate_hours: toDecimal1(row.owner_estimate_hours),
+          full_raw_owner_estimate_hours: toDecimal1(row.raw_owner_estimate_hours),
+          full_owner_baseline_hours: toDecimal1(row.owner_baseline_hours),
+          full_owner_comparable_actual_hours:
+            Number(row.owner_estimate_covered || 0) > 0 ? toDecimal1(row.actual_hours) : 0,
+          full_personal_estimate_hours: toDecimal1(row.personal_estimate_hours),
+          full_actual_hours: toDecimal1(row.actual_hours),
         }
         list.push(target)
       }
@@ -8722,11 +8749,12 @@ const Work = {
       const logId = Number(row.log_id)
       const entryDate = normalizeDateOnly(row.entry_date)
       if (!userId || !logId || !entryDate) return
-      explicitEntryByLogDate.set(`${logId}|${entryDate}`, {
-        actual_hours: toDecimal1(row.actual_hours),
-        entry_count: Number(row.entry_count || 0),
-      })
       explicitEntryCountByLog.set(logId, Number(explicitEntryCountByLog.get(logId) || 0) + Number(row.entry_count || 0))
+    })
+
+    normalizedLogRows.forEach((row) => {
+      const logId = Number(row.id)
+      if (logId) includedLogIds.add(logId)
     })
 
     normalizedLogRows.forEach((row) => {
@@ -8742,17 +8770,17 @@ const Work = {
       memberAgg.owner_estimate_non_owner_item_count += Number(row.owner_estimate_non_owner || 0)
       memberAgg.personal_estimate_item_count += Number(row.personal_estimate_covered || 0)
 
-      if (bucketDate && bucketDate >= startDate && bucketDate <= endDate) {
-        memberAgg.total_owner_estimate_hours = toDecimal1(
-          Number(memberAgg.total_owner_estimate_hours || 0) + Number(row.owner_estimate_hours || 0),
-        )
-        memberAgg.total_owner_baseline_hours = toDecimal1(
-          Number(memberAgg.total_owner_baseline_hours || 0) + Number(row.owner_baseline_hours || 0),
-        )
-        memberAgg.total_personal_estimate_hours = toDecimal1(
-          Number(memberAgg.total_personal_estimate_hours || 0) + Number(row.personal_estimate_hours || 0),
-        )
+      memberAgg.total_owner_estimate_hours = toDecimal1(
+        Number(memberAgg.total_owner_estimate_hours || 0) + Number(row.owner_estimate_hours || 0),
+      )
+      memberAgg.total_owner_baseline_hours = toDecimal1(
+        Number(memberAgg.total_owner_baseline_hours || 0) + Number(row.owner_baseline_hours || 0),
+      )
+      memberAgg.total_personal_estimate_hours = toDecimal1(
+        Number(memberAgg.total_personal_estimate_hours || 0) + Number(row.personal_estimate_hours || 0),
+      )
 
+      if (bucketDate && bucketDate >= startDate && bucketDate <= endDate) {
         const estimateItem = ensureDailyItem(userId, bucketDate, row)
         estimateItem.owner_estimate_hours = toDecimal1(
           Number(estimateItem.owner_estimate_hours || 0) + Number(row.owner_estimate_hours || 0),
@@ -8790,6 +8818,21 @@ const Work = {
       memberAgg.unestimated_item_count += Number(row.owner_pending || 0)
     })
 
+    normalizedLogRows.forEach((row) => {
+      const userId = Number(row.user_id)
+      const logId = Number(row.id)
+      if (!userId || !logId || !includedLogIds.has(logId)) return
+
+      const memberAgg = ensureMemberAgg(userId)
+      const fullActualHours = toDecimal1(row.actual_hours)
+      memberAgg.total_actual_hours = toDecimal1(Number(memberAgg.total_actual_hours || 0) + fullActualHours)
+      if (Number(row.owner_estimate_covered || 0) > 0) {
+        memberAgg.total_owner_comparable_actual_hours = toDecimal1(
+          Number(memberAgg.total_owner_comparable_actual_hours || 0) + fullActualHours,
+        )
+      }
+    })
+
     normalizedEntryRows.forEach((row) => {
       const userId = Number(row.user_id)
       const logId = Number(row.log_id)
@@ -8801,12 +8844,6 @@ const Work = {
 
       const memberAgg = ensureMemberAgg(userId)
       const actualHours = Number(row.actual_hours || 0)
-      memberAgg.total_actual_hours = toDecimal1(Number(memberAgg.total_actual_hours || 0) + actualHours)
-      if (Number(sourceLog?.owner_estimate_covered || 0) > 0) {
-        memberAgg.total_owner_comparable_actual_hours = toDecimal1(
-          Number(memberAgg.total_owner_comparable_actual_hours || 0) + actualHours,
-        )
-      }
       memberAgg.actual_filled_days_set.add(entryDate)
       memberAgg.last_actual_log_date =
         memberAgg.last_actual_log_date && memberAgg.last_actual_log_date > entryDate
@@ -8826,34 +8863,28 @@ const Work = {
       const userId = Number(row.user_id)
       const logId = Number(row.id)
       const bucketDate = resolveMemberRhythmBucketDate(row)
+      const fallbackActualDate = normalizeDateOnly(row.log_date) || bucketDate
       const hasExplicitEntry = Number(explicitEntryCountByLog.get(logId) || 0) > 0
       const fallbackActualHours = Number(row.actual_hours || 0)
       if (
         !userId ||
         !logId ||
         hasExplicitEntry ||
-        !bucketDate ||
-        bucketDate < startDate ||
-        bucketDate > endDate ||
+        !includedLogIds.has(logId) ||
+        !fallbackActualDate ||
         fallbackActualHours <= 0
       ) {
         return
       }
 
       const memberAgg = ensureMemberAgg(userId)
-      memberAgg.total_actual_hours = toDecimal1(Number(memberAgg.total_actual_hours || 0) + fallbackActualHours)
-      if (Number(row.owner_estimate_covered || 0) > 0) {
-        memberAgg.total_owner_comparable_actual_hours = toDecimal1(
-          Number(memberAgg.total_owner_comparable_actual_hours || 0) + fallbackActualHours,
-        )
-      }
-      memberAgg.actual_filled_days_set.add(bucketDate)
+      memberAgg.actual_filled_days_set.add(fallbackActualDate)
       memberAgg.last_actual_log_date =
-        memberAgg.last_actual_log_date && memberAgg.last_actual_log_date > bucketDate
+        memberAgg.last_actual_log_date && memberAgg.last_actual_log_date > fallbackActualDate
           ? memberAgg.last_actual_log_date
-          : bucketDate
+          : fallbackActualDate
 
-      const actualItem = ensureDailyItem(userId, bucketDate, row)
+      const actualItem = ensureDailyItem(userId, fallbackActualDate, row)
       actualItem.actual_hours = toDecimal1(Number(actualItem.actual_hours || 0) + fallbackActualHours)
       if (Number(row.owner_estimate_covered || 0) > 0) {
         actualItem.owner_comparable_actual_hours = toDecimal1(
@@ -8883,6 +8914,12 @@ const Work = {
           owner_estimate_hours: toDecimal1(item.owner_estimate_hours),
           personal_estimate_hours: toDecimal1(item.personal_estimate_hours),
           actual_hours: toDecimal1(item.actual_hours),
+          full_owner_estimate_hours: toDecimal1(item.full_owner_estimate_hours),
+          full_raw_owner_estimate_hours: toDecimal1(item.full_raw_owner_estimate_hours),
+          full_owner_baseline_hours: toDecimal1(item.full_owner_baseline_hours),
+          full_owner_comparable_actual_hours: toDecimal1(item.full_owner_comparable_actual_hours),
+          full_personal_estimate_hours: toDecimal1(item.full_personal_estimate_hours),
+          full_actual_hours: toDecimal1(item.full_actual_hours),
         }))
         .filter((item) => Number(item.actual_hours || 0) > 0)
       const ownerEstimateHours = toDecimal1(
@@ -9180,6 +9217,7 @@ const Work = {
     const memberList = Array.isArray(memberInsight?.member_list) ? memberInsight.member_list : []
     const trendTotals = new Map()
     const workTypeTotals = new Map()
+    const includedWorkTypeLogIds = new Set()
 
     memberList.forEach((member) => {
       const dailyStats = Array.isArray(member?.daily_stats) ? member.daily_stats : []
@@ -9202,6 +9240,9 @@ const Work = {
 
         const items = Array.isArray(dailyRow?.items) ? dailyRow.items : []
         items.forEach((item) => {
+          const logId = Number(item?.log_id || 0)
+          if (logId && includedWorkTypeLogIds.has(logId)) return
+          if (logId) includedWorkTypeLogIds.add(logId)
           const typeKey = String(item?.item_type_name || '未分类')
           if (!workTypeTotals.has(typeKey)) {
             workTypeTotals.set(typeKey, {
@@ -9215,9 +9256,9 @@ const Work = {
           }
           const workTypeRow = workTypeTotals.get(typeKey)
           workTypeRow.task_count += 1
-          workTypeRow.owner_estimate_hours += Number(item?.owner_estimate_hours || 0)
-          workTypeRow.personal_estimate_hours += Number(item?.personal_estimate_hours || 0)
-          workTypeRow.actual_hours += Number(item?.actual_hours || 0)
+          workTypeRow.owner_estimate_hours += Number(item?.full_owner_estimate_hours ?? item?.owner_estimate_hours ?? 0)
+          workTypeRow.personal_estimate_hours += Number(item?.full_personal_estimate_hours ?? item?.personal_estimate_hours ?? 0)
+          workTypeRow.actual_hours += Number(item?.full_actual_hours ?? item?.actual_hours ?? 0)
         })
       })
     })
@@ -9422,13 +9463,21 @@ const Work = {
     if (startDate && endDate) {
       logConditions.push(
         `(
-          l.log_date BETWEEN ? AND ?
-          OR EXISTS (
+          EXISTS (
             SELECT 1
             FROM work_log_daily_entries e
             WHERE e.log_id = l.id
               AND e.user_id = l.user_id
               AND e.entry_date BETWEEN ? AND ?
+          )
+          OR (
+            l.log_date BETWEEN ? AND ?
+            AND NOT EXISTS (
+              SELECT 1
+              FROM work_log_daily_entries ae
+              WHERE ae.log_id = l.id
+                AND ae.user_id = l.user_id
+            )
           )
         )`,
       )
@@ -9436,13 +9485,21 @@ const Work = {
     } else if (startDate) {
       logConditions.push(
         `(
-          l.log_date >= ?
-          OR EXISTS (
+          EXISTS (
             SELECT 1
             FROM work_log_daily_entries e
             WHERE e.log_id = l.id
               AND e.user_id = l.user_id
               AND e.entry_date >= ?
+          )
+          OR (
+            l.log_date >= ?
+            AND NOT EXISTS (
+              SELECT 1
+              FROM work_log_daily_entries ae
+              WHERE ae.log_id = l.id
+                AND ae.user_id = l.user_id
+            )
           )
         )`,
       )
@@ -9450,13 +9507,21 @@ const Work = {
     } else if (endDate) {
       logConditions.push(
         `(
-          l.log_date <= ?
-          OR EXISTS (
+          EXISTS (
             SELECT 1
             FROM work_log_daily_entries e
             WHERE e.log_id = l.id
               AND e.user_id = l.user_id
               AND e.entry_date <= ?
+          )
+          OR (
+            l.log_date <= ?
+            AND NOT EXISTS (
+              SELECT 1
+              FROM work_log_daily_entries ae
+              WHERE ae.log_id = l.id
+                AND ae.user_id = l.user_id
+            )
           )
         )`,
       )
@@ -9618,6 +9683,15 @@ const Work = {
         },
       ]),
     )
+    const trendActualHoursByDate = new Map()
+    ;(Array.isArray(entryRows) ? entryRows : []).forEach((row) => {
+      const dateKey = normalizeDateOnly(row.last_entry_date || row.first_entry_date)
+      if (!dateKey) return
+      trendActualHoursByDate.set(
+        dateKey,
+        toDecimal1(Number(trendActualHoursByDate.get(dateKey) || 0) + Number(row.actual_hours || 0)),
+      )
+    })
 
     const workItemList = (Array.isArray(logRows) ? logRows : [])
       .map((item) => {
@@ -9629,17 +9703,16 @@ const Work = {
           Boolean(logDate)
           && (!startDate || logDate >= startDate)
           && (!endDate || logDate <= endDate)
+        const itemInSelectedRange = hasExplicitEntry || logDateInRange
         const normalizedTaskDifficultyCode =
           String(item?.effective_task_difficulty_code || DEFAULT_TASK_DIFFICULTY_CODE).trim().toUpperCase()
           || DEFAULT_TASK_DIFFICULTY_CODE
         const taskDifficultyCoefficient = Number(taskDifficultyCoefficientByCode.get(normalizedTaskDifficultyCode) || 1)
-        const ownerEstimateHours = logDateInRange ? toDecimal1(item.owner_estimate_hours) : 0
-        const rawOwnerEstimateHours = logDateInRange ? toDecimal1(item.raw_owner_estimate_hours) : 0
-        const personalEstimateHours = logDateInRange ? toDecimal1(item.personal_estimate_hours) : 0
-        const ownerBaselineHours = logDateInRange ? toDecimal1(item.owner_baseline_hours) : 0
-        const actualHours = hasExplicitEntry
-          ? toDecimal1(entryAgg.actual_hours)
-          : (logDateInRange ? toDecimal1(item.actual_hours) : 0)
+        const ownerEstimateHours = itemInSelectedRange ? toDecimal1(item.owner_estimate_hours) : 0
+        const rawOwnerEstimateHours = itemInSelectedRange ? toDecimal1(item.raw_owner_estimate_hours) : 0
+        const personalEstimateHours = itemInSelectedRange ? toDecimal1(item.personal_estimate_hours) : 0
+        const ownerBaselineHours = itemInSelectedRange ? toDecimal1(item.owner_baseline_hours) : 0
+        const actualHours = itemInSelectedRange ? toDecimal1(item.actual_hours) : 0
         const ownerComparableActualHours =
           Number(item?.owner_estimate_covered || 0) > 0 ? toDecimal1(actualHours) : 0
         const effectiveLogDate =
@@ -9659,6 +9732,7 @@ const Work = {
           variance_owner_baseline_hours: toDecimal1(ownerComparableActualHours - ownerBaselineHours),
           variance_personal_hours: toDecimal1(actualHours - personalEstimateHours),
           task_difficulty_coefficient: toDecimal4(taskDifficultyCoefficient),
+          period_entry_actual_hours: hasExplicitEntry ? toDecimal1(entryAgg.actual_hours) : actualHours,
           net_efficiency_value: evaluateNetEfficiencyByFormula(
             netEfficiencyFormula.expression,
             buildNetEfficiencyContext({
@@ -9684,6 +9758,7 @@ const Work = {
     workItemList.forEach((item) => {
       const dateKey = String(item?.log_date || '').trim()
       if (!dateKey) return
+      const trendActualHours = Number(item.period_entry_actual_hours ?? item.actual_hours ?? 0)
       if (!trendTotals.has(dateKey)) {
         trendTotals.set(dateKey, {
           date: dateKey,
@@ -9695,7 +9770,7 @@ const Work = {
       const trendRow = trendTotals.get(dateKey)
       trendRow.owner_estimate_hours += Number(item.owner_estimate_hours || 0)
       trendRow.personal_estimate_hours += Number(item.personal_estimate_hours || 0)
-      trendRow.actual_hours += Number(item.actual_hours || 0)
+      trendRow.actual_hours += trendActualHours
     })
     const trendMap = new Map(
       Array.from(trendTotals.values()).map((row) => [
@@ -9911,6 +9986,8 @@ const Work = {
         total_owner_estimate_hours: totalOwnerEstimateHours,
         total_personal_estimate_hours: totalPersonalEstimateHours,
         total_actual_hours: totalActualHours,
+        variance_owner_hours: toDecimal1(totalActualHours - totalOwnerEstimateHours),
+        variance_personal_hours: toDecimal1(totalActualHours - totalPersonalEstimateHours),
         task_difficulty_coefficient: toDecimal4(summaryTaskDifficultyCoefficient || 1),
         job_level_weight_coefficient: toDecimal4(memberJobLevelWeightCoefficient || 1),
         net_efficiency_formula_expression: Array.isArray(netEfficiencyFormula.expression) ? [...netEfficiencyFormula.expression] : [],
