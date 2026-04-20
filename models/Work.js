@@ -8434,6 +8434,7 @@ const Work = {
     memberUserId = null,
     keyword = '',
     completedOnly = false,
+    aggregateActualMode = 'full_item',
   } = {}) {
     const calendarRange = buildChinaBusinessCalendarRange(startDate, endDate)
     const calendarDates = Array.isArray(calendarRange?.dates) ? calendarRange.dates : []
@@ -8974,18 +8975,23 @@ const Work = {
       const totalOwnerBaseline = Number(aggRow.total_owner_baseline_hours || 0)
       const totalOwnerComparableActual = Number(aggRow.total_owner_comparable_actual_hours || 0)
       const totalPersonal = Number(aggRow.total_personal_estimate_hours || 0)
-      const totalActual = Number(aggRow.total_actual_hours || 0)
+      const totalActualFromItems = Number(aggRow.total_actual_hours || 0)
       const itemCount = Number(aggRow.item_count || 0)
       const ownerRequiredItemCount = Number(aggRow.owner_required_item_count || 0)
       const ownerCoveredItemCount = Number(aggRow.owner_estimate_covered_item_count || 0)
       const ownerMissingItemCount = Number(aggRow.owner_estimate_missing_item_count || 0)
       const ownerNonOwnerItemCount = Number(aggRow.owner_estimate_non_owner_item_count || 0)
       const personalEstimateItemCount = Number(aggRow.personal_estimate_item_count || 0)
+      const sparseDailyStats = dailyByUser.get(userId) || []
+      const sparseDailyMap = new Map(sparseDailyStats.map((item) => [String(item.log_date || ''), item]))
+      const periodActualFromDailyStats = toDecimal1(
+        sparseDailyStats.reduce((sum, item) => sum + Number(item.actual_hours || 0), 0),
+      )
+      const usePeriodActualMode = String(aggregateActualMode || '').trim().toLowerCase() === 'period_actual'
+      const totalActual = usePeriodActualMode ? periodActualFromDailyStats : totalActualFromItems
       const capacityHours = workdayCountPerMember * DEFAULT_DAILY_CAPACITY_HOURS
       const avgActualPerDay = workdayCountPerMember > 0 ? totalActual / workdayCountPerMember : 0
       const avgSaturationRate = workdayCountPerMember > 0 ? (totalActual / capacityHours) * 100 : 0
-      const sparseDailyStats = dailyByUser.get(userId) || []
-      const sparseDailyMap = new Map(sparseDailyStats.map((item) => [String(item.log_date || ''), item]))
       let overloadDays = 0
       let lowLoadDays = 0
 

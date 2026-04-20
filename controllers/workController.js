@@ -4503,6 +4503,7 @@ const getMemberInsight = async (req, res) => {
       ownerUserId,
       memberUserId,
       keyword,
+      aggregateActualMode: 'period_actual',
     })
     return res.json({ success: true, data })
   } catch (err) {
