@@ -436,7 +436,61 @@ function normalizeMarkdownForFeishu(content) {
 }
 
 function buildMarkdownMessage({ content }) {
-  return normalizeMarkdownForFeishu(content)
+  // If content contains HTML (rich text from editor), convert to plain markdown
+  const raw = String(content || '')
+  const hasHtml = /<[^>]+>/.test(raw)
+  if (!hasHtml) return normalizeMarkdownForFeishu(raw)
+
+  function decodeHtmlEntities(text) {
+    return String(text || '')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+  }
+
+  let md = String(raw)
+
+  // Normalize line breaks
+  md = md.replace(/<br\s*\/?>(\s*)/gi, '\n')
+
+  // Convert <pre><code>...</code></pre> to fenced code blocks
+  md = md.replace(/<pre[^>]*>\s*<code[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/gi, (m, code) => {
+    const decoded = decodeHtmlEntities(code)
+    return '\n```\n' + decoded.replace(/^[\n\r]+|[\n\r]+$/g, '') + '\n```\n'
+  })
+
+  // Convert <code>inline</code> to `inline`
+  md = md.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, (m, code) => {
+    const decoded = decodeHtmlEntities(code).replace(/\s+/g, ' ')
+    return '`' + decoded + '`'
+  })
+
+  // Convert basic block tags to newlines
+  md = md.replace(/<\/p>\s*/gi, '\n')
+  md = md.replace(/<p[^>]*>/gi, '')
+  md = md.replace(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi, (m, txt) => '\n## ' + decodeHtmlEntities(txt) + '\n')
+
+  // Convert unordered lists
+  md = md.replace(/<ul[^>]*>([\s\S]*?)<\/ul>/gi, (m, list) => {
+    return list
+      .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (li, txt) => '- ' + decodeHtmlEntities(txt).replace(/<[^>]+>/g, '').trim() + '\n')
+  })
+
+  // Convert ordered lists
+  md = md.replace(/<ol[^>]*>([\s\S]*?)<\/ol>/gi, (m, list) => {
+    let i = 1
+    return list.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (li, txt) => `${i++}. ${decodeHtmlEntities(txt).replace(/<[^>]+>/g, '').trim()}\n`)
+  })
+
+  // Strip remaining tags but keep text
+  md = md.replace(/<[^>]+>/g, '')
+
+  // Decode entities
+  md = decodeHtmlEntities(md)
+
+  return normalizeMarkdownForFeishu(md)
 }
 
 function buildInteractiveCardPayload({ title, markdown, actionUrl, actionText }) {

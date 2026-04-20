@@ -11,7 +11,7 @@ const BUG_VIEW_VISIBILITY = Object.freeze({
   PRIVATE: 'PRIVATE',
   SHARED: 'SHARED',
 })
-const BUG_VIEW_GROUP_FIELD_SET = new Set(['status', 'reporter', 'bug_type'])
+const BUG_VIEW_GROUP_FIELD_SET = new Set(['status', 'reporter', 'bug_type', 'assignee'])
 const BUG_VIEW_ALLOWED_PAGE_SIZE_SET = new Set([20, 50, 100])
 const DEFAULT_WORKFLOW_TRANSITIONS = Object.freeze([
   {
@@ -1993,20 +1993,22 @@ const Bug = {
     if (!normalizedAttachmentId) return null
     const [rows] = await pool.query(
       `SELECT
-         id,
-         bug_id,
-         file_name,
-         file_ext,
-         file_size,
-         mime_type,
-         storage_provider,
-         bucket_name,
-         object_key,
-         object_url,
-         uploaded_by,
-         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
-       FROM bug_attachments
-       WHERE id = ?
+         a.id,
+         a.bug_id,
+         a.file_name,
+         a.file_ext,
+         a.file_size,
+         a.mime_type,
+         a.storage_provider,
+         a.bucket_name,
+         a.object_key,
+         a.object_url,
+         a.uploaded_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS uploaded_by_name,
+         DATE_FORMAT(a.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM bug_attachments a
+       LEFT JOIN users u ON u.id = a.uploaded_by
+       WHERE a.id = ?
        LIMIT 1`,
       [normalizedAttachmentId],
     )
@@ -2019,22 +2021,24 @@ const Bug = {
     if (!normalizedBugId || !normalizedObjectKey) return null
     const [rows] = await pool.query(
       `SELECT
-         id,
-         bug_id,
-         file_name,
-         file_ext,
-         file_size,
-         mime_type,
-         storage_provider,
-         bucket_name,
-         object_key,
-         object_url,
-         uploaded_by,
-         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
-       FROM bug_attachments
-       WHERE bug_id = ?
-         AND object_key = ?
-       ORDER BY id DESC
+         a.id,
+         a.bug_id,
+         a.file_name,
+         a.file_ext,
+         a.file_size,
+         a.mime_type,
+         a.storage_provider,
+         a.bucket_name,
+         a.object_key,
+         a.object_url,
+         a.uploaded_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS uploaded_by_name,
+         DATE_FORMAT(a.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM bug_attachments a
+       LEFT JOIN users u ON u.id = a.uploaded_by
+       WHERE a.bug_id = ?
+         AND a.object_key = ?
+       ORDER BY a.id DESC
        LIMIT 1`,
       [normalizedBugId, normalizedObjectKey],
     )
@@ -2046,21 +2050,23 @@ const Bug = {
     if (!normalizedAttachmentId) return null
     const [rows] = await pool.query(
       `SELECT
-         id,
-         bug_id,
-         comment_log_id,
-         file_name,
-         file_ext,
-         file_size,
-         mime_type,
-         storage_provider,
-         bucket_name,
-         object_key,
-         object_url,
-         uploaded_by,
-         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
-       FROM bug_comment_attachments
-       WHERE id = ?
+         a.id,
+         a.bug_id,
+         a.comment_log_id,
+         a.file_name,
+         a.file_ext,
+         a.file_size,
+         a.mime_type,
+         a.storage_provider,
+         a.bucket_name,
+         a.object_key,
+         a.object_url,
+         a.uploaded_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS uploaded_by_name,
+         DATE_FORMAT(a.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM bug_comment_attachments a
+       LEFT JOIN users u ON u.id = a.uploaded_by
+       WHERE a.id = ?
        LIMIT 1`,
       [normalizedAttachmentId],
     )
@@ -2074,24 +2080,26 @@ const Bug = {
     if (!normalizedBugId || !normalizedCommentLogId || !normalizedObjectKey) return null
     const [rows] = await pool.query(
       `SELECT
-         id,
-         bug_id,
-         comment_log_id,
-         file_name,
-         file_ext,
-         file_size,
-         mime_type,
-         storage_provider,
-         bucket_name,
-         object_key,
-         object_url,
-         uploaded_by,
-         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
-       FROM bug_comment_attachments
-       WHERE bug_id = ?
-         AND comment_log_id = ?
-         AND object_key = ?
-       ORDER BY id DESC
+         a.id,
+         a.bug_id,
+         a.comment_log_id,
+         a.file_name,
+         a.file_ext,
+         a.file_size,
+         a.mime_type,
+         a.storage_provider,
+         a.bucket_name,
+         a.object_key,
+         a.object_url,
+         a.uploaded_by,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS uploaded_by_name,
+         DATE_FORMAT(a.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+       FROM bug_comment_attachments a
+       LEFT JOIN users u ON u.id = a.uploaded_by
+       WHERE a.bug_id = ?
+         AND a.comment_log_id = ?
+         AND a.object_key = ?
+       ORDER BY a.id DESC
        LIMIT 1`,
       [normalizedBugId, normalizedCommentLogId, normalizedObjectKey],
     )

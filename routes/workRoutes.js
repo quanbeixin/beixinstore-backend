@@ -26,6 +26,7 @@ const {
   deleteBugView,
   getDemandBugStats,
   listDemandBugs,
+  precheckBugAttachmentUpload,
   getBugAttachmentPolicy,
   getBugCommentAttachmentPolicy,
   createBugAttachment,
@@ -129,8 +130,13 @@ router.delete('/bugs/views/:viewId', authMiddleware.requirePermission('bug.view'
 router.get('/bugs', authMiddleware.requirePermission('bug.view'), listBugs)
 router.get('/bugs/:id', authMiddleware.requirePermission('bug.view'), getBugDetail)
 router.post('/bugs', authMiddleware.requirePermission('bug.create'), createBug)
+router.post(
+  '/bugs/attachments/precheck',
+  authMiddleware.requireAnyPermission(['bug.create', 'bug.update']),
+  precheckBugAttachmentUpload,
+)
 router.put('/bugs/:id', authMiddleware.requirePermission('bug.update'), updateBug)
-router.delete('/bugs/:id', authMiddleware.requirePermission('bug.delete'), deleteBug)
+router.delete('/bugs/:id', deleteBug)
 router.post('/bugs/:id/start', authMiddleware.requirePermission('bug.transition'), startBug)
 router.post('/bugs/:id/fix', authMiddleware.requirePermission('bug.transition'), fixBug)
 router.post('/bugs/:id/verify', authMiddleware.requirePermission('bug.transition'), verifyBug)

@@ -51,7 +51,7 @@ function createPostPolicy({
   endpoint,
   objectKey,
   expireSeconds = 300,
-  maxFileSize = 10 * 1024 * 1024,
+  maxFileSize = 20 * 1024 * 1024,
   successActionStatus = '200',
   securityToken = '',
 }) {
@@ -63,7 +63,7 @@ function createPostPolicy({
     conditions: [
       { bucket: bucketName },
       ['eq', '$key', objectKey],
-      ['content-length-range', 0, Math.max(1024, Number(maxFileSize) || 10 * 1024 * 1024)],
+      ['content-length-range', 0, Math.max(1024, Number(maxFileSize) || 20 * 1024 * 1024)],
       ['eq', '$success_action_status', String(successActionStatus || '200')],
     ],
   }
@@ -106,7 +106,7 @@ function getOssConfigFromEnv() {
   })
   const uploadDir = normalizeText(process.env.ALIYUN_OSS_UPLOAD_DIR, 100) || 'beixin-store'
   const expireSeconds = Math.max(60, Number(process.env.ALIYUN_OSS_EXPIRE_SECONDS || 300))
-  const maxFileSize = Math.max(1024, Number(process.env.ALIYUN_OSS_MAX_FILE_SIZE || 10 * 1024 * 1024))
+  const maxFileSize = Math.max(1024, Number(process.env.ALIYUN_OSS_MAX_FILE_SIZE || 20 * 1024 * 1024))
   const securityToken = normalizeText(process.env.ALIYUN_OSS_SECURITY_TOKEN, 2048)
 
   if (!accessKeyId || !accessKeySecret || !bucketName || !endpoint || !region) {

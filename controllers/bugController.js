@@ -3,6 +3,7 @@ const path = require('path')
 const Bug = require('../models/Bug')
 const Work = require('../models/Work')
 const User = require('../models/User')
+const BugChangeLog = require('../models/BugChangeLog')
 const NotificationEvent = require('../models/NotificationEvent')
 const pool = require('../utils/db')
 const { sendNotification, buildBugCommentReplyCardPayload } = require('../utils/notificationSender')
@@ -53,6 +54,25 @@ function normalizeText(value, maxLen = 500) {
   return String(value || '').trim().slice(0, maxLen)
 }
 
+function stripHtmlToPlainText(value) {
+  return String(value || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+}
+
+function hasMeaningfulBugDescription(value) {
+  const plainText = normalizeText(stripHtmlToPlainText(value), 20000)
+  if (plainText) return true
+  return /<img\b/i.test(String(value || ''))
+}
+
 function normalizeDemandId(value) {
   const normalized = String(value || '').trim().toUpperCase()
   return normalized || null
@@ -68,6 +88,11 @@ function normalizeActionKey(value) {
     .trim()
     .toLowerCase()
     .slice(0, 50)
+}
+
+function normalizeBooleanFlag(value) {
+  if (value === true || value === 1 || value === '1') return true
+  return String(value || '').trim().toLowerCase() === 'true'
 }
 
 function isLocalHost(hostname = '') {
@@ -508,7 +533,7 @@ async function buildBugNotificationData({ bug, req, extra = {} }) {
     bug_id: bugId,
     bug_no: normalizeText(bug?.bug_no, 64) || null,
     bug_title: normalizeText(bug?.title, 200) || '',
-    bug_content: normalizeText(bug?.description, 20000) || '',
+    bug_content: normalizeText(stripHtmlToPlainText(bug?.description), 20000) || '',
     severity: normalizeText(bug?.severity_name || bug?.severity_code, 64) || '',
     status: normalizeText(bug?.status_name || bug?.status_code, 64) || '',
     reporter_id: toPositiveInt(bug?.reporter_id),
@@ -630,7 +655,7 @@ async function validateBugPayload(payload, { isCreate = false } = {}) {
   const verifyResult = normalizeText(payload.verify_result, 20000)
 
   if (!title) return { ok: false, message: 'Bug标题不能为空' }
-  if (!description) return { ok: false, message: 'Bug描述不能为空' }
+  if (!description || !hasMeaningfulBugDescription(description)) return { ok: false, message: 'Bug描述不能为空' }
   if (!severityCode) return { ok: false, message: '严重程度不能为空' }
   if (isCreate && !issueStage) return { ok: false, message: 'Bug阶段不能为空' }
   if (!assigneeId) return { ok: false, message: '处理人不能为空' }
@@ -726,6 +751,79 @@ const getBugDetail = async (req, res) => {
       ossConfig: getOssConfigFromEnv(),
       expireSeconds: getBugAttachmentSignExpireSeconds(),
     })
+
+    // 将 bug_change_logs 合并到 status_logs 以便前端在“操作记录”中展示编辑日志
+    try {
+      const bcl = require('../models/BugChangeLog')
+      const changeResult = await bcl.list({ bugId: bugId, page: 1, pageSize: 100 })
+      const changeRows = changeResult.rows || []
+      const mapped = (changeRows || []).map((row) => {
+        let remarkHtml = row.change_summary || ''
+        try {
+          const before = row.before_json ? JSON.parse(row.before_json) : null
+          const after = row.after_json ? JSON.parse(row.after_json) : null
+          const labels = {
+            title: '标题',
+            description: '详情',
+            assignee_name: '处理人',
+            priority_name: '优先级',
+            product_name: '产品模块',
+            demand_name: '需求',
+            expected_result: '期望结果',
+            actual_result: '实际结果',
+            reproduce_steps: '复现步骤',
+          }
+
+          function escapeHtml(text) {
+            if (text === null || text === undefined) return ''
+            return String(text)
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#39;')
+          }
+
+          const diffs = []
+          if (before && after) {
+            Object.keys(labels).forEach((key) => {
+              const beforeVal = key === 'description' ? stripHtmlToPlainText(before[key]) : (before[key] ?? '')
+              const afterVal = key === 'description' ? stripHtmlToPlainText(after[key]) : (after[key] ?? '')
+              if (String(beforeVal) !== String(afterVal)) {
+                diffs.push(`<div><strong>${labels[key]}：</strong><div style="color:#888">旧：${escapeHtml(beforeVal)}</div><div style="color:#0a0">新：${escapeHtml(afterVal)}</div></div>`)
+              }
+            })
+          }
+
+          if (diffs.length > 0) {
+            remarkHtml = `<div>${diffs.join('')}</div>`
+          }
+        } catch (e) {
+          // fallback to summary
+        }
+
+        return {
+          id: `bcl-${row.id}`,
+          bug_id: Number(row.bug_id || 0),
+          from_status_code: null,
+          from_status_name: '编辑',
+          to_status_code: null,
+          to_status_name: row.change_summary || '编辑',
+          operator_id: Number(row.operator_user_id || 0),
+          operator_name: row.operator_name || '',
+          parent_comment_id: null,
+          remark: remarkHtml || row.change_summary || '',
+          created_at: row.created_at,
+        }
+      })
+      responseData.status_logs = ((responseData.status_logs || []).concat(mapped) || []).sort((a, b) => {
+        const ta = new Date(a.created_at).getTime() || 0
+        const tb = new Date(b.created_at).getTime() || 0
+        return tb - ta
+      })
+    } catch (err) {
+      console.error('合并 BugChangeLog 到 detail 失败:', err)
+    }
     return res.json({ success: true, data: responseData })
   } catch (err) {
     console.error('获取Bug详情失败:', err)
@@ -799,6 +897,7 @@ const updateBug = async (req, res) => {
   if (!bugId) {
     return res.status(400).json({ success: false, message: 'Bug ID 无效' })
   }
+  const skipNotification = normalizeBooleanFlag(req.body?.skip_notification)
 
   try {
     const existing = await Bug.findBugById(bugId)
@@ -812,6 +911,13 @@ const updateBug = async (req, res) => {
     const validation = await validateBugPayload(req.body, { isCreate: false })
     if (!validation.ok) {
       return res.status(400).json({ success: false, message: validation.message })
+    }
+    // debug: log incoming watcher payload to help diagnose missing watchers
+    try {
+      console.debug('updateBug incoming watcher_ids (raw):', req.body?.watcher_ids)
+      console.debug('updateBug sanitized watcherIds:', validation.data?.watcherIds)
+    } catch (e) {
+      // ignore
     }
 
     await Bug.updateBug(bugId, validation.data)
@@ -828,7 +934,16 @@ const updateBug = async (req, res) => {
         name: normalizeText(existing?.assignee_name, 100) || '',
       }
 
+    if (!skipNotification) {
+      await emitBugNotificationEvent({
+        eventType: 'bug_update',
+        bug: detail,
+        req,
+      })
+    }
+
     for (const assignee of newAssignees) {
+      if (skipNotification) break
       await emitBugNotificationEvent({
         eventType: 'bug_assign',
         bug: detail,
@@ -840,6 +955,21 @@ const updateBug = async (req, res) => {
           to_assignee_name: assignee.name,
         },
       })
+    }
+
+    // 记录变更日志（尝试记录，不影响主流程）
+    try {
+      await BugChangeLog.create({
+        actionType: 'UPDATE',
+        source: 'BUG',
+        operatorUserId: req.user?.id,
+        operatorName: req.user?.real_name || req.user?.username || '',
+        bugId: bugId,
+        beforeSnapshot: existing,
+        afterSnapshot: detail,
+      })
+    } catch (logErr) {
+      console.error('写入 BugChangeLog 失败:', logErr)
     }
 
     const responseData = decorateBugDetailAttachments(detail, {
@@ -972,6 +1102,11 @@ async function handleTransition(
       extra: {
         from_status: fromStatus,
         to_status: toStatus,
+        reject_reason: normalizedActionKey === 'reject' ? (normalizeText(req.body?.remark, 500) || '') : '',
+        reject_reason_display:
+          normalizedActionKey === 'reject' && normalizeText(req.body?.remark, 500)
+            ? `\n打回原因：${normalizeText(req.body?.remark, 500)}`
+            : '',
       },
     })
     if (targetStatus === BUG_STATUS.FIXED) {
@@ -1077,7 +1212,11 @@ const createBugComment = async (req, res) => {
   if (!comment) {
     return res.status(400).json({ success: false, message: '评论内容不能为空' })
   }
-  const mentionUserId = toPositiveInt(req.body?.mention_user_id)
+  const mentionUserIds = normalizePositiveIntList(
+    Array.isArray(req.body?.mention_user_ids) && req.body?.mention_user_ids.length > 0
+      ? req.body.mention_user_ids
+      : req.body?.mention_user_id,
+  )
   const parentCommentId = toPositiveInt(req.body?.parent_comment_id)
 
   try {
@@ -1097,19 +1236,24 @@ const createBugComment = async (req, res) => {
       }
     }
 
-    let mentionUser = null
-    if (mentionUserId) {
-      mentionUser = await User.findById(mentionUserId)
+    const mentionUsers = []
+    for (const mentionUserId of mentionUserIds) {
+      const mentionUser = await User.findById(mentionUserId)
       if (!mentionUser) {
         return res.status(400).json({ success: false, message: '被@用户不存在' })
       }
+      mentionUsers.push(mentionUser)
     }
 
-    const mentionDisplayName =
-      normalizeText(mentionUser?.real_name || mentionUser?.username, 100) ||
-      (mentionUserId ? `用户${mentionUserId}` : '')
+    const mentionDisplayNames = mentionUsers
+      .map((mentionUser, index) =>
+        normalizeText(mentionUser?.real_name || mentionUser?.username, 100) ||
+        (mentionUserIds[index] ? `用户${mentionUserIds[index]}` : ''),
+      )
+      .filter(Boolean)
     const statusCode = normalizeCode(bug?.status_code) || BUG_STATUS.NEW
-    const commentForHistory = mentionDisplayName ? `@${mentionDisplayName} ${comment}` : comment
+    const mentionPrefix = mentionDisplayNames.map((name) => `@${name}`).join(' ')
+    const commentForHistory = mentionPrefix ? `${mentionPrefix} ${comment}` : comment
     const logResult = await Bug.addBugCommentLog(bugId, {
       operatorId: req.user.id,
       statusCode,
@@ -1124,25 +1268,32 @@ const createBugComment = async (req, res) => {
     }
 
     const warnings = []
-    if (mentionUserId) {
-      const mentionOpenId = normalizeText(mentionUser?.feishu_open_id, 128)
-      if (!mentionOpenId) {
-        warnings.push('评论已记录，但被@用户未绑定飞书 OpenID，通知未发送')
-      } else {
+    if (mentionUserIds.length > 0) {
+      const targets = []
+      mentionUsers.forEach((mentionUser, index) => {
+        const mentionUserId = mentionUserIds[index]
+        const mentionDisplayName = mentionDisplayNames[index] || `用户${mentionUserId}`
+        const mentionOpenId = normalizeText(mentionUser?.feishu_open_id, 128)
+        if (!mentionOpenId) {
+          warnings.push(`评论已记录，但被@用户 ${mentionDisplayName} 未绑定飞书 OpenID，通知未发送`)
+          return
+        }
+        targets.push({
+          target_type: 'user',
+          target_id: mentionOpenId,
+          target_name: mentionDisplayName || null,
+          extra: {
+            user_id: mentionUserId,
+          },
+        })
+      })
+
+      if (targets.length > 0) {
         const sendResult = await sendNotification({
           channelType: 'feishu',
           title: `Bug评论提醒 ${normalizeText(bug?.bug_no, 64) || `#${bugId}`}`,
           content: comment,
-          targets: [
-            {
-              target_type: 'user',
-              target_id: mentionOpenId,
-              target_name: mentionDisplayName || null,
-              extra: {
-                user_id: mentionUserId,
-              },
-            },
-          ],
+          targets,
           metadata: {
             source: 'bug_comment_mention',
             bug_id: bugId,
@@ -1150,8 +1301,8 @@ const createBugComment = async (req, res) => {
             detail_url: buildBugDetailUrl(bugId),
             detail_action_text: '查看详情',
             source_comment_log_id: logResult.commentLogId || null,
-            mention_user_id: mentionUserId,
-            mention_user_name: mentionDisplayName || null,
+            mention_user_ids: mentionUserIds,
+            mention_user_names: mentionDisplayNames,
           },
         })
         if (!sendResult?.success) {
@@ -1163,6 +1314,16 @@ const createBugComment = async (req, res) => {
     }
 
     const latestDetail = await Bug.getBugDetail(bugId)
+    await emitBugNotificationEvent({
+      eventType: 'bug_comment_create',
+      bug: latestDetail,
+      req,
+      extra: {
+        comment_log_id: logResult.commentLogId || null,
+        comment_content: commentForHistory,
+        parent_comment_id: parentCommentId || null,
+      },
+    })
     const responseData = decorateBugDetailAttachments(latestDetail, {
       ossConfig: getOssConfigFromEnv(),
       expireSeconds: getBugAttachmentSignExpireSeconds(),
@@ -1369,6 +1530,16 @@ const updateBugComment = async (req, res) => {
     }
 
     const latestDetail = await Bug.getBugDetail(bugId)
+    await emitBugNotificationEvent({
+      eventType: 'bug_comment_update',
+      bug: latestDetail,
+      req,
+      extra: {
+        comment_log_id: commentLogId,
+        comment_content: comment,
+        parent_comment_id: toPositiveInt(commentLog?.parent_comment_id),
+      },
+    })
     const responseData = decorateBugDetailAttachments(latestDetail, {
       ossConfig: getOssConfigFromEnv(),
       expireSeconds: getBugAttachmentSignExpireSeconds(),
@@ -1654,6 +1825,10 @@ const listDemandBugs = async (req, res) => {
       productCode: req.query.product_code,
       issueStage: req.query.issue_stage,
       demandId,
+      assigneeId: req.query.assignee_id,
+      reporterId: req.query.reporter_id,
+      startDate: normalizeDate(req.query.start_date),
+      endDate: normalizeDate(req.query.end_date),
     })
     return res.json({ success: true, data })
   } catch (err) {
@@ -1687,6 +1862,38 @@ const getBugAttachmentPolicy = async (req, res) => {
     return res.json({ success: true, data: policyResult.data })
   } catch (err) {
     console.error('获取Bug附件上传策略失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const precheckBugAttachmentUpload = async (req, res) => {
+  try {
+    const fileName = sanitizeFileName(req.body.file_name || 'file')
+    const policyResult = buildBugAttachmentPolicyPayload({
+      bug: null,
+      fileName,
+      fileSize: req.body.file_size,
+      businessDir: 'bugs',
+      businessNo: `BUG_DRAFT_${Date.now()}`,
+    })
+    if (!policyResult.ok) {
+      return res.status(policyResult.status || 400).json({
+        success: false,
+        message: policyResult.message || '附件预检失败',
+      })
+    }
+
+    return res.json({
+      success: true,
+      message: '附件预检通过',
+      data: {
+        configured: true,
+        max_file_size: policyResult.data?.max_file_size || 0,
+        provider: policyResult.data?.provider || 'ALIYUN_OSS',
+      },
+    })
+  } catch (err) {
+    console.error('Bug附件预检失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -2023,6 +2230,7 @@ module.exports = {
   deleteBugView,
   getDemandBugStats,
   listDemandBugs,
+  precheckBugAttachmentUpload,
   getBugAttachmentPolicy,
   getBugCommentAttachmentPolicy,
   createBugAttachment,

@@ -172,6 +172,26 @@ const EVENT_SPECS = [
     condition_config_json: null,
   },
   {
+    scene_code: 'bug_create',
+    rule_code: 'sys_bug_create_watcher_default',
+    rule_name: 'Bug创建通知（关注人）',
+    receiver_type: 'role',
+    receiver_config_json: { business_roles: ['bug_watcher'] },
+    message_title: 'Bug创建：${bug_no}',
+    message_content: '${bug_title}\n提交人：${reporter_name}',
+    condition_config_json: null,
+  },
+  {
+    scene_code: 'bug_update',
+    rule_code: 'sys_bug_update_watcher_default',
+    rule_name: 'Bug编辑通知（关注人）',
+    receiver_type: 'role',
+    receiver_config_json: { business_roles: ['bug_watcher'] },
+    message_title: 'Bug编辑：${bug_no}',
+    message_content: '${bug_title}\n操作人：${operator_name}',
+    condition_config_json: null,
+  },
+  {
     scene_code: 'bug_assign',
     rule_name: 'Bug指派通知',
     receiver_type: 'field',
@@ -186,7 +206,37 @@ const EVENT_SPECS = [
     receiver_type: 'field',
     receiver_config_json: { user_id_field: 'assignee_id' },
     message_title: 'Bug状态更新：${bug_no}',
-    message_content: '${bug_title}\n状态从 ${from_status} 变更为 ${to_status}',
+    message_content: '${bug_title}\n状态从 ${from_status} 变更为 ${to_status}${reject_reason_display}',
+    condition_config_json: null,
+  },
+  {
+    scene_code: 'bug_status_change',
+    rule_code: 'sys_bug_status_change_watcher_default',
+    rule_name: 'Bug状态变更通知（关注人）',
+    receiver_type: 'role',
+    receiver_config_json: { business_roles: ['bug_watcher'] },
+    message_title: 'Bug状态更新：${bug_no}',
+    message_content: '${bug_title}\n状态从 ${from_status} 变更为 ${to_status}${reject_reason_display}',
+    condition_config_json: null,
+  },
+  {
+    scene_code: 'bug_comment_create',
+    rule_code: 'sys_bug_comment_create_watcher_default',
+    rule_name: 'Bug评论新增通知（关注人）',
+    receiver_type: 'role',
+    receiver_config_json: { business_roles: ['bug_watcher'] },
+    message_title: 'Bug评论新增：${bug_no}',
+    message_content: '${bug_title}\n${operator_name} 评论了：${comment_content}',
+    condition_config_json: null,
+  },
+  {
+    scene_code: 'bug_comment_update',
+    rule_code: 'sys_bug_comment_update_watcher_default',
+    rule_name: 'Bug评论编辑通知（关注人）',
+    receiver_type: 'role',
+    receiver_config_json: { business_roles: ['bug_watcher'] },
+    message_title: 'Bug评论编辑：${bug_no}',
+    message_content: '${bug_title}\n${operator_name} 更新了评论：${comment_content}',
     condition_config_json: null,
   },
   {
@@ -262,6 +312,10 @@ function buildSmokeData(sceneCode, userId) {
     reopen_reason: '冒烟验证',
     reject_reason: '冒烟驳回',
     hours_to_deadline: 2,
+    watcher_ids: [userId],
+    watcher_names: '系统关注人',
+    comment_log_id: 8801,
+    comment_content: '这是一次评论冒烟内容',
   }
 
   if (sceneCode === 'worklog_deadline_remind') {
@@ -287,23 +341,33 @@ async function main() {
 
   const existing = await NotificationRule.list({})
   const byScene = new Map()
+  const byRuleCode = new Map()
   existing.forEach((item) => {
     const scene = String(item.scene_code || '').trim().toLowerCase()
     if (!scene) return
     const arr = byScene.get(scene) || []
     arr.push(item)
     byScene.set(scene, arr)
+    const ruleCode = String(item.rule_code || '').trim().toLowerCase()
+    if (ruleCode && !byRuleCode.has(ruleCode)) {
+      byRuleCode.set(ruleCode, item)
+    }
   })
 
   const changed = []
   for (const spec of EVENT_SPECS) {
     const scene = String(spec.scene_code).toLowerCase()
-    const matched = (byScene.get(scene) || []).sort((a, b) => Number(a.id) - Number(b.id))
-    const target = matched[0] || null
+    const explicitRuleCode = String(spec.rule_code || '').trim().toLowerCase()
+    const matched = explicitRuleCode
+      ? []
+      : (byScene.get(scene) || []).sort((a, b) => Number(a.id) - Number(b.id))
+    const target = explicitRuleCode
+      ? (byRuleCode.get(explicitRuleCode) || null)
+      : (matched[0] || null)
 
     if (target) {
       const payload = {
-        rule_code: target.rule_code || defaultRuleCode(scene),
+        rule_code: target.rule_code || explicitRuleCode || defaultRuleCode(scene),
         rule_name: spec.rule_name,
         scene_code: scene,
         channel_type: 'feishu',
@@ -322,7 +386,7 @@ async function main() {
     }
 
     const payload = {
-      rule_code: defaultRuleCode(scene),
+      rule_code: explicitRuleCode || defaultRuleCode(scene),
       rule_name: spec.rule_name,
       scene_code: scene,
       channel_type: 'feishu',
@@ -353,22 +417,33 @@ async function main() {
 
   const latest = await NotificationRule.list({})
   const latestByScene = new Map()
+  const latestByRuleCode = new Map()
   latest.forEach((item) => {
     const scene = String(item.scene_code || '').trim().toLowerCase()
     if (!scene) return
     const arr = latestByScene.get(scene) || []
     arr.push(item)
     latestByScene.set(scene, arr)
+    const ruleCode = String(item.rule_code || '').trim().toLowerCase()
+    if (ruleCode && !latestByRuleCode.has(ruleCode)) {
+      latestByRuleCode.set(ruleCode, item)
+    }
   })
 
   const smokeResults = []
   for (const spec of EVENT_SPECS) {
     const scene = String(spec.scene_code).toLowerCase()
-    const matched = (latestByScene.get(scene) || []).sort((a, b) => Number(a.id) - Number(b.id))
-    const target = matched[0]
+    const explicitRuleCode = String(spec.rule_code || '').trim().toLowerCase()
+    const matched = explicitRuleCode
+      ? []
+      : (latestByScene.get(scene) || []).sort((a, b) => Number(a.id) - Number(b.id))
+    const target = explicitRuleCode
+      ? latestByRuleCode.get(explicitRuleCode)
+      : matched[0]
     if (!target) {
       smokeResults.push({
         scene_code: scene,
+        rule_code: explicitRuleCode || defaultRuleCode(scene),
         ok: false,
         reason: 'rule_not_found_after_upsert',
       })

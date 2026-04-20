@@ -491,6 +491,50 @@ async function safeGetDemandWorkflowSnapshot(demandId) {
   }
 }
 
+async function emitAutoCompletedNodeNotificationsFromSyncResults({ demandId, req, syncResults = [] }) {
+  const normalizedDemandId = normalizeDemandId(demandId)
+  if (!normalizedDemandId || !req) return
+
+  const completedNodeKeys = Array.from(
+    new Set(
+      (Array.isArray(syncResults) ? syncResults : [])
+        .filter((item) => item && item.node_completed === true)
+        .map((item) => normalizePhaseKey(item?.node_key))
+        .filter(Boolean),
+    ),
+  )
+
+  if (completedNodeKeys.length === 0) return
+
+  try {
+    const [demand, workflow] = await Promise.all([
+      Work.findDemandById(normalizedDemandId),
+      safeGetDemandWorkflowSnapshot(normalizedDemandId),
+    ])
+    if (!demand || !workflow) return
+
+    const toNodeKey = normalizePhaseKey(workflow?.current_node?.node_key || '')
+    for (const fromNodeKey of completedNodeKeys) {
+      await emitWorkflowNodeNotificationEvent({
+        eventType: 'node_complete',
+        demand,
+        workflow,
+        nodeKey: fromNodeKey,
+        req,
+        extra: {
+          from_node_key: fromNodeKey,
+          to_node_key: toNodeKey,
+        },
+      })
+    }
+  } catch (error) {
+    console.warn('补发自动完成节点通知失败（已忽略）:', {
+      demand_id: normalizedDemandId,
+      message: error?.message || String(error || ''),
+    })
+  }
+}
+
 async function resolveDemandTaskSelection(demandId, phaseKey) {
   const normalizedDemandId = normalizeDemandId(demandId)
   const normalizedPhaseKey = normalizePhaseKey(phaseKey)
@@ -3059,6 +3103,11 @@ const createLog = async (req, res) => {
     }
 
     await refreshDemandHourSummaryQuietly(demandId)
+    await emitAutoCompletedNodeNotificationsFromSyncResults({
+      demandId,
+      req,
+      syncResults: [workflowSync],
+    })
     const created = await Work.findLogById(id)
     await emitWorklogNotificationEvent({
       eventType: 'worklog_create',
@@ -3346,6 +3395,11 @@ const createOwnerAssignedLog = async (req, res) => {
     }
 
     await refreshDemandHourSummaryQuietly(demandId)
+    await emitAutoCompletedNodeNotificationsFromSyncResults({
+      demandId,
+      req,
+      syncResults: [workflowSync],
+    })
     const created = await Work.findLogById(id)
     const createReceiverUserId = toPositiveInt(created?.user_id)
     const assignReceiverUserId = toPositiveInt(created?.user_id)
@@ -3656,6 +3710,11 @@ const updateLog = async (req, res) => {
     if (String(existing.demand_id || '') !== String(demandId || '')) {
       await refreshDemandHourSummaryQuietly(demandId)
     }
+    await emitAutoCompletedNodeNotificationsFromSyncResults({
+      demandId,
+      req,
+      syncResults: [workflowSync, workflowHoursSync],
+    })
     const updated = await Work.findLogById(id)
     const prevStatus = normalizeText(existing?.log_status, 64) || ''
     const nextStatus = normalizeText(updated?.log_status, 64) || ''
@@ -3941,6 +4000,11 @@ const createLogDailyEntry = async (req, res) => {
       endDate: entryDate,
     })
     await refreshDemandHourSummaryQuietly(syncedLog?.demand_id || existing.demand_id)
+    await emitAutoCompletedNodeNotificationsFromSyncResults({
+      demandId: syncedLog?.demand_id || existing.demand_id,
+      req,
+      syncResults: [workflowHoursSync],
+    })
     const created = rows.find((item) => Number(item.id) === Number(entryId)) || rows[0] || null
     return res.status(201).json({
       success: true,
@@ -4044,6 +4108,11 @@ const updateLogDailyEntry = async (req, res) => {
       endDate: entryDate,
     })
     await refreshDemandHourSummaryQuietly(syncedLog?.demand_id || existing.demand_id)
+    await emitAutoCompletedNodeNotificationsFromSyncResults({
+      demandId: syncedLog?.demand_id || existing.demand_id,
+      req,
+      syncResults: [workflowHoursSync],
+    })
     const updated = rows.find((item) => Number(item.id) === Number(savedEntryId)) || rows[0] || null
     return res.json({
       success: true,
@@ -4112,6 +4181,11 @@ const deleteLogDailyEntry = async (req, res) => {
       }
     }
     await refreshDemandHourSummaryQuietly(syncedLog?.demand_id || existing.demand_id)
+    await emitAutoCompletedNodeNotificationsFromSyncResults({
+      demandId: syncedLog?.demand_id || existing.demand_id,
+      req,
+      syncResults: [workflowHoursSync],
+    })
 
     return res.json({
       success: true,
@@ -6377,6 +6451,11 @@ async function updateAssignedLog(req, res) {
     }
 
     await refreshDemandHourSummaryQuietly(existing.demand_id)
+    await emitAutoCompletedNodeNotificationsFromSyncResults({
+      demandId: existing.demand_id,
+      req,
+      syncResults: [workflowSync],
+    })
 
     const updated = await Work.findLogById(id)
     const prevStatus = normalizeText(existing?.log_status, 64) || ''
