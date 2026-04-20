@@ -70,6 +70,7 @@ function buildCreatePayload(body = {}) {
   return {
     date: normalizeText(body.date) || undefined,
     user_email: pickFirst(body, ['user_email', 'email', 'email_address']) || 'anonymous@form.com',
+    email_subject: pickFirst(body, ['email_subject', 'subject', 'mail_subject', 'title']) || null,
     product: pickFirst(body, ['product', 'product_name']) || '未指定',
     channel: pickFirst(body, ['channel', 'source_channel']) || '表单',
     user_question: userQuestion,

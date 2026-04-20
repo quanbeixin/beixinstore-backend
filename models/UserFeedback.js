@@ -73,12 +73,89 @@ function normalizeStatus(value) {
 
 function normalizeFeedbackRow(row) {
   if (!row) return null
+  const aiPrimaryCategory =
+    normalizeText(row.ai_primary_category, 100) ||
+    normalizeText(row.ai_category, 100) ||
+    null
+  const aiSecondaryCategories = parseJsonArray(row.ai_secondary_categories)
+  const aiAllCategoriesRaw = parseJsonArray(row.ai_all_categories)
+  const aiAllCategories = aiAllCategoriesRaw.length > 0
+    ? aiAllCategoriesRaw
+    : normalizeStringList([aiPrimaryCategory, ...aiSecondaryCategories], 100)
+
   return {
     ...row,
     id: toPositiveInt(row.id),
     is_new_request: Number(row.is_new_request) === 1,
     ai_processed: Number(row.ai_processed) === 1,
+    ai_category: aiPrimaryCategory,
+    ai_primary_category: aiPrimaryCategory,
+    ai_secondary_categories: aiSecondaryCategories,
+    ai_all_categories: aiAllCategories,
   }
+}
+
+function normalizeStringList(value, maxItemLength = 100) {
+  const list = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[,\n，；;|]/)
+      : []
+
+  return [...new Set(
+    list
+      .map((item) => normalizeText(item, maxItemLength))
+      .filter(Boolean),
+  )]
+}
+
+function normalizeNullableJsonArray(value, maxItemLength = 100) {
+  const list = normalizeStringList(value, maxItemLength)
+  return list.length > 0 ? JSON.stringify(list) : null
+}
+
+function parseJsonArray(value) {
+  if (Array.isArray(value)) {
+    return normalizeStringList(value)
+  }
+
+  if (typeof value === 'string') {
+    const text = normalizeText(value)
+    if (!text) return []
+
+    try {
+      const parsed = JSON.parse(text)
+      return normalizeStringList(parsed)
+    } catch {
+      return normalizeStringList(text)
+    }
+  }
+
+  return []
+}
+
+async function columnExists(tableName, columnName) {
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS total
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND COLUMN_NAME = ?`,
+    [tableName, columnName],
+  )
+  return Number(rows?.[0]?.total || 0) > 0
+}
+
+async function indexExists(tableName, indexName) {
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS total
+     FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND INDEX_NAME = ?`,
+    [tableName, indexName],
+  )
+  return Number(rows?.[0]?.total || 0) > 0
 }
 
 function buildFilterClauses(filters = {}) {
@@ -91,15 +168,18 @@ function buildFilterClauses(filters = {}) {
     clauses.push(
       `(
         user_email LIKE ? ESCAPE '\\\\'
+        OR email_subject LIKE ? ESCAPE '\\\\'
         OR user_question LIKE ? ESCAPE '\\\\'
         OR user_question_cn LIKE ? ESCAPE '\\\\'
         OR ai_reply LIKE ? ESCAPE '\\\\'
         OR ai_reply_en LIKE ? ESCAPE '\\\\'
         OR product LIKE ? ESCAPE '\\\\'
         OR ai_category LIKE ? ESCAPE '\\\\'
+        OR ai_primary_category LIKE ? ESCAPE '\\\\'
+        OR CAST(ai_secondary_categories AS CHAR) LIKE ? ESCAPE '\\\\'
       )`,
     )
-    params.push(like, like, like, like, like, like, like)
+    params.push(like, like, like, like, like, like, like, like, like, like)
   }
 
   const product = normalizeText(filters.product, 100)
@@ -121,8 +201,13 @@ function buildFilterClauses(filters = {}) {
 
   const aiCategory = normalizeText(filters.aiCategory, 100)
   if (aiCategory) {
-    clauses.push('ai_category = ?')
-    params.push(aiCategory)
+    clauses.push(`(
+      ai_category = ?
+      OR ai_primary_category = ?
+      OR JSON_SEARCH(ai_secondary_categories, 'one', ?) IS NOT NULL
+      OR JSON_SEARCH(ai_all_categories, 'one', ?) IS NOT NULL
+    )`)
+    params.push(aiCategory, aiCategory, aiCategory, aiCategory)
   }
 
   const dateStart = normalizeDateTime(filters.dateStart)
@@ -166,6 +251,7 @@ async function ensureTables() {
         id BIGINT NOT NULL AUTO_INCREMENT,
         \`date\` DATETIME NULL,
         user_email VARCHAR(255) NOT NULL DEFAULT '',
+        email_subject VARCHAR(255) NULL,
         product VARCHAR(100) NOT NULL DEFAULT '未指定',
         channel VARCHAR(100) NOT NULL DEFAULT '其他',
         user_question TEXT NOT NULL,
@@ -174,6 +260,9 @@ async function ensureTables() {
         user_request VARCHAR(255) NULL,
         is_new_request TINYINT(1) NOT NULL DEFAULT 0,
         ai_category VARCHAR(100) NULL,
+        ai_primary_category VARCHAR(100) NULL,
+        ai_secondary_categories JSON NULL,
+        ai_all_categories JSON NULL,
         ai_sentiment VARCHAR(32) NULL,
         ai_reply TEXT NULL,
         ai_reply_en TEXT NULL,
@@ -190,9 +279,55 @@ async function ensureTables() {
         KEY idx_user_feedback_status (status),
         KEY idx_user_feedback_product (product),
         KEY idx_user_feedback_ai_processed (ai_processed),
+        KEY idx_user_feedback_ai_primary_category (ai_primary_category),
         KEY idx_user_feedback_created_at (created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+
+    const alterStatements = [
+      [
+        'email_subject',
+        'ALTER TABLE user_feedback ADD COLUMN email_subject VARCHAR(255) NULL AFTER user_email',
+      ],
+      [
+        'ai_primary_category',
+        'ALTER TABLE user_feedback ADD COLUMN ai_primary_category VARCHAR(100) NULL AFTER ai_category',
+      ],
+      [
+        'ai_secondary_categories',
+        'ALTER TABLE user_feedback ADD COLUMN ai_secondary_categories JSON NULL AFTER ai_primary_category',
+      ],
+      [
+        'ai_all_categories',
+        'ALTER TABLE user_feedback ADD COLUMN ai_all_categories JSON NULL AFTER ai_secondary_categories',
+      ],
+    ]
+
+    for (const [columnName, sql] of alterStatements) {
+      if (!(await columnExists('user_feedback', columnName))) {
+        await pool.query(sql)
+      }
+    }
+
+    if (!(await indexExists('user_feedback', 'idx_user_feedback_ai_primary_category'))) {
+      await pool.query('CREATE INDEX idx_user_feedback_ai_primary_category ON user_feedback(ai_primary_category)')
+    }
+
+    await pool.query(
+      `UPDATE user_feedback
+       SET ai_primary_category = ai_category
+       WHERE (ai_primary_category IS NULL OR ai_primary_category = '')
+         AND ai_category IS NOT NULL
+         AND ai_category <> ''`,
+    )
+
+    await pool.query(
+      `UPDATE user_feedback
+       SET ai_all_categories = JSON_ARRAY(ai_primary_category)
+       WHERE ai_all_categories IS NULL
+         AND ai_primary_category IS NOT NULL
+         AND ai_primary_category <> ''`,
+    )
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS feedback_ai_prompt_configs (
@@ -249,6 +384,7 @@ const UserFeedback = {
          id,
          \`date\`,
          user_email,
+         email_subject,
          product,
          channel,
          user_question,
@@ -257,6 +393,9 @@ const UserFeedback = {
          user_request,
          is_new_request,
          ai_category,
+         ai_primary_category,
+         ai_secondary_categories,
+         ai_all_categories,
          ai_sentiment,
          ai_reply,
          ai_reply_en,
@@ -293,6 +432,7 @@ const UserFeedback = {
          id,
          \`date\`,
          user_email,
+         email_subject,
          product,
          channel,
          user_question,
@@ -301,6 +441,9 @@ const UserFeedback = {
          user_request,
          is_new_request,
          ai_category,
+         ai_primary_category,
+         ai_secondary_categories,
+         ai_all_categories,
          ai_sentiment,
          ai_reply,
          ai_reply_en,
@@ -331,6 +474,7 @@ const UserFeedback = {
          id,
          \`date\`,
          user_email,
+         email_subject,
          product,
          channel,
          user_question,
@@ -339,6 +483,9 @@ const UserFeedback = {
          user_request,
          is_new_request,
          ai_category,
+         ai_primary_category,
+         ai_secondary_categories,
+         ai_all_categories,
          ai_sentiment,
          ai_reply,
          ai_reply_en,
@@ -363,9 +510,23 @@ const UserFeedback = {
     await ensureTables()
 
     const operatorUserId = toPositiveInt(options.operatorUserId)
+    const normalizedPrimaryCategory =
+      normalizeNullableText(payload.ai_primary_category, 100) ||
+      normalizeNullableText(payload.ai_category, 100)
+    const normalizedSecondaryCategories = normalizeNullableJsonArray(payload.ai_secondary_categories, 100)
+    const normalizedAllCategories =
+      normalizeNullableJsonArray(payload.ai_all_categories, 100) ||
+      normalizeNullableJsonArray(
+        [
+          normalizedPrimaryCategory,
+          ...normalizeStringList(payload.ai_secondary_categories, 100),
+        ],
+        100,
+      )
     const feedback = {
       date: normalizeDateTime(payload.date, normalizeDateTime(new Date().toISOString())),
       user_email: normalizeText(payload.user_email, 255) || 'anonymous@form.com',
+      email_subject: normalizeNullableText(payload.email_subject, 255),
       product: normalizeText(payload.product, 100) || '未指定',
       channel: normalizeText(payload.channel, 100) || '其他',
       user_question: normalizeText(payload.user_question),
@@ -373,7 +534,10 @@ const UserFeedback = {
       issue_type: normalizeNullableText(payload.issue_type, 100) || '待分类',
       user_request: normalizeNullableText(payload.user_request, 255),
       is_new_request: toTinyBool(payload.is_new_request, 0),
-      ai_category: normalizeNullableText(payload.ai_category, 100),
+      ai_category: normalizedPrimaryCategory,
+      ai_primary_category: normalizedPrimaryCategory,
+      ai_secondary_categories: normalizedSecondaryCategories,
+      ai_all_categories: normalizedAllCategories,
       ai_sentiment: normalizeNullableText(payload.ai_sentiment, 32),
       ai_reply: normalizeNullableText(payload.ai_reply),
       ai_reply_en: normalizeNullableText(payload.ai_reply_en),
@@ -395,6 +559,7 @@ const UserFeedback = {
       `INSERT INTO user_feedback (
          \`date\`,
          user_email,
+         email_subject,
          product,
          channel,
          user_question,
@@ -403,6 +568,9 @@ const UserFeedback = {
          user_request,
          is_new_request,
          ai_category,
+         ai_primary_category,
+         ai_secondary_categories,
+         ai_all_categories,
          ai_sentiment,
          ai_reply,
          ai_reply_en,
@@ -412,10 +580,11 @@ const UserFeedback = {
          status,
          created_by,
          updated_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         feedback.date,
         feedback.user_email,
+        feedback.email_subject,
         feedback.product,
         feedback.channel,
         feedback.user_question,
@@ -424,6 +593,9 @@ const UserFeedback = {
         feedback.user_request,
         feedback.is_new_request,
         feedback.ai_category,
+        feedback.ai_primary_category,
+        feedback.ai_secondary_categories,
+        feedback.ai_all_categories,
         feedback.ai_sentiment,
         feedback.ai_reply,
         feedback.ai_reply_en,
@@ -448,6 +620,30 @@ const UserFeedback = {
     const operatorUserId = toPositiveInt(options.operatorUserId)
     const updates = []
     const params = []
+    const hasAiPrimaryCategory = Object.prototype.hasOwnProperty.call(payload, 'ai_primary_category')
+    const hasAiCategory = Object.prototype.hasOwnProperty.call(payload, 'ai_category')
+    const hasAiSecondaryCategories = Object.prototype.hasOwnProperty.call(payload, 'ai_secondary_categories')
+    const hasAiAllCategories = Object.prototype.hasOwnProperty.call(payload, 'ai_all_categories')
+    const shouldUpdatePrimaryCategory = hasAiPrimaryCategory || hasAiCategory
+    const normalizedPrimaryCategory =
+      normalizeNullableText(
+        hasAiPrimaryCategory ? payload.ai_primary_category : payload.ai_category,
+        100,
+      ) ||
+      normalizeNullableText(
+        hasAiCategory ? payload.ai_category : payload.ai_primary_category,
+        100,
+      )
+    const normalizedSecondaryCategories = normalizeNullableJsonArray(payload.ai_secondary_categories, 100)
+    const normalizedAllCategories =
+      normalizeNullableJsonArray(payload.ai_all_categories, 100) ||
+      normalizeNullableJsonArray(
+        [
+          normalizedPrimaryCategory,
+          ...normalizeStringList(payload.ai_secondary_categories, 100),
+        ],
+        100,
+      )
 
     if (Object.prototype.hasOwnProperty.call(payload, 'date')) {
       updates.push('`date` = ?')
@@ -456,6 +652,10 @@ const UserFeedback = {
     if (Object.prototype.hasOwnProperty.call(payload, 'user_email')) {
       updates.push('user_email = ?')
       params.push(normalizeText(payload.user_email, 255))
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'email_subject')) {
+      updates.push('email_subject = ?')
+      params.push(normalizeNullableText(payload.email_subject, 255))
     }
     if (Object.prototype.hasOwnProperty.call(payload, 'product')) {
       updates.push('product = ?')
@@ -485,9 +685,19 @@ const UserFeedback = {
       updates.push('is_new_request = ?')
       params.push(toTinyBool(payload.is_new_request, 0))
     }
-    if (Object.prototype.hasOwnProperty.call(payload, 'ai_category')) {
+    if (shouldUpdatePrimaryCategory) {
       updates.push('ai_category = ?')
-      params.push(normalizeNullableText(payload.ai_category, 100))
+      params.push(normalizedPrimaryCategory)
+      updates.push('ai_primary_category = ?')
+      params.push(normalizedPrimaryCategory)
+    }
+    if (hasAiSecondaryCategories) {
+      updates.push('ai_secondary_categories = ?')
+      params.push(normalizedSecondaryCategories)
+    }
+    if (hasAiAllCategories || shouldUpdatePrimaryCategory) {
+      updates.push('ai_all_categories = ?')
+      params.push(normalizedAllCategories)
     }
     if (Object.prototype.hasOwnProperty.call(payload, 'ai_sentiment')) {
       updates.push('ai_sentiment = ?')
@@ -585,6 +795,7 @@ const UserFeedback = {
          id,
          \`date\`,
          user_email,
+         email_subject,
          product,
          channel,
          user_question,
@@ -593,6 +804,9 @@ const UserFeedback = {
          user_request,
          is_new_request,
          ai_category,
+         ai_primary_category,
+         ai_secondary_categories,
+         ai_all_categories,
          ai_sentiment,
          ai_reply,
          ai_reply_en,
@@ -634,10 +848,24 @@ const UserFeedback = {
         return
       }
 
-      placeholders.push('(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      placeholders.push('(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      const normalizedPrimaryCategory =
+        normalizeNullableText(item?.ai_primary_category, 100) ||
+        normalizeNullableText(item?.ai_category, 100)
+      const normalizedSecondaryCategories = normalizeNullableJsonArray(item?.ai_secondary_categories, 100)
+      const normalizedAllCategories =
+        normalizeNullableJsonArray(item?.ai_all_categories, 100) ||
+        normalizeNullableJsonArray(
+          [
+            normalizedPrimaryCategory,
+            ...normalizeStringList(item?.ai_secondary_categories, 100),
+          ],
+          100,
+        )
       values.push(
         normalizeDateTime(item?.date, normalizeDateTime(new Date().toISOString())),
         normalizeText(item?.user_email, 255) || 'anonymous@form.com',
+        normalizeNullableText(item?.email_subject, 255),
         normalizeText(item?.product, 100) || '未指定',
         normalizeText(item?.channel, 100) || '其他',
         userQuestion,
@@ -645,7 +873,10 @@ const UserFeedback = {
         normalizeNullableText(item?.issue_type, 100) || '待分类',
         normalizeNullableText(item?.user_request, 255),
         toTinyBool(item?.is_new_request, 0),
-        normalizeNullableText(item?.ai_category, 100),
+        normalizedPrimaryCategory,
+        normalizedPrimaryCategory,
+        normalizedSecondaryCategories,
+        normalizedAllCategories,
         normalizeNullableText(item?.ai_sentiment, 32),
         normalizeNullableText(item?.ai_reply),
         normalizeNullableText(item?.ai_reply_en),
@@ -668,6 +899,7 @@ const UserFeedback = {
       `INSERT INTO user_feedback (
          \`date\`,
          user_email,
+         email_subject,
          product,
          channel,
          user_question,
@@ -676,6 +908,9 @@ const UserFeedback = {
          user_request,
          is_new_request,
          ai_category,
+         ai_primary_category,
+         ai_secondary_categories,
+         ai_all_categories,
          ai_sentiment,
          ai_reply,
          ai_reply_en,
@@ -699,6 +934,7 @@ const UserFeedback = {
          id,
          \`date\`,
          user_email,
+         email_subject,
          product,
          channel,
          user_question,
@@ -707,6 +943,9 @@ const UserFeedback = {
          user_request,
          is_new_request,
          ai_category,
+         ai_primary_category,
+         ai_secondary_categories,
+         ai_all_categories,
          ai_sentiment,
          ai_reply,
          ai_reply_en,
@@ -736,6 +975,7 @@ const UserFeedback = {
          id,
          \`date\`,
          user_email,
+         email_subject,
          product,
          channel,
          user_question,
@@ -744,6 +984,9 @@ const UserFeedback = {
          user_request,
          is_new_request,
          ai_category,
+         ai_primary_category,
+         ai_secondary_categories,
+         ai_all_categories,
          ai_sentiment,
          ai_reply,
          ai_reply_en,
@@ -776,6 +1019,9 @@ const UserFeedback = {
     await pool.query(
       `UPDATE user_feedback
        SET ai_category = ?,
+           ai_primary_category = ?,
+           ai_secondary_categories = ?,
+           ai_all_categories = ?,
            ai_sentiment = ?,
            ai_reply = ?,
            ai_reply_en = ?,
@@ -787,6 +1033,15 @@ const UserFeedback = {
        WHERE id = ?`,
       [
         normalizeNullableText(analysis.ai_category, 100),
+        normalizeNullableText(analysis.ai_primary_category, 100) || normalizeNullableText(analysis.ai_category, 100),
+        normalizeNullableJsonArray(analysis.ai_secondary_categories, 100),
+        normalizeNullableJsonArray(
+          analysis.ai_all_categories,
+          100,
+        ) || normalizeNullableJsonArray([
+          normalizeNullableText(analysis.ai_primary_category, 100) || normalizeNullableText(analysis.ai_category, 100),
+          ...normalizeStringList(analysis.ai_secondary_categories, 100),
+        ], 100),
         normalizeNullableText(analysis.ai_sentiment, 32),
         normalizeNullableText(analysis.ai_reply),
         normalizeNullableText(analysis.ai_reply_en),
