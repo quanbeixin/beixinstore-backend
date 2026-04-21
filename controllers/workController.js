@@ -754,11 +754,18 @@ function normalizeParticipantRoleUserMapFromBody(value, participantRoles = []) {
 
   const roleSet = new Set(normalizeParticipantRoles(participantRoles))
   const result = {}
-  Object.entries(mapValue).forEach(([roleKey, userIdRaw]) => {
+  Object.entries(mapValue).forEach(([roleKey, userIdsRaw]) => {
     const role = String(roleKey || '').trim().replace(/\s+/g, '_').toUpperCase().slice(0, 64)
-    const userId = toPositiveInt(userIdRaw)
-    if (!role || !roleSet.has(role) || !userId) return
-    result[role] = userId
+    if (!role || !roleSet.has(role)) return
+    const userIds = Array.from(
+      new Set(
+        (Array.isArray(userIdsRaw) ? userIdsRaw : [userIdsRaw])
+          .map((item) => toPositiveInt(item))
+          .filter(Boolean),
+      ),
+    )
+    if (userIds.length === 0) return
+    result[role] = userIds
   })
   return { ok: true, value: result }
 }
@@ -2205,6 +2212,7 @@ const createDemand = async (req, res) => {
         const roleUserIds = Array.from(
           new Set(
             Object.values(participantRoleUserMapResult.value || {})
+              .flatMap((item) => (Array.isArray(item) ? item : [item]))
               .map((item) => toPositiveInt(item))
               .filter(Boolean),
           ),
@@ -4642,6 +4650,9 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
       workflow,
       nodeKey: workflow?.current_node?.node_key,
       req,
+      extra: {
+        assignee_ids: assigneeUserIds,
+      },
     })
     const currentNodeId = toPositiveInt(workflow?.current_node?.id)
     const assignedTasks = (Array.isArray(workflow?.tasks) ? workflow.tasks : []).filter(
@@ -4741,6 +4752,9 @@ const assignDemandWorkflowNode = async (req, res) => {
       workflow,
       nodeKey,
       req,
+      extra: {
+        assignee_ids: assigneeUserIds,
+      },
     })
     const targetNode = (Array.isArray(workflow?.nodes) ? workflow.nodes : []).find(
       (node) => normalizePhaseKey(node?.node_key) === normalizePhaseKey(nodeKey),

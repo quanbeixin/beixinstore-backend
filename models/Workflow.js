@@ -124,6 +124,19 @@ function parseJsonArray(raw, fallback = []) {
   }
 }
 
+function parseJsonObject(raw, fallback = null) {
+  if (!raw) return fallback
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw
+  if (typeof raw !== 'string') return fallback
+  try {
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return fallback
+    return parsed
+  } catch {
+    return fallback
+  }
+}
+
 function isWorkflowTableMissingError(err) {
   return err?.code === 'ER_NO_SUCH_TABLE' || err?.errno === 1146
 }
@@ -299,14 +312,44 @@ async function ensureDefaultTemplate(conn, { createdBy = null, forceRebuild = fa
 }
 
 function parseWorkflowGraphMeta(rawRemark) {
-  if (!rawRemark || typeof rawRemark !== 'string') return null
+  const parsed = parseJsonObject(rawRemark, null)
+  if (!parsed) return null
+  if (!Array.isArray(parsed.outgoing_keys) && !Array.isArray(parsed.incoming_keys)) return null
+  return parsed
+}
+
+function resolveNodeAssigneeUserIdsFromRemark(rawRemark, assigneeUserId) {
+  const parsedRemark = parseJsonObject(rawRemark, null)
+  const remarkAssigneeUserIds = normalizePositiveIntList(parsedRemark?.assignee_user_ids)
+  const primaryAssigneeUserId = toPositiveInt(assigneeUserId)
+  const merged = []
+  if (primaryAssigneeUserId) {
+    merged.push(primaryAssigneeUserId)
+  }
+  remarkAssigneeUserIds.forEach((userId) => {
+    if (!merged.includes(userId)) {
+      merged.push(userId)
+    }
+  })
+  return merged
+}
+
+function mergeNodeRemarkAssigneeUserIds(rawRemark, assigneeUserIds = []) {
+  const parsedRemark = parseJsonObject(rawRemark, null)
+  if (!parsedRemark) return rawRemark || null
+  const normalizedAssigneeUserIds = normalizePositiveIntList(assigneeUserIds)
+  const nextRemark = {
+    ...parsedRemark,
+  }
+  if (normalizedAssigneeUserIds.length > 0) {
+    nextRemark.assignee_user_ids = normalizedAssigneeUserIds
+  } else {
+    delete nextRemark.assignee_user_ids
+  }
   try {
-    const parsed = JSON.parse(rawRemark)
-    if (!parsed || typeof parsed !== 'object') return null
-    if (!Array.isArray(parsed.outgoing_keys) && !Array.isArray(parsed.incoming_keys)) return null
-    return parsed
-  } catch (err) {
-    return null
+    return JSON.stringify(nextRemark)
+  } catch {
+    return rawRemark || null
   }
 }
 
@@ -1575,7 +1618,8 @@ async function findCurrentNodeForUpdate(conn, instanceId, currentNodeKey) {
        n.phase_key,
        n.sort_order,
        n.status,
-       n.assignee_user_id
+       n.assignee_user_id,
+       n.remark
      FROM wf_process_instance_nodes n
      WHERE n.instance_id = ?
        AND n.node_key = ?
@@ -1596,7 +1640,8 @@ async function findNodeByKeyForUpdate(conn, instanceId, nodeKey) {
        n.phase_key,
        n.sort_order,
        n.status,
-       n.assignee_user_id
+       n.assignee_user_id,
+       n.remark
      FROM wf_process_instance_nodes n
      WHERE n.instance_id = ?
        AND n.node_key = ?
@@ -2544,6 +2589,7 @@ const Workflow = {
         const graphNode = graphNodeMap.get(normalizeTemplateNodeKey(node?.node_key))
         return {
           ...node,
+          assignee_user_ids: resolveNodeAssigneeUserIdsFromRemark(node?.remark, node?.assignee_user_id),
           branch_key: graphNode?.branch_key || null,
           parallel_group_key: graphNode?.parallel_group_key || null,
           join_rule: graphNode?.join_rule || null,
@@ -2962,6 +3008,7 @@ const Workflow = {
       normalizedAssigneeUserIds.length > 0
         ? normalizedAssigneeUserIds
         : (normalizedSingleAssigneeUserId ? [normalizedSingleAssigneeUserId] : [])
+    const primaryAssigneeUserId = finalAssigneeUserIds[0] || null
     const normalizedOperatorUserId = toPositiveInt(operatorUserId)
     const normalizedDueAt = normalizeDate(dueAt)
 
@@ -3004,11 +3051,12 @@ const Workflow = {
         )
       }
 
+      const nextNodeRemark = mergeNodeRemarkAssigneeUserIds(currentNode?.remark, finalAssigneeUserIds)
       await conn.query(
         `UPDATE wf_process_instance_nodes
-         SET assignee_user_id = ?, due_at = ?, updated_at = NOW()
+         SET assignee_user_id = ?, due_at = ?, remark = ?, updated_at = NOW()
          WHERE id = ?`,
-        [finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null, normalizedDueAt, currentNode.id],
+        [primaryAssigneeUserId, normalizedDueAt, nextNodeRemark, currentNode.id],
       )
 
       await insertAction(conn, {
@@ -3018,7 +3066,7 @@ const Workflow = {
         fromNodeKey: currentNode.node_key,
         toNodeKey: currentNode.node_key,
         operatorUserId: normalizedOperatorUserId,
-        targetUserId: finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null,
+        targetUserId: primaryAssigneeUserId,
         comment: comment || '节点任务已指派',
       })
 
@@ -3049,6 +3097,7 @@ const Workflow = {
       normalizedAssigneeUserIds.length > 0
         ? normalizedAssigneeUserIds
         : (normalizedSingleAssigneeUserId ? [normalizedSingleAssigneeUserId] : [])
+    const primaryAssigneeUserId = finalAssigneeUserIds[0] || null
     const normalizedOperatorUserId = toPositiveInt(operatorUserId)
     const normalizedDueAt = normalizeDate(dueAt)
 
@@ -3101,13 +3150,15 @@ const Workflow = {
         targetNode.status = NODE_STATUS.IN_PROGRESS
       }
 
+      const nextNodeRemark = mergeNodeRemarkAssigneeUserIds(targetNode?.remark, finalAssigneeUserIds)
       await conn.query(
         `UPDATE wf_process_instance_nodes
-         SET assignee_user_id = ?, due_at = ?, updated_at = NOW()
+         SET assignee_user_id = ?, due_at = ?, remark = ?, updated_at = NOW()
          WHERE id = ?`,
-        [finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null, normalizedDueAt, targetNode.id],
+        [primaryAssigneeUserId, normalizedDueAt, nextNodeRemark, targetNode.id],
       )
-      targetNode.assignee_user_id = finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null
+      targetNode.assignee_user_id = primaryAssigneeUserId
+      targetNode.remark = nextNodeRemark
 
       const isActiveNode = targetNode.status === NODE_STATUS.IN_PROGRESS
 
@@ -3118,7 +3169,7 @@ const Workflow = {
         fromNodeKey: targetNode.node_key,
         toNodeKey: targetNode.node_key,
         operatorUserId: normalizedOperatorUserId,
-        targetUserId: finalAssigneeUserIds.length === 1 ? finalAssigneeUserIds[0] : null,
+        targetUserId: primaryAssigneeUserId,
         comment: comment || (isActiveNode ? '当前激活节点任务已指派' : '节点已预指派'),
       })
 
