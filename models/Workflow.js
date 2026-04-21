@@ -43,6 +43,9 @@ const TRACK_ITEM_TYPE_KEYS = new Set(
 )
 const AUTO_WORKLOG_PREFIX = '[流程待办]'
 const TRUE_LIKE_VALUES = new Set(['1', 'true', 'yes', 'y', 'on'])
+const WORKFLOW_AUTO_WORKLOG_ENABLED = TRUE_LIKE_VALUES.has(
+  String(process.env.WORKFLOW_AUTO_WORKLOG_ENABLED || '').trim().toLowerCase(),
+)
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -1232,6 +1235,8 @@ async function ensureAutoWorkLogForTask(
     ownerEstimateRequired = null,
   } = {},
 ) {
+  if (!WORKFLOW_AUTO_WORKLOG_ENABLED) return null
+
   const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
   const normalizedPhaseKey = normalizeText(phaseKey, 64).toUpperCase()
   const normalizedTaskId = toPositiveInt(taskId)

@@ -1613,6 +1613,13 @@ function calcVarianceRate(actualHours, estimateHours) {
   return toPercent2(((actual - estimate) / estimate) * 100)
 }
 
+function calcEstimateMinusActualRate(estimateHours, actualHours) {
+  const estimate = Number(estimateHours || 0)
+  const actual = Number(actualHours || 0)
+  if (!Number.isFinite(estimate) || !Number.isFinite(actual) || estimate <= 0) return null
+  return toPercent2(((estimate - actual) / estimate) * 100)
+}
+
 function parseDateOnlyAtLocalMidnight(value) {
   const text = String(value || '').trim()
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null
@@ -7290,7 +7297,7 @@ const Work = {
     }
   },
 
-  async getOwnerWorkbench(ownerUserId, { isSuperAdmin = false } = {}) {
+  async getOwnerWorkbench(ownerUserId, { isSuperAdmin = false, memberUserId = null } = {}) {
     const scope = await resolveOwnerScope(ownerUserId, { isSuperAdmin })
     const teamMemberIds = Array.isArray(scope.team_member_ids) ? scope.team_member_ids : []
     const managedDepartmentIds = Array.isArray(scope.managed_department_ids)
@@ -7465,6 +7472,12 @@ const Work = {
         candidateConditions.push('1 = 0')
       }
       ownerEstimateQueryConditions.push(`(${candidateConditions.join(' OR ')})`)
+    }
+
+    const normalizedMemberUserId = toPositiveInt(memberUserId)
+    if (normalizedMemberUserId) {
+      ownerEstimateQueryConditions.push('l.user_id = ?')
+      ownerEstimateQueryParams.push(normalizedMemberUserId)
     }
 
     const ownerEstimateSql = `SELECT
@@ -8037,8 +8050,8 @@ const Work = {
           totalOwnerRequiredItemCount > 0 ? toPercent2((totalOwnerEstimateCoveredItemCount / totalOwnerRequiredItemCount) * 100) : 0,
         total_owner_baseline_hours: totalOwnerBaselineHours,
         total_owner_comparable_actual_hours: totalOwnerComparableActualHours,
-        variance_owner_baseline_hours: toDecimal1(totalOwnerComparableActualHours - totalOwnerBaselineHours),
-        variance_owner_baseline_rate: calcVarianceRate(totalOwnerComparableActualHours, totalOwnerBaselineHours),
+        variance_owner_baseline_hours: toDecimal1(totalOwnerBaselineHours - totalOwnerComparableActualHours),
+        variance_owner_baseline_rate: calcEstimateMinusActualRate(totalOwnerBaselineHours, totalOwnerComparableActualHours),
         total_personal_estimate_item_count: totalPersonalEstimateItemCount,
         personal_estimate_coverage_rate:
           totalItemCount > 0 ? toPercent2((totalPersonalEstimateItemCount / totalItemCount) * 100) : 0,
@@ -8173,8 +8186,8 @@ const Work = {
         ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - (${demandInsightEffectiveOwnerEstimateHoursSql})), 0), 1) AS variance_owner_hours,
-        ROUND(COALESCE(SUM(${demandInsightOwnerComparableActualHoursSql} - ${demandInsightOwnerBaselineHoursSql}), 0), 1) AS variance_owner_baseline_hours,
-        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS variance_personal_hours,
+        ROUND(COALESCE(SUM(${demandInsightOwnerBaselineHoursSql} - ${demandInsightOwnerComparableActualHoursSql}), 0), 1) AS variance_owner_baseline_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0) - COALESCE(l.actual_hours, 0)), 0), 1) AS variance_personal_hours,
         SUM(CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND l.owner_estimate_hours IS NULL THEN 1 ELSE 0 END) AS unestimated_item_count,
         SUM(${demandInsightFallbackByLogSql}) AS owner_estimate_fallback_item_count,
         SUM(${demandInsightNonOwnerByLogSql}) AS owner_estimate_non_owner_item_count,
@@ -8218,7 +8231,7 @@ const Work = {
         ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS total_personal_estimate_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0)), 0), 1) AS total_actual_hours,
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - (${demandInsightEffectiveOwnerEstimateHoursSql})), 0), 1) AS variance_owner_hours,
-        ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - COALESCE(l.personal_estimate_hours, 0)), 0), 1) AS variance_personal_hours,
+        ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0) - COALESCE(l.actual_hours, 0)), 0), 1) AS variance_personal_hours,
         SUM(${demandInsightFallbackByLogSql}) AS owner_estimate_fallback_item_count,
         SUM(${demandInsightNonOwnerByLogSql}) AS owner_estimate_non_owner_item_count,
         DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
@@ -8288,7 +8301,7 @@ const Work = {
         owner_estimate_fallback_item_count: Number(row.owner_estimate_fallback_item_count || 0),
         owner_estimate_non_owner_item_count: Number(row.owner_estimate_non_owner_item_count || 0),
         variance_owner_rate: calcVarianceRate(row.total_actual_hours, row.total_owner_estimate_hours),
-        variance_personal_rate: calcVarianceRate(row.total_actual_hours, row.total_personal_estimate_hours),
+        variance_personal_rate: calcEstimateMinusActualRate(row.total_personal_estimate_hours, row.total_actual_hours),
         last_log_date: row.last_log_date || null,
         participants: [],
       })
@@ -8309,10 +8322,10 @@ const Work = {
           Number(row.actual_hours || 0) - Number(row.owner_estimate_hours || 0),
         ),
         variance_personal_hours: toDecimal1(
-          Number(row.actual_hours || 0) - Number(row.personal_estimate_hours || 0),
+          Number(row.personal_estimate_hours || 0) - Number(row.actual_hours || 0),
         ),
         variance_owner_rate: calcVarianceRate(row.actual_hours, row.owner_estimate_hours),
-        variance_personal_rate: calcVarianceRate(row.actual_hours, row.personal_estimate_hours),
+        variance_personal_rate: calcEstimateMinusActualRate(row.personal_estimate_hours, row.actual_hours),
         last_log_date: row.last_log_date || null,
       })
     })
@@ -8358,8 +8371,8 @@ const Work = {
         owner_estimate_fallback_item_count: Number(row.owner_estimate_fallback_item_count || 0),
         owner_estimate_non_owner_item_count: Number(row.owner_estimate_non_owner_item_count || 0),
         variance_owner_rate: calcVarianceRate(row.total_actual_hours, row.total_owner_estimate_hours),
-        variance_owner_baseline_rate: calcVarianceRate(row.total_owner_comparable_actual_hours, row.total_owner_baseline_hours),
-        variance_personal_rate: calcVarianceRate(row.total_actual_hours, row.total_personal_estimate_hours),
+        variance_owner_baseline_rate: calcEstimateMinusActualRate(row.total_owner_baseline_hours, row.total_owner_comparable_actual_hours),
+        variance_personal_rate: calcEstimateMinusActualRate(row.total_personal_estimate_hours, row.total_actual_hours),
         unestimated_item_count: Number(row.unestimated_item_count || 0),
         last_log_date: row.last_log_date || null,
         phases,
@@ -8382,7 +8395,7 @@ const Work = {
       demandList.reduce((sum, item) => sum + Number(item.total_actual_hours || 0), 0),
     )
     const totalVarianceOwnerHours = toDecimal1(totalActualHours - totalOwnerEstimateHours)
-    const totalVariancePersonalHours = toDecimal1(totalActualHours - totalPersonalEstimateHours)
+    const totalVariancePersonalHours = toDecimal1(totalPersonalEstimateHours - totalActualHours)
     const totalUnestimatedItems = demandList.reduce(
       (sum, item) => sum + Number(item.unestimated_item_count || 0),
       0,
@@ -8417,7 +8430,7 @@ const Work = {
         variance_owner_hours: totalVarianceOwnerHours,
         variance_personal_hours: totalVariancePersonalHours,
         variance_owner_rate: calcVarianceRate(totalActualHours, totalOwnerEstimateHours),
-        variance_personal_rate: calcVarianceRate(totalActualHours, totalPersonalEstimateHours),
+        variance_personal_rate: calcEstimateMinusActualRate(totalPersonalEstimateHours, totalActualHours),
         unestimated_item_count: totalUnestimatedItems,
         owner_estimate_fallback_item_count: totalOwnerEstimateFallbackItems,
         owner_estimate_non_owner_item_count: totalOwnerEstimateNonOwnerItems,
@@ -9015,7 +9028,7 @@ const Work = {
         log_count: logCount,
         demand_count: demandCount,
         variance_owner_hours: toDecimal1(actualHours - ownerEstimateHours),
-        variance_personal_hours: toDecimal1(actualHours - personalEstimateHours),
+        variance_personal_hours: toDecimal1(personalEstimateHours - actualHours),
         saturation_rate: toPercent2((actualHours / DEFAULT_DAILY_CAPACITY_HOURS) * 100),
         items: normalizedItems.sort((a, b) => Number(a.log_id || 0) - Number(b.log_id || 0)),
       })
@@ -9106,12 +9119,12 @@ const Work = {
         total_owner_estimate_hours: toDecimal1(totalOwner),
         total_personal_estimate_hours: toDecimal1(totalPersonal),
         total_actual_hours: toDecimal1(totalActual),
-        variance_owner_baseline_hours: toDecimal1(totalOwnerComparableActual - totalOwnerBaseline),
-        variance_owner_baseline_rate: calcVarianceRate(totalOwnerComparableActual, totalOwnerBaseline),
+        variance_owner_baseline_hours: toDecimal1(totalOwnerBaseline - totalOwnerComparableActual),
+        variance_owner_baseline_rate: calcEstimateMinusActualRate(totalOwnerBaseline, totalOwnerComparableActual),
         variance_owner_hours: toDecimal1(totalActual - totalOwner),
-        variance_personal_hours: toDecimal1(totalActual - totalPersonal),
+        variance_personal_hours: toDecimal1(totalPersonal - totalActual),
         variance_owner_rate: calcVarianceRate(totalActual, totalOwner),
-        variance_personal_rate: calcVarianceRate(totalActual, totalPersonal),
+        variance_personal_rate: calcEstimateMinusActualRate(totalPersonal, totalActual),
         avg_actual_hours_per_day: toDecimal1(avgActualPerDay),
         avg_saturation_rate: toPercent2(avgSaturationRate),
         overload_days: overloadDays,
@@ -9191,7 +9204,7 @@ const Work = {
           totalOwnerRequiredItemCount > 0 ? toPercent2((totalOwnerEstimateCoveredItemCount / totalOwnerRequiredItemCount) * 100) : 0,
         total_owner_baseline_hours: totalOwnerBaselineHours,
         total_owner_comparable_actual_hours: totalOwnerComparableActualHours,
-        variance_owner_baseline_hours: toDecimal1(totalOwnerComparableActualHours - totalOwnerBaselineHours),
+        variance_owner_baseline_hours: toDecimal1(totalOwnerBaselineHours - totalOwnerComparableActualHours),
         total_personal_estimate_item_count: totalPersonalEstimateItemCount,
         personal_estimate_coverage_rate:
           totalItemCount > 0 ? toPercent2((totalPersonalEstimateItemCount / totalItemCount) * 100) : 0,
@@ -9199,9 +9212,9 @@ const Work = {
         total_personal_estimate_hours: totalPersonalEstimateHours,
         total_actual_hours: totalActualHours,
         variance_owner_hours: toDecimal1(totalActualHours - totalOwnerEstimateHours),
-        variance_personal_hours: toDecimal1(totalActualHours - totalPersonalEstimateHours),
+        variance_personal_hours: toDecimal1(totalPersonalEstimateHours - totalActualHours),
         variance_owner_rate: calcVarianceRate(totalActualHours, totalOwnerEstimateHours),
-        variance_personal_rate: calcVarianceRate(totalActualHours, totalPersonalEstimateHours),
+        variance_personal_rate: calcEstimateMinusActualRate(totalPersonalEstimateHours, totalActualHours),
         avg_actual_hours_per_day:
           totalWorkdayCount > 0 ? toDecimal1(totalActualHours / totalWorkdayCount) : 0,
         avg_saturation_rate:
@@ -9458,7 +9471,7 @@ const Work = {
           Number(summary.total_actual_hours || 0) - Number(summary.total_owner_estimate_hours || 0),
         ),
         variance_personal_hours: toDecimal1(
-          Number(summary.total_actual_hours || 0) - Number(summary.total_personal_estimate_hours || 0),
+          Number(summary.total_personal_estimate_hours || 0) - Number(summary.total_actual_hours || 0),
         ),
       },
       work_type_distribution: Array.from(workTypeTotals.values())
@@ -9794,8 +9807,8 @@ const Work = {
           raw_owner_estimate_hours: rawOwnerEstimateHours,
           personal_estimate_hours: personalEstimateHours,
           actual_hours: actualHours,
-          variance_owner_baseline_hours: toDecimal1(ownerComparableActualHours - ownerBaselineHours),
-          variance_personal_hours: toDecimal1(actualHours - personalEstimateHours),
+          variance_owner_baseline_hours: toDecimal1(ownerBaselineHours - ownerComparableActualHours),
+          variance_personal_hours: toDecimal1(personalEstimateHours - actualHours),
           task_difficulty_coefficient: toDecimal4(taskDifficultyCoefficient),
           period_entry_actual_hours: hasExplicitEntry ? toDecimal1(entryAgg.actual_hours) : actualHours,
           net_efficiency_value: evaluateNetEfficiencyByFormula(
@@ -10044,7 +10057,7 @@ const Work = {
         total_raw_owner_estimate_hours: totalRawOwnerEstimateHours,
         total_owner_baseline_hours: totalOwnerBaselineHours,
         total_owner_comparable_actual_hours: totalOwnerComparableActualHours,
-        variance_owner_baseline_hours: toDecimal1(totalOwnerComparableActualHours - totalOwnerBaselineHours),
+        variance_owner_baseline_hours: toDecimal1(totalOwnerBaselineHours - totalOwnerComparableActualHours),
         total_personal_estimate_item_count: totalPersonalEstimateItemCount,
         personal_estimate_coverage_rate:
           totalItemCount > 0 ? toPercent2((totalPersonalEstimateItemCount / totalItemCount) * 100) : 0,
@@ -10052,7 +10065,7 @@ const Work = {
         total_personal_estimate_hours: totalPersonalEstimateHours,
         total_actual_hours: totalActualHours,
         variance_owner_hours: toDecimal1(totalActualHours - totalOwnerEstimateHours),
-        variance_personal_hours: toDecimal1(totalActualHours - totalPersonalEstimateHours),
+        variance_personal_hours: toDecimal1(totalPersonalEstimateHours - totalActualHours),
         task_difficulty_coefficient: toDecimal4(summaryTaskDifficultyCoefficient || 1),
         job_level_weight_coefficient: toDecimal4(memberJobLevelWeightCoefficient || 1),
         net_efficiency_formula_expression: Array.isArray(netEfficiencyFormula.expression) ? [...netEfficiencyFormula.expression] : [],
@@ -10093,7 +10106,7 @@ const Work = {
           total_owner_baseline_hours: toDecimal1(item.total_owner_baseline_hours),
           total_owner_comparable_actual_hours: toDecimal1(item.total_owner_comparable_actual_hours),
           variance_owner_baseline_hours: toDecimal1(
-            Number(item.total_owner_comparable_actual_hours || 0) - Number(item.total_owner_baseline_hours || 0),
+            Number(item.total_owner_baseline_hours || 0) - Number(item.total_owner_comparable_actual_hours || 0),
           ),
           total_personal_estimate_item_count: Number(item.total_personal_estimate_item_count || 0),
           personal_estimate_coverage_rate:
@@ -10107,7 +10120,7 @@ const Work = {
             Number(item.total_actual_hours || 0) - Number(item.total_owner_estimate_hours || 0),
           ),
           variance_personal_hours: toDecimal1(
-            Number(item.total_actual_hours || 0) - Number(item.total_personal_estimate_hours || 0),
+            Number(item.total_personal_estimate_hours || 0) - Number(item.total_actual_hours || 0),
           ),
           last_log_date: item.last_log_date || null,
         }))

@@ -3756,7 +3756,8 @@ const deleteLog = async (req, res) => {
       return res.status(404).json({ success: false, message: '工作记录不存在' })
     }
 
-    if (Number(existing.user_id) !== Number(req.user.id)) {
+    const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+    if (!isSuperAdmin && Number(existing.user_id) !== Number(req.user.id)) {
       return res.status(403).json({ success: false, message: '仅可删除自己的工作记录' })
     }
 
@@ -6046,6 +6047,7 @@ const getOwnerWorkbench = async (req, res) => {
 
     const data = await Work.getOwnerWorkbench(req.user.id, {
       isSuperAdmin,
+      memberUserId: toPositiveInt(req.query.member_user_id),
     })
     return res.json({ success: true, data })
   } catch (err) {

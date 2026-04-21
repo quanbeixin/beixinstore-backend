@@ -5,6 +5,7 @@ const Work = require('../models/Work')
 const User = require('../models/User')
 const BugChangeLog = require('../models/BugChangeLog')
 const NotificationEvent = require('../models/NotificationEvent')
+const NotificationRule = require('../models/NotificationRule')
 const pool = require('../utils/db')
 const { sendNotification, buildBugCommentReplyCardPayload } = require('../utils/notificationSender')
 const {
@@ -34,6 +35,10 @@ const DEFAULT_ACTION_REQUIREMENTS = Object.freeze({
   reopen: { requireRemark: true, requireFixSolution: false },
   reject: { requireRemark: true, requireFixSolution: false },
 })
+
+const BUG_STATUS_CHANGE_WATCHER_RULE_CODE = 'sys_bug_status_change_watcher_default'
+const BUG_STATUS_CHANGE_WATCHER_BUSINESS_ROLE = 'bug_watcher'
+let bugStatusChangeWatcherRuleEnsured = false
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -560,9 +565,94 @@ async function buildBugNotificationData({ bug, req, extra = {} }) {
   }
 }
 
+function hasBugWatcherBusinessRole(config = {}) {
+  const businessRoles = Array.isArray(config.business_roles) ? config.business_roles : []
+  return businessRoles.some(
+    (item) =>
+      normalizeText(item, 64)
+        .toLowerCase()
+        .trim() === BUG_STATUS_CHANGE_WATCHER_BUSINESS_ROLE,
+  )
+}
+
+async function ensureBugStatusChangeWatcherRule() {
+  if (bugStatusChangeWatcherRuleEnsured) return
+
+  try {
+    const existingRuleRef = await NotificationRule.getByCode(BUG_STATUS_CHANGE_WATCHER_RULE_CODE)
+    if (!existingRuleRef?.id) {
+      await NotificationRule.create({
+        rule_code: BUG_STATUS_CHANGE_WATCHER_RULE_CODE,
+        rule_name: 'Bug状态变更通知（关注人）',
+        business_line_id: 0,
+        scene_code: 'bug_status_change',
+        channel_type: 'feishu',
+        receiver_config_json: { business_roles: [BUG_STATUS_CHANGE_WATCHER_BUSINESS_ROLE] },
+        message_title: 'Bug状态更新：${bug_no}',
+        message_content: '${bug_title}\n状态从 ${from_status} 变更为 ${to_status}${reject_reason_display}',
+        condition_config_json: null,
+        is_enabled: 1,
+        created_by: 0,
+        updated_by: 0,
+      })
+      bugStatusChangeWatcherRuleEnsured = true
+      return
+    }
+
+    const existingRule = await NotificationRule.getById(existingRuleRef.id)
+    if (!existingRule) {
+      bugStatusChangeWatcherRuleEnsured = true
+      return
+    }
+
+    const receiverConfig =
+      existingRule.receiver_config_json && typeof existingRule.receiver_config_json === 'object'
+        ? existingRule.receiver_config_json
+        : {}
+    const existingBusinessRoles = Array.isArray(receiverConfig.business_roles)
+      ? receiverConfig.business_roles.map((item) => normalizeText(item, 64).toLowerCase()).filter(Boolean)
+      : []
+    const mergedBusinessRoles = Array.from(
+      new Set([...existingBusinessRoles, BUG_STATUS_CHANGE_WATCHER_BUSINESS_ROLE]),
+    )
+
+    if (hasBugWatcherBusinessRole(receiverConfig) && Number(existingRule.is_enabled) === 1) {
+      bugStatusChangeWatcherRuleEnsured = true
+      return
+    }
+
+    await NotificationRule.update(existingRule.id, {
+      rule_code: normalizeText(existingRule.rule_code, 64) || BUG_STATUS_CHANGE_WATCHER_RULE_CODE,
+      rule_name: normalizeText(existingRule.rule_name, 128) || 'Bug状态变更通知（关注人）',
+      business_line_id: toPositiveInt(existingRule.business_line_id) || 0,
+      scene_code: normalizeText(existingRule.scene_code, 64) || 'bug_status_change',
+      channel_type: normalizeText(existingRule.channel_type, 16) || 'feishu',
+      receiver_config_json: {
+        ...receiverConfig,
+        business_roles: mergedBusinessRoles,
+      },
+      message_title: normalizeText(existingRule.message_title, 255) || 'Bug状态更新：${bug_no}',
+      message_content:
+        normalizeText(existingRule.message_content, 5000) ||
+        '${bug_title}\n状态从 ${from_status} 变更为 ${to_status}${reject_reason_display}',
+      condition_config_json: existingRule.condition_config_json || null,
+      is_enabled: 1,
+      updated_by: 0,
+    })
+    bugStatusChangeWatcherRuleEnsured = true
+  } catch (error) {
+    console.warn('自愈Bug状态变更关注人通知规则失败:', {
+      message: error?.message || String(error || ''),
+    })
+  }
+}
+
 async function emitBugNotificationEvent({ eventType, bug, req, extra = {} }) {
   if (!eventType || !bug) return
   try {
+    if (eventType === 'bug_status_change') {
+      await ensureBugStatusChangeWatcherRule()
+    }
     const data = await buildBugNotificationData({ bug, req, extra })
     await NotificationEvent.processEvent({
       eventType,
