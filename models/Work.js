@@ -7772,6 +7772,7 @@ const Work = {
         departmentId: normalizedDepartmentId || null,
         departmentIds: normalizedDepartmentId ? [] : normalizedDepartmentIds,
         completedOnly: normalizedCompletedOnly,
+        scopeMode: 'schedule_overlap',
       }),
       previousRange.startDate && previousRange.endDate
         ? this.getMemberInsight({
@@ -7780,6 +7781,7 @@ const Work = {
             departmentId: normalizedDepartmentId || null,
             departmentIds: normalizedDepartmentId ? [] : normalizedDepartmentIds,
             completedOnly: normalizedCompletedOnly,
+            scopeMode: 'schedule_overlap',
           })
         : Promise.resolve({ member_list: [] }),
       pool.query(
@@ -8435,7 +8437,12 @@ const Work = {
     keyword = '',
     completedOnly = false,
     aggregateActualMode = 'full_item',
+    scopeMode = 'entry_or_log_date',
   } = {}) {
+    const normalizedScopeMode =
+      String(scopeMode || '').trim().toLowerCase() === 'schedule_overlap'
+        ? 'schedule_overlap'
+        : 'entry_or_log_date'
     const calendarRange = buildChinaBusinessCalendarRange(startDate, endDate)
     const calendarDates = Array.isArray(calendarRange?.dates) ? calendarRange.dates : []
     const workdayCountPerMember = Number(calendarRange?.workday_count || 0)
@@ -8495,6 +8502,7 @@ const Work = {
           member_user_id: memberUserId,
           keyword: keyword || '',
           completed_only: Boolean(completedOnly),
+          scope_mode: normalizedScopeMode,
         },
         summary: {
           member_count: 0,
@@ -8551,27 +8559,76 @@ const Work = {
       )
       logParams.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
     }
-    logConditions.push(
-      `(
-        EXISTS (
-          SELECT 1
-          FROM work_log_daily_entries e
-          WHERE e.log_id = l.id
-            AND e.user_id = l.user_id
-            AND e.entry_date BETWEEN ? AND ?
+    if (normalizedScopeMode === 'schedule_overlap') {
+      const plannedStartDateSql = 'COALESCE(l.expected_start_date, l.expected_completion_date)'
+      const plannedEndDateSql = 'COALESCE(l.expected_completion_date, l.expected_start_date)'
+      if (startDate && endDate) {
+        logConditions.push(
+          `(
+            (
+              ${plannedStartDateSql} IS NOT NULL
+              AND ${plannedStartDateSql} <= ?
+              AND ${plannedEndDateSql} >= ?
+            )
+            OR (
+              ${plannedStartDateSql} IS NULL
+              AND l.log_date BETWEEN ? AND ?
+            )
+          )`,
         )
-        OR (
-          l.log_date BETWEEN ? AND ?
-          AND NOT EXISTS (
+        logParams.push(endDate, startDate, startDate, endDate)
+      } else if (startDate) {
+        logConditions.push(
+          `(
+            (
+              ${plannedEndDateSql} IS NOT NULL
+              AND ${plannedEndDateSql} >= ?
+            )
+            OR (
+              ${plannedEndDateSql} IS NULL
+              AND l.log_date >= ?
+            )
+          )`,
+        )
+        logParams.push(startDate, startDate)
+      } else if (endDate) {
+        logConditions.push(
+          `(
+            (
+              ${plannedStartDateSql} IS NOT NULL
+              AND ${plannedStartDateSql} <= ?
+            )
+            OR (
+              ${plannedStartDateSql} IS NULL
+              AND l.log_date <= ?
+            )
+          )`,
+        )
+        logParams.push(endDate, endDate)
+      }
+    } else {
+      logConditions.push(
+        `(
+          EXISTS (
             SELECT 1
-            FROM work_log_daily_entries ae
-            WHERE ae.log_id = l.id
-              AND ae.user_id = l.user_id
+            FROM work_log_daily_entries e
+            WHERE e.log_id = l.id
+              AND e.user_id = l.user_id
+              AND e.entry_date BETWEEN ? AND ?
           )
-        )
-      )`,
-    )
-    logParams.push(startDate, endDate, startDate, endDate)
+          OR (
+            l.log_date BETWEEN ? AND ?
+            AND NOT EXISTS (
+              SELECT 1
+              FROM work_log_daily_entries ae
+              WHERE ae.log_id = l.id
+                AND ae.user_id = l.user_id
+            )
+          )
+        )`,
+      )
+      logParams.push(startDate, endDate, startDate, endDate)
+    }
     if (completedOnly) {
       logConditions.push("COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'")
     }
@@ -9116,6 +9173,7 @@ const Work = {
         member_user_id: memberUserId,
         keyword: keyword || '',
         completed_only: Boolean(completedOnly),
+        scope_mode: normalizedScopeMode,
       },
       summary: {
         member_count: memberList.length,
@@ -9222,6 +9280,7 @@ const Work = {
         startDate,
         endDate,
         departmentId: normalizedDepartmentId,
+        scopeMode: 'schedule_overlap',
       }),
       this.getDemandInsight({
         startDate,
