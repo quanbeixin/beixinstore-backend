@@ -626,12 +626,18 @@ function normalizeParticipantRoleUserMap(value, allowedRoles = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
   const roleSet = new Set(normalizeParticipantRoles(allowedRoles))
   const result = {}
-  Object.entries(value).forEach(([roleKey, userIdRaw]) => {
+  Object.entries(value).forEach(([roleKey, userIdsRaw]) => {
     const role = String(roleKey || '').trim().replace(/\s+/g, '_').toUpperCase().slice(0, 64)
-    const userId = Number(userIdRaw)
     if (!role || !roleSet.has(role)) return
-    if (!Number.isInteger(userId) || userId <= 0) return
-    result[role] = userId
+    const userIds = Array.from(
+      new Set(
+        (Array.isArray(userIdsRaw) ? userIdsRaw : [userIdsRaw])
+          .map((item) => toPositiveInt(item))
+          .filter(Boolean),
+      ),
+    )
+    if (userIds.length === 0) return
+    result[role] = userIds
   })
   return result
 }
@@ -641,6 +647,7 @@ function extractParticipantRoleUserIds(value, allowedRoles = []) {
   return Array.from(
     new Set(
       Object.values(normalizedMap)
+        .flatMap((item) => (Array.isArray(item) ? item : [item]))
         .map((item) => toPositiveInt(item))
         .filter(Boolean),
     ),
