@@ -153,8 +153,19 @@ const OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL = `CASE
   ELSE 1
 END`
 
+const OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL = `CASE
+  WHEN ${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL} = 1
+   AND (l.owner_estimated_at IS NOT NULL OR l.owner_estimated_by IS NOT NULL)
+    THEN 1
+  ELSE 0
+END`
+
 const EFFECTIVE_OWNER_ESTIMATE_HOURS_SQL = `CASE
-  WHEN ${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL} = 1 THEN COALESCE(l.owner_estimate_hours, 0)
+  WHEN ${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL} = 1 THEN
+    CASE
+      WHEN ${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL} = 1 THEN COALESCE(l.owner_estimate_hours, 0)
+      ELSE COALESCE(l.actual_hours, 0)
+    END
   ELSE COALESCE(l.actual_hours, 0)
 END`
 
@@ -7584,7 +7595,10 @@ const Work = {
       AND pdi.item_code = l.phase_key
      WHERE ${ownerEstimateQueryConditions.join(' AND ')}
      ORDER BY
-       CASE WHEN l.owner_estimate_hours IS NULL THEN 0 ELSE 1 END ASC,
+       CASE
+         WHEN l.owner_estimated_at IS NOT NULL OR l.owner_estimated_by IS NOT NULL THEN 1
+         ELSE 0
+       END ASC,
        l.updated_at DESC,
        l.id DESC
      LIMIT 400`
@@ -7726,9 +7740,9 @@ const Work = {
       team_members: teamMembers,
       owner_estimate_items: ownerEstimateItems,
       owner_estimate_pending_count: ownerEstimateItems.filter((item) => {
-        const value = Number(item?.owner_estimate_hours)
-        if (!Number.isFinite(value)) return true
-        return value <= 0
+        const estimatedAt = String(item?.owner_estimated_at || '').trim()
+        const estimatedBy = toPositiveInt(item?.owner_estimated_by)
+        return !estimatedAt && !estimatedBy
       }).length,
       demand_risks: [],
       phase_risks: [],
@@ -8165,21 +8179,21 @@ const Work = {
 
     const demandInsightFallbackByLogSql = `CASE
       WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1
-       AND (l.owner_estimate_hours IS NULL OR COALESCE(l.owner_estimate_hours, 0) <= 0)
+       AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 0
         THEN 1
       ELSE 0
     END`
 
     const demandInsightOwnerCoveredByLogSql = `CASE
       WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1
-       AND COALESCE(l.owner_estimate_hours, 0) > 0
+       AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 1
         THEN 1
       ELSE 0
     END`
 
     const demandInsightOwnerMissingByLogSql = `CASE
       WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1
-       AND (l.owner_estimate_hours IS NULL OR COALESCE(l.owner_estimate_hours, 0) <= 0)
+       AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 0
         THEN 1
       ELSE 0
     END`
@@ -8191,14 +8205,14 @@ const Work = {
 
     const demandInsightOwnerBaselineHoursSql = `CASE
       WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1
-       AND COALESCE(l.owner_estimate_hours, 0) > 0
+       AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 1
         THEN COALESCE(l.owner_estimate_hours, 0)
       ELSE 0
     END`
 
     const demandInsightOwnerComparableActualHoursSql = `CASE
       WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1
-       AND COALESCE(l.owner_estimate_hours, 0) > 0
+       AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 1
         THEN COALESCE(l.actual_hours, 0)
       ELSE 0
     END`
@@ -8206,7 +8220,7 @@ const Work = {
     const demandInsightEffectiveOwnerEstimateHoursSql = `CASE
       WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 THEN
         CASE
-          WHEN l.owner_estimate_hours IS NULL OR COALESCE(l.owner_estimate_hours, 0) <= 0
+          WHEN (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 0
             THEN COALESCE(l.actual_hours, 0)
           ELSE COALESCE(l.owner_estimate_hours, 0)
         END
@@ -8251,7 +8265,7 @@ const Work = {
         ROUND(COALESCE(SUM(COALESCE(l.actual_hours, 0) - (${demandInsightEffectiveOwnerEstimateHoursSql})), 0), 1) AS variance_owner_hours,
         ROUND(COALESCE(SUM(${demandInsightOwnerBaselineHoursSql} - ${demandInsightOwnerComparableActualHoursSql}), 0), 1) AS variance_owner_baseline_hours,
         ROUND(COALESCE(SUM(COALESCE(l.personal_estimate_hours, 0) - COALESCE(l.actual_hours, 0)), 0), 1) AS variance_personal_hours,
-        SUM(CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND l.owner_estimate_hours IS NULL THEN 1 ELSE 0 END) AS unestimated_item_count,
+        SUM(CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 0 THEN 1 ELSE 0 END) AS unestimated_item_count,
         SUM(${demandInsightFallbackByLogSql}) AS owner_estimate_fallback_item_count,
         SUM(${demandInsightNonOwnerByLogSql}) AS owner_estimate_non_owner_item_count,
         DATE_FORMAT(MAX(l.log_date), '%Y-%m-%d') AS last_log_date
@@ -8739,12 +8753,12 @@ const Work = {
         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
         DATE_FORMAT(l.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
         CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 THEN 1 ELSE 0 END AS owner_estimate_required,
-        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND COALESCE(l.owner_estimate_hours, 0) > 0 THEN 1 ELSE 0 END AS owner_estimate_covered,
-        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (l.owner_estimate_hours IS NULL OR COALESCE(l.owner_estimate_hours, 0) <= 0) THEN 1 ELSE 0 END AS owner_estimate_missing,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 1 THEN 1 ELSE 0 END AS owner_estimate_covered,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 0 THEN 1 ELSE 0 END AS owner_estimate_missing,
         CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 0 THEN 1 ELSE 0 END AS owner_estimate_non_owner,
-        ROUND(CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND COALESCE(l.owner_estimate_hours, 0) > 0 THEN COALESCE(l.owner_estimate_hours, 0) ELSE 0 END, 1) AS owner_baseline_hours,
+        ROUND(CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 1 THEN COALESCE(l.owner_estimate_hours, 0) ELSE 0 END, 1) AS owner_baseline_hours,
         CASE WHEN COALESCE(l.personal_estimate_hours, 0) > 0 THEN 1 ELSE 0 END AS personal_estimate_covered,
-        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND l.owner_estimate_hours IS NULL THEN 1 ELSE 0 END AS owner_pending
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 0 THEN 1 ELSE 0 END AS owner_pending
       FROM work_logs l
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN work_demands d ON d.id = l.demand_id
@@ -9689,12 +9703,12 @@ const Work = {
         DATE_FORMAT(l.expected_start_date, '%Y-%m-%d') AS expected_start_date,
         DATE_FORMAT(l.expected_completion_date, '%Y-%m-%d') AS expected_completion_date,
         CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 THEN 1 ELSE 0 END AS owner_estimate_required,
-        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND COALESCE(l.owner_estimate_hours, 0) > 0 THEN 1 ELSE 0 END AS owner_estimate_covered,
-        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (l.owner_estimate_hours IS NULL OR COALESCE(l.owner_estimate_hours, 0) <= 0) THEN 1 ELSE 0 END AS owner_estimate_missing,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 1 THEN 1 ELSE 0 END AS owner_estimate_covered,
+        CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 0 THEN 1 ELSE 0 END AS owner_estimate_missing,
         CASE WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 0 THEN 1 ELSE 0 END AS owner_estimate_non_owner,
         ROUND(
           CASE
-            WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND COALESCE(l.owner_estimate_hours, 0) > 0
+            WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 1
               THEN COALESCE(l.owner_estimate_hours, 0)
             ELSE 0
           END,
@@ -9702,7 +9716,7 @@ const Work = {
         ) AS owner_baseline_hours,
         ROUND(
           CASE
-            WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND COALESCE(l.owner_estimate_hours, 0) > 0
+            WHEN (${OWNER_ESTIMATE_REQUIRED_BY_LOG_SQL}) = 1 AND (${OWNER_ESTIMATE_EVALUATED_BY_LOG_SQL}) = 1
               THEN COALESCE(l.actual_hours, 0)
             ELSE 0
           END,
