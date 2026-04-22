@@ -348,18 +348,15 @@ async function translateToEnglish(text) {
   }
 }
 
-async function ensureChineseQuestion(sourceText, analyzedCnText) {
+async function ensureChineseQuestion(sourceText) {
   const source = normalizeText(sourceText)
   if (!source) return ''
 
-  const candidate = normalizeText(analyzedCnText)
-  if (!needsChineseTranslation(source, candidate)) {
-    return candidate || source
-  }
+  if (!needsChineseTranslation(source, '')) return source
 
   const translated = await translateToChinese(source)
   if (translated) return translated
-  return candidate || source
+  return source
 }
 
 async function ensureEnglishReply(sourceText, analyzedEnText) {
@@ -449,7 +446,7 @@ function buildPrompt(feedback, config) {
   const categoryHint = parseCategories(config?.categories).join('、')
   const userFeedbackText = buildFeedbackQuestionText(feedback, { labeled: true })
 
-  return `# 知识库\n${config.knowledgeBase || ''}\n\n# 限制条件\n${config.limitations || ''}\n\n# 分类候选\n${categoryHint || '咨询、功能需求、Bug、投诉'}\n\n# 用户反馈\n${userFeedbackText || ''}\n\n# 输出格式\n请只返回 JSON（不要额外说明），字段如下：\n{\n  "ai_primary_category": "主分类",\n  "ai_secondary_categories": ["次分类1", "次分类2"],\n  "ai_sentiment": "Positive | Neutral | Negative",\n  "ai_reply": "中文回复",\n  "ai_reply_en": "英文回复",\n  "user_request": "用户需求摘要",\n  "is_new_request": true,\n  "user_question_cn": "用户问题中文"\n}\n\n要求：\n1. ai_primary_category 必填。\n2. ai_secondary_categories 没有时返回 []。\n3. ai_secondary_categories 中不得重复 ai_primary_category。`
+  return `# 知识库\n${config.knowledgeBase || ''}\n\n# 限制条件\n${config.limitations || ''}\n\n# 分类候选\n${categoryHint || '咨询、功能需求、Bug、投诉'}\n\n# 用户反馈\n${userFeedbackText || ''}\n\n# 输出格式\n请只返回 JSON（不要额外说明），字段如下：\n{\n  "ai_primary_category": "主分类",\n  "ai_secondary_categories": ["次分类1", "次分类2"],\n  "ai_sentiment": "Positive | Neutral | Negative",\n  "ai_reply": "中文回复",\n  "ai_reply_en": "英文回复",\n  "user_request": "用户需求摘要",\n  "is_new_request": true\n}\n\n要求：\n1. ai_primary_category 必填。\n2. ai_secondary_categories 没有时返回 []。\n3. ai_secondary_categories 中不得重复 ai_primary_category。\n4. user_request 只保留用户诉求摘要，不要返回用户原文翻译。`
 }
 
 function sanitizeCategoryList(input, categoryOptions, { exclude = [] } = {}) {
@@ -568,12 +565,10 @@ async function analyzeFeedback(feedback) {
   const categoryOptions = parseCategories(config?.categories)
   const heuristic = buildHeuristicAnalysis(feedback, config)
   const feedbackQuestionText = buildFeedbackQuestionText(feedback)
+  const feedbackQuestionSourceText = normalizeText(feedback?.user_question) || feedbackQuestionText
 
   if (!hasAiCapability()) {
-    heuristic.user_question_cn = await ensureChineseQuestion(
-      feedbackQuestionText,
-      heuristic.user_question_cn,
-    )
+    heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionSourceText)
     heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
     return heuristic
   }
@@ -596,18 +591,12 @@ async function analyzeFeedback(feedback) {
         feedbackId: feedback?.id || null,
         preview: normalizeText(response?.content, 400),
       })
-      heuristic.user_question_cn = await ensureChineseQuestion(
-        feedbackQuestionText,
-        heuristic.user_question_cn,
-      )
+      heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionSourceText)
       heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
       return heuristic
     }
 
-    const userQuestionCn = await ensureChineseQuestion(
-      feedbackQuestionText,
-      parsed.user_question_cn,
-    )
+    const userQuestionCn = await ensureChineseQuestion(feedbackQuestionSourceText)
     const aiPrimaryCategory = sanitizeCategory(
       parsed.ai_primary_category || parsed.primary_category || parsed.ai_category,
       categoryOptions,
@@ -646,10 +635,7 @@ async function analyzeFeedback(feedback) {
     }
   } catch (error) {
     console.warn('反馈 AI 分析失败，回退到规则分析:', error?.message || error)
-    heuristic.user_question_cn = await ensureChineseQuestion(
-      feedbackQuestionText,
-      heuristic.user_question_cn,
-    )
+    heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionSourceText)
     heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
     return heuristic
   }

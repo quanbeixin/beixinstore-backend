@@ -7725,7 +7725,11 @@ const Work = {
       no_fill_members: noFillMembers,
       team_members: teamMembers,
       owner_estimate_items: ownerEstimateItems,
-      owner_estimate_pending_count: ownerEstimateItems.filter((item) => item.owner_estimate_hours === null).length,
+      owner_estimate_pending_count: ownerEstimateItems.filter((item) => {
+        const value = Number(item?.owner_estimate_hours)
+        if (!Number.isFinite(value)) return true
+        return value <= 0
+      }).length,
       demand_risks: [],
       phase_risks: [],
     }
