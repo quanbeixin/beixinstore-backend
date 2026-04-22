@@ -106,6 +106,11 @@ const {
   getMyWorkbench,
   getMyWeeklyReport,
   sendMyWeeklyReport,
+  createOvertimeRecord,
+  listOvertimeRecords,
+  updateOvertimeRecord,
+  deleteOvertimeRecord,
+  confirmOvertimeRecord,
   getMyAssignedItems,
   updateAssignedLog,
   getOwnerWorkbench,
@@ -362,6 +367,19 @@ router.get('/human-gantt', getHumanGantt)
 router.get('/workbench/me', authMiddleware.requirePermission('workbench.view.self'), getMyWorkbench)
 router.get('/workbench/me/weekly-report', authMiddleware.requirePermission('workbench.view.self'), getMyWeeklyReport)
 router.post('/workbench/me/weekly-report/send', authMiddleware.requirePermission('workbench.view.self'), sendMyWeeklyReport)
+router.get('/workbench/overtime-records', authMiddleware.requirePermission('workbench.view.self'), listOvertimeRecords)
+router.post('/workbench/overtime-records', authMiddleware.requirePermission('workbench.view.self'), createOvertimeRecord)
+router.put('/workbench/overtime-records/:id', authMiddleware.requirePermission('workbench.view.self'), updateOvertimeRecord)
+router.delete(
+  '/workbench/overtime-records/:id',
+  authMiddleware.requirePermission('workbench.view.self'),
+  deleteOvertimeRecord,
+)
+router.post(
+  '/workbench/overtime-records/:id/confirm',
+  authMiddleware.requirePermission('workbench.view.self'),
+  confirmOvertimeRecord,
+)
 router.get('/my-assigned-items', authMiddleware.requirePermission('worklog.view.self'), getMyAssignedItems)
 router.put('/my-assigned-items/:id', authMiddleware.requirePermission('worklog.view.self'), updateAssignedLog)
 router.get('/workbench/morning', getMorningStandupBoard)

@@ -89,6 +89,10 @@ const WORK_UNIFIED_STATUS = {
   NORMAL: 'NORMAL',
 }
 const WORK_UNIFIED_STATUS_VALUES = Object.values(WORK_UNIFIED_STATUS)
+const OVERTIME_RECORD_STATUSES = Object.freeze({
+  PENDING_CONFIRM: 'PENDING_CONFIRM',
+  CONFIRMED: 'CONFIRMED',
+})
 const DEMAND_VIEW_VISIBILITY = Object.freeze({
   PRIVATE: 'PRIVATE',
   SHARED: 'SHARED',
@@ -296,6 +300,8 @@ const DEFAULT_DAILY_CAPACITY_HOURS = Number.isFinite(Number(process.env.DAILY_CA
 
 let ensureDailyTablesPromise = null
 let isDailyTablesReady = false
+let ensureOvertimeRecordsTablePromise = null
+let isOvertimeRecordsTableReady = false
 let ensureEfficiencyFactorSettingsTablePromise = null
 let isEfficiencyFactorSettingsTableReady = false
 
@@ -512,6 +518,13 @@ function normalizeNullableBooleanAsNumber(value) {
 function normalizeTaskSource(value, fallback = 'SELF') {
   const source = String(value || fallback).trim().toUpperCase()
   return WORK_LOG_TASK_SOURCES.includes(source) ? source : fallback
+}
+
+function normalizeOvertimeRecordStatus(value, fallback = OVERTIME_RECORD_STATUSES.PENDING_CONFIRM) {
+  const status = String(value || fallback).trim().toUpperCase()
+  if (status === OVERTIME_RECORD_STATUSES.PENDING_CONFIRM) return OVERTIME_RECORD_STATUSES.PENDING_CONFIRM
+  if (status === OVERTIME_RECORD_STATUSES.CONFIRMED) return OVERTIME_RECORD_STATUSES.CONFIRMED
+  return fallback
 }
 
 function isMissingColumnError(err) {
@@ -1061,6 +1074,44 @@ async function ensureDailyTables() {
     await ensureDailyTablesPromise
   } finally {
     ensureDailyTablesPromise = null
+  }
+}
+
+async function ensureOvertimeRecordsTable() {
+  if (isOvertimeRecordsTableReady) return
+  if (ensureOvertimeRecordsTablePromise) {
+    await ensureOvertimeRecordsTablePromise
+    return
+  }
+
+  ensureOvertimeRecordsTablePromise = (async () => {
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS work_overtime_records (
+         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+         user_id BIGINT UNSIGNED NOT NULL,
+         overtime_date DATE NOT NULL,
+         duration_hours DECIMAL(6,1) NOT NULL DEFAULT 0.0,
+         reason VARCHAR(2000) NOT NULL,
+         status VARCHAR(32) NOT NULL DEFAULT 'PENDING_CONFIRM',
+         confirmed_by BIGINT UNSIGNED NULL,
+         confirmed_at DATETIME NULL,
+         created_by BIGINT UNSIGNED NULL,
+         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+         PRIMARY KEY (id),
+         KEY idx_work_overtime_records_user_date (user_id, overtime_date),
+         KEY idx_work_overtime_records_status_date (status, overtime_date),
+         KEY idx_work_overtime_records_created_at (created_at)
+       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    )
+
+    isOvertimeRecordsTableReady = true
+  })()
+
+  try {
+    await ensureOvertimeRecordsTablePromise
+  } finally {
+    ensureOvertimeRecordsTablePromise = null
   }
 }
 
@@ -1864,6 +1915,7 @@ const Work = {
   DEMAND_MANAGEMENT_MODES,
   DEMAND_HEALTH_STATUSES,
   WORK_LOG_STATUSES,
+  OVERTIME_RECORD_STATUSES,
   WORK_UNIFIED_STATUSES: WORK_UNIFIED_STATUS_VALUES,
   WORK_LOG_TASK_SOURCES,
   EFFICIENCY_FACTOR_TYPES,
@@ -10223,6 +10275,173 @@ const Work = {
         }
       }
     }
+  },
+
+  async findOvertimeRecordById(id) {
+    const overtimeRecordId = toPositiveInt(id)
+    if (!overtimeRecordId) return null
+    await ensureOvertimeRecordsTable()
+
+    const [rows] = await pool.query(
+      `SELECT
+         r.id,
+         r.user_id,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS applicant_name,
+         DATE_FORMAT(r.overtime_date, '%Y-%m-%d') AS overtime_date,
+         CAST(r.duration_hours AS DECIMAL(6,1)) AS duration_hours,
+         r.reason,
+         r.status,
+         r.confirmed_by,
+         COALESCE(NULLIF(cu.real_name, ''), cu.username) AS confirmed_by_name,
+         DATE_FORMAT(r.confirmed_at, '%Y-%m-%d %H:%i:%s') AS confirmed_at,
+         DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM work_overtime_records r
+       LEFT JOIN users u ON u.id = r.user_id
+       LEFT JOIN users cu ON cu.id = r.confirmed_by
+       WHERE r.id = ?
+       LIMIT 1`,
+      [overtimeRecordId],
+    )
+    return rows[0] || null
+  },
+
+  async createOvertimeRecord({
+    userId,
+    overtimeDate,
+    durationHours,
+    reason,
+    createdBy = null,
+  }) {
+    await ensureOvertimeRecordsTable()
+    const [result] = await pool.query(
+      `INSERT INTO work_overtime_records (
+         user_id,
+         overtime_date,
+         duration_hours,
+         reason,
+         status,
+         created_by
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        toPositiveInt(userId),
+        normalizeDateOnly(overtimeDate),
+        normalizeDecimal(durationHours, 0),
+        String(reason || '').trim().slice(0, 2000),
+        OVERTIME_RECORD_STATUSES.PENDING_CONFIRM,
+        toPositiveInt(createdBy),
+      ],
+    )
+    return result.insertId
+  },
+
+  async updateOvertimeRecord(id, { overtimeDate, durationHours, reason }) {
+    const overtimeRecordId = toPositiveInt(id)
+    if (!overtimeRecordId) return 0
+    await ensureOvertimeRecordsTable()
+
+    const [result] = await pool.query(
+      `UPDATE work_overtime_records
+       SET overtime_date = ?, duration_hours = ?, reason = ?
+       WHERE id = ?`,
+      [
+        normalizeDateOnly(overtimeDate),
+        normalizeDecimal(durationHours, 0),
+        String(reason || '').trim().slice(0, 2000),
+        overtimeRecordId,
+      ],
+    )
+    return result.affectedRows
+  },
+
+  async deleteOvertimeRecord(id) {
+    const overtimeRecordId = toPositiveInt(id)
+    if (!overtimeRecordId) return 0
+    await ensureOvertimeRecordsTable()
+    const [result] = await pool.query('DELETE FROM work_overtime_records WHERE id = ?', [overtimeRecordId])
+    return result.affectedRows
+  },
+
+  async confirmOvertimeRecord(id, { confirmedBy }) {
+    const overtimeRecordId = toPositiveInt(id)
+    if (!overtimeRecordId) return 0
+    await ensureOvertimeRecordsTable()
+
+    const [result] = await pool.query(
+      `UPDATE work_overtime_records
+       SET status = ?, confirmed_by = ?, confirmed_at = NOW()
+       WHERE id = ? AND status = ?`,
+      [
+        OVERTIME_RECORD_STATUSES.CONFIRMED,
+        toPositiveInt(confirmedBy),
+        overtimeRecordId,
+        OVERTIME_RECORD_STATUSES.PENDING_CONFIRM,
+      ],
+    )
+    return result.affectedRows
+  },
+
+  async listOvertimeRecords({
+    applicantUserId = null,
+    status = '',
+    startDate = '',
+    endDate = '',
+  } = {}) {
+    await ensureOvertimeRecordsTable()
+
+    const filters = []
+    const params = []
+
+    const normalizedApplicantUserId = toPositiveInt(applicantUserId)
+    if (normalizedApplicantUserId) {
+      filters.push('r.user_id = ?')
+      params.push(normalizedApplicantUserId)
+    }
+
+    const normalizedStatus = normalizeOvertimeRecordStatus(status, '')
+    if (normalizedStatus) {
+      filters.push('r.status = ?')
+      params.push(normalizedStatus)
+    }
+
+    const normalizedStartDate = normalizeDateOnly(startDate)
+    if (normalizedStartDate) {
+      filters.push('r.overtime_date >= ?')
+      params.push(normalizedStartDate)
+    }
+
+    const normalizedEndDate = normalizeDateOnly(endDate)
+    if (normalizedEndDate) {
+      filters.push('r.overtime_date <= ?')
+      params.push(normalizedEndDate)
+    }
+
+    const whereSql = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : ''
+    const [rows] = await pool.query(
+      `SELECT
+         r.id,
+         r.user_id,
+         COALESCE(NULLIF(u.real_name, ''), u.username) AS applicant_name,
+         DATE_FORMAT(r.overtime_date, '%Y-%m-%d') AS overtime_date,
+         CAST(r.duration_hours AS DECIMAL(6,1)) AS duration_hours,
+         r.reason,
+         r.status,
+         r.confirmed_by,
+         COALESCE(NULLIF(cu.real_name, ''), cu.username) AS confirmed_by_name,
+         DATE_FORMAT(r.confirmed_at, '%Y-%m-%d %H:%i:%s') AS confirmed_at,
+         DATE_FORMAT(r.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM work_overtime_records r
+       LEFT JOIN users u ON u.id = r.user_id
+       LEFT JOIN users cu ON cu.id = r.confirmed_by
+       ${whereSql}
+       ORDER BY
+         CASE r.status WHEN '${OVERTIME_RECORD_STATUSES.PENDING_CONFIRM}' THEN 0 ELSE 1 END ASC,
+         r.overtime_date DESC,
+         r.id DESC`,
+      params,
+    )
+    return rows || []
   },
 
   async getMyAssignedItems(assignedByUserId) {

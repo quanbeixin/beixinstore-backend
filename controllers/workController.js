@@ -840,6 +840,17 @@ function normalizeHours(value, fallback = null) {
   return Number(num.toFixed(1))
 }
 
+function normalizeOvertimeRecordStatus(value) {
+  const normalized = String(value || '').trim().toUpperCase()
+  if (normalized === Work.OVERTIME_RECORD_STATUSES?.PENDING_CONFIRM) {
+    return Work.OVERTIME_RECORD_STATUSES.PENDING_CONFIRM
+  }
+  if (normalized === Work.OVERTIME_RECORD_STATUSES?.CONFIRMED) {
+    return Work.OVERTIME_RECORD_STATUSES.CONFIRMED
+  }
+  return ''
+}
+
 function buildDailyActualLimitExceededMessage(projectedHours) {
   return `当日实际用时不能超过 ${DAILY_ACTUAL_MAX_LIMIT_HOURS} 小时（当前将达到 ${Number(projectedHours || 0).toFixed(1)} 小时）`
 }
@@ -5944,6 +5955,253 @@ const getMyWorkbench = async (req, res) => {
   }
 }
 
+function decorateOvertimeRecordRow(row, { currentUserId, isSuperAdmin }) {
+  const normalized = row && typeof row === 'object' ? row : {}
+  const isOwner = Number(normalized.user_id) === Number(currentUserId)
+  const isPending = String(normalized.status || '').trim().toUpperCase() === Work.OVERTIME_RECORD_STATUSES.PENDING_CONFIRM
+
+  return {
+    ...normalized,
+    can_edit: Boolean(isOwner && isPending),
+    can_delete: Boolean(isOwner && isPending),
+    can_confirm: Boolean(isSuperAdmin && isPending),
+  }
+}
+
+const createOvertimeRecord = async (req, res) => {
+  const overtimeDate = normalizeDate(req.body?.overtime_date)
+  if (!overtimeDate) {
+    return res.status(400).json({ success: false, message: '加班时间格式不正确' })
+  }
+
+  const durationHours = normalizeHours(req.body?.duration_hours, null)
+  if (durationHours === null || durationHours <= 0) {
+    return res.status(400).json({ success: false, message: '加班时长需大于 0 小时' })
+  }
+
+  const reason = normalizeText(req.body?.reason, 2000)
+  if (!reason) {
+    return res.status(400).json({ success: false, message: '请填写加班原因' })
+  }
+
+  try {
+    const overtimeRecordId = await Work.createOvertimeRecord({
+      userId: req.user.id,
+      overtimeDate,
+      durationHours,
+      reason,
+      createdBy: req.user.id,
+    })
+    const created = await Work.findOvertimeRecordById(overtimeRecordId)
+
+    return res.json({
+      success: true,
+      message: '加班申报已提交',
+      data: decorateOvertimeRecordRow(created, {
+        currentUserId: req.user.id,
+        isSuperAdmin: Boolean(req.userAccess?.is_super_admin),
+      }),
+    })
+  } catch (err) {
+    console.error('提交加班申报失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listOvertimeRecords = async (req, res) => {
+  const isSuperAdmin = Boolean(req.userAccess?.is_super_admin)
+  const showAll = toBool(req.query.show_all, false)
+  const requestedUserId = toPositiveInt(req.query.user_id)
+  if (req.query.user_id !== undefined && req.query.user_id !== '' && !requestedUserId) {
+    return res.status(400).json({ success: false, message: 'user_id 无效' })
+  }
+
+  let applicantUserId = req.user.id
+  if (isSuperAdmin && showAll) {
+    applicantUserId = null
+  }
+  if (requestedUserId) {
+    if (!isSuperAdmin && Number(requestedUserId) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可查看自己的加班记录' })
+    }
+    applicantUserId = requestedUserId
+  }
+
+  const status = normalizeOvertimeRecordStatus(req.query.status)
+  if (req.query.status !== undefined && req.query.status !== '' && !status) {
+    return res.status(400).json({ success: false, message: 'status 无效' })
+  }
+
+  const startDate = req.query.start_date ? normalizeDate(req.query.start_date) : ''
+  if (req.query.start_date && !startDate) {
+    return res.status(400).json({ success: false, message: 'start_date 格式不正确' })
+  }
+  const endDate = req.query.end_date ? normalizeDate(req.query.end_date) : ''
+  if (req.query.end_date && !endDate) {
+    return res.status(400).json({ success: false, message: 'end_date 格式不正确' })
+  }
+
+  try {
+    const rows = await Work.listOvertimeRecords({
+      applicantUserId,
+      status,
+      startDate,
+      endDate,
+    })
+
+    const data = rows.map((row) =>
+      decorateOvertimeRecordRow(row, {
+        currentUserId: req.user.id,
+        isSuperAdmin,
+      }),
+    )
+
+    return res.json({
+      success: true,
+      data: {
+        items: data,
+        filters: {
+          show_all: Boolean(isSuperAdmin && showAll),
+          user_id: applicantUserId || null,
+          status: status || '',
+          start_date: startDate || '',
+          end_date: endDate || '',
+        },
+      },
+    })
+  } catch (err) {
+    console.error('获取加班记录失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const updateOvertimeRecord = async (req, res) => {
+  const overtimeRecordId = toPositiveInt(req.params.id)
+  if (!overtimeRecordId) {
+    return res.status(400).json({ success: false, message: '加班记录 ID 无效' })
+  }
+
+  try {
+    const existing = await Work.findOvertimeRecordById(overtimeRecordId)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '加班记录不存在' })
+    }
+    if (Number(existing.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可编辑自己的加班记录' })
+    }
+    if (String(existing.status || '').toUpperCase() !== Work.OVERTIME_RECORD_STATUSES.PENDING_CONFIRM) {
+      return res.status(400).json({ success: false, message: '仅待确认状态支持编辑' })
+    }
+
+    const overtimeDate = req.body?.overtime_date === undefined
+      ? normalizeDate(existing.overtime_date)
+      : normalizeDate(req.body.overtime_date)
+    if (!overtimeDate) {
+      return res.status(400).json({ success: false, message: '加班时间格式不正确' })
+    }
+
+    const durationHours = req.body?.duration_hours === undefined
+      ? normalizeHours(existing.duration_hours, null)
+      : normalizeHours(req.body.duration_hours, null)
+    if (durationHours === null || durationHours <= 0) {
+      return res.status(400).json({ success: false, message: '加班时长需大于 0 小时' })
+    }
+
+    const reason = req.body?.reason === undefined
+      ? normalizeText(existing.reason, 2000)
+      : normalizeText(req.body.reason, 2000)
+    if (!reason) {
+      return res.status(400).json({ success: false, message: '请填写加班原因' })
+    }
+
+    await Work.updateOvertimeRecord(overtimeRecordId, {
+      overtimeDate,
+      durationHours,
+      reason,
+    })
+
+    const updated = await Work.findOvertimeRecordById(overtimeRecordId)
+    return res.json({
+      success: true,
+      message: '加班记录已更新',
+      data: decorateOvertimeRecordRow(updated, {
+        currentUserId: req.user.id,
+        isSuperAdmin: Boolean(req.userAccess?.is_super_admin),
+      }),
+    })
+  } catch (err) {
+    console.error('更新加班记录失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const deleteOvertimeRecord = async (req, res) => {
+  const overtimeRecordId = toPositiveInt(req.params.id)
+  if (!overtimeRecordId) {
+    return res.status(400).json({ success: false, message: '加班记录 ID 无效' })
+  }
+
+  try {
+    const existing = await Work.findOvertimeRecordById(overtimeRecordId)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '加班记录不存在' })
+    }
+    if (Number(existing.user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ success: false, message: '仅可删除自己的加班记录' })
+    }
+    if (String(existing.status || '').toUpperCase() !== Work.OVERTIME_RECORD_STATUSES.PENDING_CONFIRM) {
+      return res.status(400).json({ success: false, message: '仅待确认状态支持删除' })
+    }
+
+    await Work.deleteOvertimeRecord(overtimeRecordId)
+    return res.json({ success: true, message: '加班记录已删除' })
+  } catch (err) {
+    console.error('删除加班记录失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const confirmOvertimeRecord = async (req, res) => {
+  const overtimeRecordId = toPositiveInt(req.params.id)
+  if (!overtimeRecordId) {
+    return res.status(400).json({ success: false, message: '加班记录 ID 无效' })
+  }
+
+  if (!req.userAccess?.is_super_admin) {
+    return res.status(403).json({ success: false, message: '仅超级管理员可确认加班记录' })
+  }
+
+  try {
+    const existing = await Work.findOvertimeRecordById(overtimeRecordId)
+    if (!existing) {
+      return res.status(404).json({ success: false, message: '加班记录不存在' })
+    }
+    if (String(existing.status || '').toUpperCase() !== Work.OVERTIME_RECORD_STATUSES.PENDING_CONFIRM) {
+      return res.status(400).json({ success: false, message: '该记录已确认' })
+    }
+
+    const affectedRows = await Work.confirmOvertimeRecord(overtimeRecordId, {
+      confirmedBy: req.user.id,
+    })
+    if (affectedRows === 0) {
+      return res.status(400).json({ success: false, message: '该记录状态已更新，请刷新后重试' })
+    }
+
+    const updated = await Work.findOvertimeRecordById(overtimeRecordId)
+    return res.json({
+      success: true,
+      message: '加班记录已确认',
+      data: decorateOvertimeRecordRow(updated, {
+        currentUserId: req.user.id,
+        isSuperAdmin: true,
+      }),
+    })
+  } catch (err) {
+    console.error('确认加班记录失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getMyWeeklyReport = async (req, res) => {
   const { startDate, endDate, error } = resolveWeeklyReportDateRange(req.query.start_date, req.query.end_date)
   if (error) {
@@ -6336,6 +6594,11 @@ module.exports = {
   getMyWorkbench,
   getMyWeeklyReport,
   sendMyWeeklyReport,
+  createOvertimeRecord,
+  listOvertimeRecords,
+  updateOvertimeRecord,
+  deleteOvertimeRecord,
+  confirmOvertimeRecord,
   getOwnerWorkbench,
   getMorningStandupBoard,
   getMorningStandupWeeklyProgress,
