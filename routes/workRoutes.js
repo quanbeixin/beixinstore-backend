@@ -35,6 +35,15 @@ const {
   deleteBugCommentAttachment,
 } = require('../controllers/bugController')
 const {
+  listMyDemandScoreSlots,
+  getMyDemandScoreSlot,
+  submitMyDemandScoreSlot,
+  generateDemandScoreTask,
+  listDemandScoreResults,
+  getDemandScoreResultDetail,
+  listDemandScoreTeamRanking,
+} = require('../controllers/demandScoringController')
+const {
   listWorkItemTypes,
   listDemandPhaseTypes,
   listProjectTemplatePhaseTypes,
@@ -218,6 +227,22 @@ router.post(
 )
 router.get('/efficiency-factor-settings', getEfficiencyFactorSettings)
 router.put('/efficiency-factor-settings', updateEfficiencyFactorSettings)
+
+router.get('/demand-scores/my', authMiddleware.requirePermission('demand.score.view'), listMyDemandScoreSlots)
+router.get('/demand-scores/slots/:slotId', authMiddleware.requirePermission('demand.score.view'), getMyDemandScoreSlot)
+router.post('/demand-scores/slots/:slotId', authMiddleware.requirePermission('demand.score.view'), submitMyDemandScoreSlot)
+router.post(
+  '/demand-scores/demands/:demandId/generate',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  generateDemandScoreTask,
+)
+router.get(
+  '/demand-score-results/ranking',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  listDemandScoreTeamRanking,
+)
+router.get('/demand-score-results/:taskId', authMiddleware.requirePermission('demand.score.result.view'), getDemandScoreResultDetail)
+router.get('/demand-score-results', authMiddleware.requirePermission('demand.score.result.view'), listDemandScoreResults)
 
 router.get('/demands', authMiddleware.requirePermission('demand.view'), listDemands)
 router.get('/demands/views', authMiddleware.requirePermission('demand.view'), listDemandViews)

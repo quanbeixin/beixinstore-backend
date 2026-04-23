@@ -371,6 +371,9 @@ function buildWorkflowGraphFromInstanceRows(rows) {
         meta?.owner_estimate_required ?? meta?.ownerEstimateRequired ?? row?.owner_estimate_required,
         true,
       ),
+      participant_roles: normalizeParticipantRoles(
+        meta?.participant_roles || meta?.participantRoles || row?.participant_roles || row?.participantRoles,
+      ),
       outgoing_keys: Array.isArray(meta?.outgoing_keys)
         ? meta.outgoing_keys.map((item) => normalizeTemplateNodeKey(item)).filter(Boolean)
         : [],
@@ -484,6 +487,7 @@ function normalizeSelectableNode(row, fallbackOrder = 0) {
   if (!nodeKey) return null
   const nodeType = normalizeStatus(row?.node_type, 'TASK')
   if (isSystemNodeType(nodeType)) return null
+  const remarkMeta = parseJsonObject(row?.remark, null)
   return {
     node_key: nodeKey,
     node_name:
@@ -495,6 +499,9 @@ function normalizeSelectableNode(row, fallbackOrder = 0) {
     owner_estimate_required: normalizeOwnerEstimateRequired(
       row?.owner_estimate_required ?? row?.ownerEstimateRequired,
       true,
+    ),
+    participant_roles: normalizeParticipantRoles(
+      row?.participant_roles || row?.participantRoles || remarkMeta?.participant_roles || remarkMeta?.participantRoles,
     ),
   }
 }
@@ -2099,7 +2106,13 @@ const Workflow = {
          WHERE i.biz_type = ?
            AND i.biz_id = ?
          ORDER BY
-           CASE i.status WHEN 'IN_PROGRESS' THEN 0 WHEN 'NOT_STARTED' THEN 1 ELSE 2 END ASC,
+           CASE i.status
+             WHEN 'IN_PROGRESS' THEN 0
+             WHEN 'NOT_STARTED' THEN 1
+             WHEN 'DONE' THEN 2
+             WHEN 'TERMINATED' THEN 3
+             ELSE 4
+           END ASC,
            i.id DESC
          LIMIT 1`,
         [DEMAND_BIZ_TYPE, normalizedDemandId],
@@ -2125,7 +2138,28 @@ const Workflow = {
         .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0))
 
       if (workflowNodes.length > 0) {
-        return workflowNodes
+        const conn = await pool.getConnection()
+        try {
+          const templateGraph = await loadDemandProjectTemplateGraph(conn, normalizedDemandId)
+          const templateNodeRoleMap = new Map(
+            (Array.isArray(templateGraph?.nodes) ? templateGraph.nodes : [])
+              .map((row, index) => normalizeSelectableNode(row, index + 1))
+              .filter(Boolean)
+              .map((node) => [normalizeTemplateNodeKey(node?.node_key), node.participant_roles || []]),
+          )
+
+          return workflowNodes.map((node) => {
+            const participantRoles = normalizeParticipantRoles(node?.participant_roles)
+            if (participantRoles.length > 0) return node
+            const templateRoles = normalizeParticipantRoles(templateNodeRoleMap.get(normalizeTemplateNodeKey(node?.node_key)))
+            return {
+              ...node,
+              participant_roles: templateRoles,
+            }
+          })
+        } finally {
+          conn.release()
+        }
       }
     } catch (err) {
       if (!isWorkflowTableMissingError(err)) throw err
@@ -2594,6 +2628,7 @@ const Workflow = {
           parallel_group_key: graphNode?.parallel_group_key || null,
           join_rule: graphNode?.join_rule || null,
           owner_estimate_required: normalizeOwnerEstimateRequired(graphNode?.owner_estimate_required, true),
+          participant_roles: normalizeParticipantRoles(graphNode?.participant_roles),
           outgoing_keys: graphNode?.outgoing_keys || [],
           incoming_keys: graphNode?.incoming_keys || [],
         }
@@ -3088,6 +3123,7 @@ const Workflow = {
     operatorUserId,
     dueAt = null,
     comment = '',
+    activateTodo = true,
   } = {}) {
     const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
     const normalizedNodeKey = normalizeText(nodeKey, 64).toUpperCase()
@@ -3140,7 +3176,7 @@ const Workflow = {
         throw err
       }
 
-      if (targetNode.status === NODE_STATUS.TODO) {
+      if (targetNode.status === NODE_STATUS.TODO && activateTodo !== false) {
         await conn.query(
           `UPDATE wf_process_instance_nodes
            SET status = ?, started_at = COALESCE(started_at, NOW())

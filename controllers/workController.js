@@ -3,6 +3,7 @@ const User = require('../models/User')
 const Workflow = require('../models/Workflow')
 const ConfigDict = require('../models/ConfigDict')
 const NotificationEvent = require('../models/NotificationEvent')
+const DemandScoring = require('../models/DemandScoring')
 const pool = require('../utils/db')
 const { sendNotification, createFeishuDemandChat } = require('../utils/notificationSender')
 const {
@@ -62,6 +63,8 @@ const QUICK_ADD_DEFAULT_ITEM_TYPE_KEYS = Array.from(
 )
 const DAILY_ACTUAL_MAX_LIMIT_HOURS = 8.5
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
+const PROJECT_MANAGER_ROLE_KEY = 'PROJECT_MANAGER'
+const DEFAULT_PROJECT_MANAGER_USER_ID = 1
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -770,6 +773,26 @@ function normalizeParticipantRoleUserMapFromBody(value, participantRoles = []) {
   return { ok: true, value: result }
 }
 
+function syncProjectManagerParticipantRole(participantRoles = [], participantRoleUserMap = {}, projectManager = null) {
+  const roles = normalizeParticipantRoles(participantRoles)
+  if (!roles.includes(PROJECT_MANAGER_ROLE_KEY)) {
+    roles.push(PROJECT_MANAGER_ROLE_KEY)
+  }
+
+  const roleMap = normalizeParticipantRoleUserMapFromBody(participantRoleUserMap || {}, roles).value || {}
+  const projectManagerId = toPositiveInt(projectManager)
+  if (projectManagerId) {
+    roleMap[PROJECT_MANAGER_ROLE_KEY] = [projectManagerId]
+  } else {
+    delete roleMap[PROJECT_MANAGER_ROLE_KEY]
+  }
+
+  return {
+    participantRoles: roles,
+    participantRoleUserMap: roleMap,
+  }
+}
+
 async function resolveOpenIdsByUserIds(userIds = []) {
   const normalizedUserIds = Array.from(
     new Set(
@@ -811,6 +834,16 @@ function validateTemplateParticipantRoles(template, participantRoles = []) {
 function areStringArraysEqual(left = [], right = []) {
   if (left.length !== right.length) return false
   return left.every((item, index) => String(item || '') === String(right[index] || ''))
+}
+
+function areStringArraySetsEqual(left = [], right = []) {
+  const normalizedLeft = Array.from(
+    new Set((Array.isArray(left) ? left : []).map((item) => String(item || '').trim()).filter(Boolean)),
+  ).sort()
+  const normalizedRight = Array.from(
+    new Set((Array.isArray(right) ? right : []).map((item) => String(item || '').trim()).filter(Boolean)),
+  ).sort()
+  return areStringArraysEqual(normalizedLeft, normalizedRight)
 }
 
 function normalizePriorityOrder(value) {
@@ -1108,6 +1141,7 @@ const listDemandWorkflowNodeOptions = async (req, res) => {
         sort_order: item.sort_order,
         status: item.status || '',
         owner_estimate_required: normalizeOwnerEstimateRequired(item.owner_estimate_required, true),
+        participant_roles: normalizeParticipantRoles(item.participant_roles || []),
       })),
     })
   } catch (err) {
@@ -2024,8 +2058,13 @@ const createDemand = async (req, res) => {
   const projectManagerRaw = req.body.project_manager
   const projectManager =
     projectManagerRaw === undefined || projectManagerRaw === null || projectManagerRaw === ''
-      ? null
+      ? DEFAULT_PROJECT_MANAGER_USER_ID
       : toPositiveInt(projectManagerRaw)
+  const syncedParticipantRolePayload = syncProjectManagerParticipantRole(
+    participantRolesResult.ok ? participantRolesResult.value || [] : [],
+    participantRoleUserMapResult.ok ? participantRoleUserMapResult.value || {} : {},
+    projectManager,
+  )
   const healthStatus = normalizeDemandHealthStatus(req.body.health_status)
   const parsedGroupChatMode = normalizeDemandGroupChatMode(req.body.group_chat_mode)
   const groupChatMode = parsedGroupChatMode === undefined ? 'none' : parsedGroupChatMode
@@ -2076,7 +2115,7 @@ const createDemand = async (req, res) => {
   if (!participantRolesResult.ok) {
     return res.status(400).json({ success: false, message: 'participant_roles 必须是数组或 JSON 数组字符串' })
   }
-  if ((participantRolesResult.value || []).length === 0) {
+  if ((syncedParticipantRolePayload.participantRoles || []).length === 0) {
     return res.status(400).json({ success: false, message: '请至少选择一个需求涉及角色' })
   }
   if (!participantRoleUserMapResult.ok) {
@@ -2151,7 +2190,7 @@ const createDemand = async (req, res) => {
       if (!template) {
         return res.status(400).json({ success: false, message: 'template_id 对应模板不存在或未启用' })
       }
-      if (!validateTemplateParticipantRoles(template, participantRolesResult.value || [])) {
+      if (!validateTemplateParticipantRoles(template, syncedParticipantRolePayload.participantRoles || [])) {
         return res.status(400).json({ success: false, message: '当前参与角色未命中模板节点，请调整参与角色或模板配置' })
       }
     }
@@ -2169,8 +2208,8 @@ const createDemand = async (req, res) => {
       ownerUserId,
       managementMode,
       templateId,
-      participantRoles: participantRolesResult.value || [],
-      participantRoleUserMap: participantRoleUserMapResult.value || {},
+      participantRoles: syncedParticipantRolePayload.participantRoles || [],
+      participantRoleUserMap: syncedParticipantRolePayload.participantRoleUserMap || {},
       projectManager,
       healthStatus,
       groupChatMode,
@@ -2213,6 +2252,14 @@ const createDemand = async (req, res) => {
     await refreshDemandHourSummaryQuietly(finalDemandId)
     let created = await Work.findDemandById(finalDemandId)
 
+    if (normalizeStatus(status) === 'DONE') {
+      try {
+        await DemandScoring.ensureTaskForDemand(finalDemandId, { operatorUserId: req.user.id })
+      } catch (scoreErr) {
+        console.error('需求创建后生成评分任务失败:', scoreErr)
+      }
+    }
+
     let autoGroupChatWarning = ''
     let autoGroupChatResult = null
     if (groupChatMode === 'auto') {
@@ -2222,7 +2269,7 @@ const createDemand = async (req, res) => {
       } else {
         const roleUserIds = Array.from(
           new Set(
-            Object.values(participantRoleUserMapResult.value || {})
+            Object.values(syncedParticipantRolePayload.participantRoleUserMap || {})
               .flatMap((item) => (Array.isArray(item) ? item : [item]))
               .map((item) => toPositiveInt(item))
               .filter(Boolean),
@@ -2405,7 +2452,16 @@ const updateDemand = async (req, res) => {
       return res.status(400).json({ success: false, message: 'project_manager 无效' })
     }
     const projectManager =
-      parsedProjectManager === undefined ? toPositiveInt(existing.project_manager) : parsedProjectManager
+      parsedProjectManager === undefined
+        ? toPositiveInt(existing.project_manager) || DEFAULT_PROJECT_MANAGER_USER_ID
+        : parsedProjectManager
+    const syncedParticipantRolePayload = syncProjectManagerParticipantRole(
+      participantRoles || [],
+      participantRoleUserMap || {},
+      projectManager,
+    )
+    const finalParticipantRoles = syncedParticipantRolePayload.participantRoles || []
+    const finalParticipantRoleUserMap = syncedParticipantRolePayload.participantRoleUserMap || {}
     const parsedBusinessGroupCode = normalizeBusinessGroupCode(req.body.business_group_code)
     const businessGroupCode =
       parsedBusinessGroupCode === undefined ? existing.business_group_code : parsedBusinessGroupCode
@@ -2511,7 +2567,7 @@ const updateDemand = async (req, res) => {
       if (!template) {
         return res.status(400).json({ success: false, message: 'template_id 对应模板不存在或未启用' })
       }
-      if (!validateTemplateParticipantRoles(template, participantRoles || [])) {
+      if (!validateTemplateParticipantRoles(template, finalParticipantRoles || [])) {
         return res.status(400).json({ success: false, message: '当前参与角色未命中模板节点，请调整参与角色或模板配置' })
       }
     }
@@ -2527,9 +2583,9 @@ const updateDemand = async (req, res) => {
       ? null
       : req.body.completed_at || existing.completed_at || new Date()
     const normalizedExistingParticipantRoles = normalizeParticipantRoles(existing.participant_roles || [])
-    const normalizedNextParticipantRoles = normalizeParticipantRoles(participantRoles || [])
+    const normalizedNextParticipantRoles = normalizeParticipantRoles(finalParticipantRoles || [])
     const templateChanged = Number(existing.template_id || 0) !== Number(templateId || 0)
-    const participantRolesChanged = !areStringArraysEqual(
+    const participantRolesChanged = !areStringArraySetsEqual(
       normalizedExistingParticipantRoles,
       normalizedNextParticipantRoles,
     )
@@ -2539,8 +2595,8 @@ const updateDemand = async (req, res) => {
       ownerUserId,
       managementMode,
       templateId: templateId || null,
-      participantRoles: participantRoles || [],
-      participantRoleUserMap: participantRoleUserMap || {},
+      participantRoles: finalParticipantRoles || [],
+      participantRoleUserMap: finalParticipantRoleUserMap || {},
       projectManager: projectManager || null,
       healthStatus,
       groupChatMode,
@@ -2567,7 +2623,7 @@ const updateDemand = async (req, res) => {
     let workflowSyncNotice = ''
     let workflowAutoReplaced = false
 
-    if (templateChanged || participantRolesChanged) {
+    if ((templateChanged || participantRolesChanged) && isDemandOpen(status)) {
       try {
         await Workflow.replaceDemandWorkflowWithLatestTemplate({
           demandId,
@@ -2602,6 +2658,8 @@ const updateDemand = async (req, res) => {
           console.error('需求更新后自动替换流程失败:', workflowErr)
         }
       }
+    } else if (templateChanged || participantRolesChanged) {
+      workflowSyncNotice = '需求已完结，本次仅保存角色信息，未自动重建流程'
     }
 
     await refreshDemandHourSummaryQuietly(demandId)
@@ -2635,6 +2693,14 @@ const updateDemand = async (req, res) => {
           to_status: nextStatus,
         },
       })
+    }
+
+    if (prevStatus !== 'DONE' && nextStatus === 'DONE') {
+      try {
+        await DemandScoring.ensureTaskForDemand(demandId, { operatorUserId: req.user.id })
+      } catch (scoreErr) {
+        console.error('需求完成后生成评分任务失败:', scoreErr)
+      }
     }
 
     return res.json({
@@ -4580,6 +4646,9 @@ const getDemandWorkflow = async (req, res) => {
     }
 
     let workflow = await Workflow.getDemandWorkflowByDemandId(demandId)
+    if (!workflow && !isDemandOpen(demand.status)) {
+      return res.json({ success: true, data: null })
+    }
     if (!workflow) {
       workflow = await Workflow.initDemandWorkflow({
         demandId,
@@ -4610,6 +4679,7 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
   const expectedStartDateRaw = req.body.expected_start_date
   const expectedStartDate = normalizeDate(expectedStartDateRaw)
   const comment = normalizeText(req.body.comment, 500)
+  const activateTodo = req.body.activate_todo !== false
 
   if (assigneeUserIds.length === 0) {
     return res.status(400).json({ success: false, message: '请选择节点负责人' })
@@ -4652,6 +4722,7 @@ const assignDemandWorkflowCurrentNode = async (req, res) => {
       dueAt,
       expectedStartDate,
       comment,
+      activateTodo,
     })
     await refreshDemandHourSummaryQuietly(demandId)
 

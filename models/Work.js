@@ -546,6 +546,85 @@ function isMissingTableError(err) {
   return err && (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146)
 }
 
+async function cleanupDemandScoringArtifacts(conn, demandId) {
+  const normalizedDemandId = String(demandId || '').trim().toUpperCase()
+  const stats = {
+    deleted_demand_score_records: 0,
+    deleted_demand_score_slots: 0,
+    deleted_demand_score_subjects: 0,
+    deleted_demand_score_tasks: 0,
+  }
+  if (!normalizedDemandId) return stats
+
+  let taskIds = []
+  try {
+    const [taskRows] = await conn.query(
+      `SELECT id
+       FROM demand_score_tasks
+       WHERE demand_id = ?
+       FOR UPDATE`,
+      [normalizedDemandId],
+    )
+    taskIds = (taskRows || [])
+      .map((item) => Number(item?.id))
+      .filter((id) => Number.isInteger(id) && id > 0)
+  } catch (err) {
+    if (isMissingTableError(err)) return stats
+    throw err
+  }
+
+  if (taskIds.length === 0) {
+    return stats
+  }
+  const placeholders = taskIds.map(() => '?').join(', ')
+
+  try {
+    const [recordResult] = await conn.query(
+      `DELETE FROM demand_score_records
+       WHERE task_id IN (${placeholders})`,
+      taskIds,
+    )
+    stats.deleted_demand_score_records = Number(recordResult?.affectedRows || 0)
+  } catch (err) {
+    if (!isMissingTableError(err)) throw err
+  }
+
+  try {
+    const [slotResult] = await conn.query(
+      `DELETE FROM demand_score_slots
+       WHERE task_id IN (${placeholders})`,
+      taskIds,
+    )
+    stats.deleted_demand_score_slots = Number(slotResult?.affectedRows || 0)
+  } catch (err) {
+    if (!isMissingTableError(err)) throw err
+  }
+
+  try {
+    const [subjectResult] = await conn.query(
+      `DELETE FROM demand_score_subjects
+       WHERE task_id IN (${placeholders})`,
+      taskIds,
+    )
+    stats.deleted_demand_score_subjects = Number(subjectResult?.affectedRows || 0)
+  } catch (err) {
+    if (!isMissingTableError(err)) throw err
+  }
+
+  try {
+    const [taskDeleteResult] = await conn.query(
+      `DELETE FROM demand_score_tasks
+       WHERE id IN (${placeholders})`,
+      taskIds,
+    )
+    stats.deleted_demand_score_tasks = Number(taskDeleteResult?.affectedRows || 0)
+  } catch (err) {
+    if (!isMissingTableError(err)) throw err
+  }
+
+  return stats
+}
+
 function parseExtraJson(raw) {
   if (!raw) return null
   if (typeof raw === 'object') return raw
@@ -3389,6 +3468,7 @@ const Work = {
   },
 
   async deleteDemand(demandId) {
+    const normalizedDemandId = String(demandId || '').trim().toUpperCase()
     const relatedLogCount = await this.countLogsByDemandId(demandId)
 
     if (relatedLogCount > 0) {
@@ -3398,7 +3478,7 @@ const Work = {
            status = 'CANCELLED',
            completed_at = COALESCE(completed_at, NOW())
          WHERE id = ?`,
-        [demandId],
+        [normalizedDemandId],
       )
       return {
         mode: 'ARCHIVED',
@@ -3407,11 +3487,23 @@ const Work = {
       }
     }
 
-    const [result] = await pool.query('DELETE FROM work_demands WHERE id = ?', [demandId])
-    return {
-      mode: 'DELETED',
-      affected_rows: Number(result?.affectedRows || 0),
-      related_log_count: 0,
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const scoringStats = await cleanupDemandScoringArtifacts(conn, normalizedDemandId)
+      const [result] = await conn.query('DELETE FROM work_demands WHERE id = ?', [normalizedDemandId])
+      await conn.commit()
+      return {
+        mode: 'DELETED',
+        affected_rows: Number(result?.affectedRows || 0),
+        related_log_count: 0,
+        ...scoringStats,
+      }
+    } catch (err) {
+      await conn.rollback()
+      throw err
+    } finally {
+      conn.release()
     }
   },
 
@@ -3868,6 +3960,10 @@ const Work = {
         demand_id: demandId,
         deleted_work_logs: 0,
         deleted_demand_phases: 0,
+        deleted_demand_score_records: 0,
+        deleted_demand_score_slots: 0,
+        deleted_demand_score_subjects: 0,
+        deleted_demand_score_tasks: 0,
         deleted_workflow_instances: 0,
         deleted_workflow_nodes: 0,
         deleted_workflow_tasks: 0,
@@ -3884,6 +3980,12 @@ const Work = {
       } catch (err) {
         if (!isMissingTableError(err)) throw err
       }
+
+      const scoringStats = await cleanupDemandScoringArtifacts(conn, demandId)
+      stats.deleted_demand_score_records = scoringStats.deleted_demand_score_records
+      stats.deleted_demand_score_slots = scoringStats.deleted_demand_score_slots
+      stats.deleted_demand_score_subjects = scoringStats.deleted_demand_score_subjects
+      stats.deleted_demand_score_tasks = scoringStats.deleted_demand_score_tasks
 
       let workflowInstanceIds = []
       try {
