@@ -96,7 +96,11 @@ const generateDemandScoreTask = async (req, res) => {
     if (err?.code === 'DEMAND_NOT_FOUND') {
       return res.status(404).json({ success: false, message: err.message })
     }
-    if (err?.code === 'DEMAND_NOT_DONE' || err?.code === 'DEMAND_NOT_IN_SCORING_WINDOW') {
+    if (
+      err?.code === 'DEMAND_NOT_DONE' ||
+      err?.code === 'DEMAND_NOT_IN_SCORING_WINDOW' ||
+      err?.code === 'DEMAND_ACTUAL_HOURS_ZERO'
+    ) {
       return res.status(400).json({ success: false, message: err.message })
     }
     console.error('生成需求评分任务失败:', err)

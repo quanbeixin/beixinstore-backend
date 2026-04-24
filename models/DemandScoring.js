@@ -129,6 +129,12 @@ function roundScore(value) {
   return Math.round(num * 100) / 100
 }
 
+function roundHours1(value) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return 0
+  return Math.round(num * 10) / 10
+}
+
 function normalizeText(value, maxLen = 255) {
   return String(value || '').trim().slice(0, maxLen)
 }
@@ -204,6 +210,18 @@ function isDemandEligibleForScoring(demand = {}) {
   const completedDate = getDemandScoringCompletedDate(demand)
   if (!completedDate) return false
   return completedDate >= SCORING_COMPLETED_CUTOFF_DATE
+}
+
+function getDemandScoringActualHours(demand = {}) {
+  const preferredValue = Number(demand?.scoring_actual_hours)
+  if (Number.isFinite(preferredValue)) return roundHours1(preferredValue)
+  const fallbackValue = Number(demand?.overall_actual_hours)
+  if (Number.isFinite(fallbackValue)) return roundHours1(fallbackValue)
+  return 0
+}
+
+function isDemandEligibleByActualHours(demand = {}) {
+  return getDemandScoringActualHours(demand) > 0
 }
 
 function scoreOverall(record) {
@@ -322,6 +340,29 @@ async function getDemandForScoring(demandId) {
        d.project_manager,
        COALESCE(NULLIF(pm.real_name, ''), pm.username) AS project_manager_name,
        d.participant_role_user_map_json,
+       d.overall_actual_hours,
+       ROUND(
+         COALESCE(
+           d.overall_actual_hours,
+           (
+             SELECT
+               COALESCE(
+                 SUM(
+                   CASE
+                     WHEN UPPER(TRIM(COALESCE(wl.log_status, 'IN_PROGRESS'))) <> 'CANCELLED'
+                       THEN COALESCE(wl.actual_hours, 0)
+                     ELSE 0
+                   END
+                 ),
+                 0
+               )
+             FROM work_logs wl
+             WHERE wl.demand_id COLLATE utf8mb4_unicode_ci = d.id COLLATE utf8mb4_unicode_ci
+           ),
+           0
+         ),
+         1
+       ) AS scoring_actual_hours,
        DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
        d.completed_at,
        d.created_at
@@ -580,6 +621,56 @@ async function attachParticipationReference(slotRows = []) {
       actual_worklog_count: Number(reference.actual_worklog_count || 0),
     }
   })
+}
+
+async function deleteTaskCascadeByDemandId(conn, demandId) {
+  const normalizedDemandId = normalizeDemandId(demandId)
+  if (!normalizedDemandId) {
+    return {
+      demand_id: normalizedDemandId,
+      task_id: 0,
+      deleted: false,
+      deleted_records: 0,
+      deleted_slots: 0,
+      deleted_subjects: 0,
+      deleted_tasks: 0,
+    }
+  }
+
+  const [taskRows] = await conn.query(
+    `SELECT id
+     FROM demand_score_tasks
+     WHERE demand_id = ?
+     LIMIT 1`,
+    [normalizedDemandId],
+  )
+  const taskId = Number(taskRows?.[0]?.id || 0)
+  if (!taskId) {
+    return {
+      demand_id: normalizedDemandId,
+      task_id: 0,
+      deleted: false,
+      deleted_records: 0,
+      deleted_slots: 0,
+      deleted_subjects: 0,
+      deleted_tasks: 0,
+    }
+  }
+
+  const [recordResult] = await conn.query('DELETE FROM demand_score_records WHERE task_id = ?', [taskId])
+  const [slotResult] = await conn.query('DELETE FROM demand_score_slots WHERE task_id = ?', [taskId])
+  const [subjectResult] = await conn.query('DELETE FROM demand_score_subjects WHERE task_id = ?', [taskId])
+  const [taskResult] = await conn.query('DELETE FROM demand_score_tasks WHERE id = ?', [taskId])
+
+  return {
+    demand_id: normalizedDemandId,
+    task_id: taskId,
+    deleted: Number(taskResult?.affectedRows || 0) > 0,
+    deleted_records: Number(recordResult?.affectedRows || 0),
+    deleted_slots: Number(slotResult?.affectedRows || 0),
+    deleted_subjects: Number(subjectResult?.affectedRows || 0),
+    deleted_tasks: Number(taskResult?.affectedRows || 0),
+  }
 }
 
 async function createTaskRow(conn, demand, operatorUserId) {
@@ -942,6 +1033,38 @@ const DemandScoring = {
   DIMENSION_WEIGHTS,
   SCORING_COMPLETED_CUTOFF_DATE,
 
+  async purgeTaskByDemand(demandId, { conn = null } = {}) {
+    const normalizedDemandId = normalizeDemandId(demandId)
+    if (!normalizedDemandId) {
+      return {
+        demand_id: normalizedDemandId,
+        task_id: 0,
+        deleted: false,
+        deleted_records: 0,
+        deleted_slots: 0,
+        deleted_subjects: 0,
+        deleted_tasks: 0,
+      }
+    }
+
+    if (conn) {
+      return deleteTaskCascadeByDemandId(conn, normalizedDemandId)
+    }
+
+    const ownedConn = await pool.getConnection()
+    try {
+      await ownedConn.beginTransaction()
+      const result = await deleteTaskCascadeByDemandId(ownedConn, normalizedDemandId)
+      await ownedConn.commit()
+      return result
+    } catch (error) {
+      await ownedConn.rollback()
+      throw error
+    } finally {
+      ownedConn.release()
+    }
+  },
+
   async ensureTaskForDemand(demandId, { operatorUserId = null, forceRebuild = false } = {}) {
     const demand = await getDemandForScoring(demandId)
     if (!demand) {
@@ -957,6 +1080,11 @@ const DemandScoring = {
     if (!isDemandEligibleForScoring(demand)) {
       const err = new Error(`仅完成时间不早于 ${SCORING_COMPLETED_CUTOFF_DATE} 的需求进入评分范围`)
       err.code = 'DEMAND_NOT_IN_SCORING_WINDOW'
+      throw err
+    }
+    if (!isDemandEligibleByActualHours(demand)) {
+      const err = new Error('需求总实际工时为 0，暂不进入评分体系')
+      err.code = 'DEMAND_ACTUAL_HOURS_ZERO'
       throw err
     }
 

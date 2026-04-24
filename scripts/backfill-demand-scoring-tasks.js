@@ -11,21 +11,57 @@ const DemandScoring = require('../models/DemandScoring')
 
 const FORCE_REBUILD =
   process.argv.includes('--force-rebuild') || String(process.env.FORCE_REBUILD || '').trim() === 'true'
+const PURGE_INELIGIBLE =
+  process.argv.includes('--purge-ineligible') || String(process.env.PURGE_INELIGIBLE || '').trim() === 'true'
 
 async function listEligibleDemands() {
   const [rows] = await pool.query(
     `SELECT
-       id,
-       name,
-       DATE_FORMAT(expected_release_date, '%Y-%m-%d') AS expected_release_date,
-       DATE_FORMAT(completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at
-     FROM work_demands
-     WHERE status = 'DONE'
-       AND DATE(COALESCE(completed_at, updated_at, created_at)) >= ?
-     ORDER BY COALESCE(completed_at, updated_at, created_at) ASC, id ASC`,
+       d.id,
+       d.name,
+       DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
+       DATE_FORMAT(d.completed_at, '%Y-%m-%d %H:%i:%s') AS completed_at,
+       ROUND(
+         COALESCE(
+           d.overall_actual_hours,
+           (
+             SELECT
+               COALESCE(
+                 SUM(
+                   CASE
+                     WHEN UPPER(TRIM(COALESCE(wl.log_status, 'IN_PROGRESS'))) <> 'CANCELLED'
+                       THEN COALESCE(wl.actual_hours, 0)
+                     ELSE 0
+                   END
+                 ),
+                 0
+               )
+             FROM work_logs wl
+             WHERE wl.demand_id COLLATE utf8mb4_unicode_ci = d.id COLLATE utf8mb4_unicode_ci
+           ),
+           0
+         ),
+         1
+       ) AS scoring_actual_hours
+     FROM work_demands d
+     WHERE d.status = 'DONE'
+       AND DATE(COALESCE(d.completed_at, d.updated_at, d.created_at)) >= ?
+     HAVING scoring_actual_hours > 0
+     ORDER BY COALESCE(d.completed_at, d.updated_at, d.created_at) ASC, d.id ASC`,
     [DemandScoring.SCORING_COMPLETED_CUTOFF_DATE],
   )
   return rows
+}
+
+async function listTaskDemandIds() {
+  const [rows] = await pool.query(
+    `SELECT DISTINCT demand_id
+     FROM demand_score_tasks
+     ORDER BY demand_id ASC`,
+  )
+  return rows
+    .map((row) => String(row?.demand_id || '').trim().toUpperCase())
+    .filter(Boolean)
 }
 
 async function getTaskSummary(demandId) {
@@ -50,6 +86,9 @@ async function getTaskSummary(demandId) {
 async function main() {
   const demands = await listEligibleDemands()
   const results = []
+  const eligibleDemandIdSet = new Set(
+    demands.map((demand) => String(demand?.id || '').trim().toUpperCase()).filter(Boolean),
+  )
 
   for (const demand of demands) {
     try {
@@ -63,6 +102,7 @@ async function main() {
         demand_name: demand.name,
         expected_release_date: demand.expected_release_date,
         completed_at: demand.completed_at,
+        scoring_actual_hours: Number(demand?.scoring_actual_hours || 0),
         created: Boolean(ensureResult?.created),
         rebuilt: Boolean(ensureResult?.rebuilt),
         task_id: Number(summary?.id || ensureResult?.task_id || 0),
@@ -77,9 +117,32 @@ async function main() {
         demand_name: demand.name,
         expected_release_date: demand.expected_release_date,
         completed_at: demand.completed_at,
+        scoring_actual_hours: Number(demand?.scoring_actual_hours || 0),
         error_code: error?.code || 'UNKNOWN',
         error_message: error?.message || String(error),
       })
+    }
+  }
+
+  const purgedTasks = []
+  if (PURGE_INELIGIBLE) {
+    const existingTaskDemandIds = await listTaskDemandIds()
+    for (const demandId of existingTaskDemandIds) {
+      if (eligibleDemandIdSet.has(demandId)) continue
+      try {
+        const purgeResult = await DemandScoring.purgeTaskByDemand(demandId)
+        purgedTasks.push({
+          demand_id: demandId,
+          ...purgeResult,
+        })
+      } catch (error) {
+        purgedTasks.push({
+          demand_id: demandId,
+          deleted: false,
+          error_code: error?.code || 'UNKNOWN',
+          error_message: error?.message || String(error),
+        })
+      }
     }
   }
 
@@ -88,8 +151,11 @@ async function main() {
       {
         success: true,
         force_rebuild: FORCE_REBUILD,
+        purge_ineligible: PURGE_INELIGIBLE,
         demand_count: demands.length,
         results,
+        purged_task_count: purgedTasks.filter((item) => item.deleted).length,
+        purged_tasks: purgedTasks,
       },
       null,
       2,
