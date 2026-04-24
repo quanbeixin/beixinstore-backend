@@ -65,6 +65,7 @@ const DAILY_ACTUAL_MAX_LIMIT_HOURS = 8.5
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 const PROJECT_MANAGER_ROLE_KEY = 'PROJECT_MANAGER'
 const DEFAULT_PROJECT_MANAGER_USER_ID = 1
+const NEW_CAPABILITY_RESEARCH_TEMPLATE_ID = 4
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -773,15 +774,24 @@ function normalizeParticipantRoleUserMapFromBody(value, participantRoles = []) {
   return { ok: true, value: result }
 }
 
-function syncProjectManagerParticipantRole(participantRoles = [], participantRoleUserMap = {}, projectManager = null) {
+function shouldForceProjectManagerParticipantRole(templateId) {
+  return Number(templateId) !== NEW_CAPABILITY_RESEARCH_TEMPLATE_ID
+}
+
+function syncProjectManagerParticipantRole(
+  participantRoles = [],
+  participantRoleUserMap = {},
+  projectManager = null,
+  { forceIncludeProjectManagerRole = true } = {},
+) {
   const roles = normalizeParticipantRoles(participantRoles)
-  if (!roles.includes(PROJECT_MANAGER_ROLE_KEY)) {
+  if (forceIncludeProjectManagerRole && !roles.includes(PROJECT_MANAGER_ROLE_KEY)) {
     roles.push(PROJECT_MANAGER_ROLE_KEY)
   }
 
   const roleMap = normalizeParticipantRoleUserMapFromBody(participantRoleUserMap || {}, roles).value || {}
   const projectManagerId = toPositiveInt(projectManager)
-  if (projectManagerId) {
+  if (roles.includes(PROJECT_MANAGER_ROLE_KEY) && projectManagerId) {
     roleMap[PROJECT_MANAGER_ROLE_KEY] = [projectManagerId]
   } else {
     delete roleMap[PROJECT_MANAGER_ROLE_KEY]
@@ -2064,6 +2074,9 @@ const createDemand = async (req, res) => {
     participantRolesResult.ok ? participantRolesResult.value || [] : [],
     participantRoleUserMapResult.ok ? participantRoleUserMapResult.value || {} : {},
     projectManager,
+    {
+      forceIncludeProjectManagerRole: shouldForceProjectManagerParticipantRole(templateId),
+    },
   )
   const healthStatus = normalizeDemandHealthStatus(req.body.health_status)
   const parsedGroupChatMode = normalizeDemandGroupChatMode(req.body.group_chat_mode)
@@ -2459,6 +2472,9 @@ const updateDemand = async (req, res) => {
       participantRoles || [],
       participantRoleUserMap || {},
       projectManager,
+      {
+        forceIncludeProjectManagerRole: shouldForceProjectManagerParticipantRole(templateId),
+      },
     )
     const finalParticipantRoles = syncedParticipantRolePayload.participantRoles || []
     const finalParticipantRoleUserMap = syncedParticipantRolePayload.participantRoleUserMap || {}
