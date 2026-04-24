@@ -38,6 +38,7 @@ const DEFAULT_ACTION_REQUIREMENTS = Object.freeze({
 
 const BUG_STATUS_CHANGE_WATCHER_RULE_CODE = 'sys_bug_status_change_watcher_default'
 const BUG_STATUS_CHANGE_WATCHER_BUSINESS_ROLE = 'bug_watcher'
+const BUG_ATTACHMENT_MAX_FILE_SIZE = 50 * 1024 * 1024
 let bugStatusChangeWatcherRuleEnsured = false
 
 function toPositiveInt(value) {
@@ -105,6 +106,11 @@ function isNoFixTransition({ targetStatusCode = '', actionKey = '' } = {}) {
 function normalizeBooleanFlag(value) {
   if (value === true || value === 1 || value === '1') return true
   return String(value || '').trim().toLowerCase() === 'true'
+}
+
+function getBugAttachmentMaxFileSize(ossConfig = null) {
+  const configuredMaxFileSize = Number(ossConfig?.maxFileSize || 0)
+  return Math.max(1024, configuredMaxFileSize, BUG_ATTACHMENT_MAX_FILE_SIZE)
 }
 
 function isLocalHost(hostname = '') {
@@ -320,12 +326,13 @@ function buildBugAttachmentPolicyPayload({
     }
   }
 
+  const maxFileSize = getBugAttachmentMaxFileSize(oss)
   const normalizedFileSize = Number(fileSize || 0)
-  if (normalizedFileSize > 0 && normalizedFileSize > oss.maxFileSize) {
+  if (normalizedFileSize > 0 && normalizedFileSize > maxFileSize) {
     return {
       ok: false,
       status: 400,
-      message: `附件大小不能超过 ${Math.ceil(oss.maxFileSize / 1024 / 1024)}MB`,
+      message: `附件大小不能超过 ${Math.ceil(maxFileSize / 1024 / 1024)}MB`,
     }
   }
 
@@ -342,7 +349,7 @@ function buildBugAttachmentPolicyPayload({
     endpoint: oss.endpoint,
     objectKey,
     expireSeconds: oss.expireSeconds,
-    maxFileSize: oss.maxFileSize,
+    maxFileSize,
     successActionStatus: '200',
     securityToken: oss.securityToken,
   })
@@ -361,7 +368,7 @@ function buildBugAttachmentPolicyPayload({
       region: oss.region,
       object_key: objectKey,
       object_url: objectUrl || null,
-      max_file_size: oss.maxFileSize,
+      max_file_size: maxFileSize,
       host: policyPayload.host,
       expire_at: policyPayload.expire_at,
       fields: policyPayload.fields,
