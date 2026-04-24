@@ -95,6 +95,13 @@ function normalizeActionKey(value) {
     .slice(0, 50)
 }
 
+function isNoFixTransition({ targetStatusCode = '', actionKey = '' } = {}) {
+  const normalizedStatus = normalizeCode(targetStatusCode)
+  const normalizedAction = normalizeActionKey(actionKey)
+  if (normalizedStatus === 'NO_FIX') return true
+  return normalizedAction === 'no_fix' || normalizedAction === 'no-fix' || normalizedAction === 'nofix'
+}
+
 function normalizeBooleanFlag(value) {
   if (value === true || value === 1 || value === '1') return true
   return String(value || '').trim().toLowerCase() === 'true'
@@ -1150,12 +1157,21 @@ async function handleTransition(
           requireFixSolution: Number(workflowRule.require_fix_solution) === 1,
         }
       : defaultRequirements
+    const finalRequirements = isNoFixTransition({
+      targetStatusCode: targetStatus,
+      actionKey: normalizedActionKey,
+    })
+      ? {
+          ...resolvedRequirements,
+          requireFixSolution: false,
+        }
+      : resolvedRequirements
 
     const payload = buildTransitionPayload(targetStatus, req)
-    if (resolvedRequirements.requireFixSolution && !payload.fixSolution) {
+    if (finalRequirements.requireFixSolution && !payload.fixSolution) {
       return res.status(400).json({ success: false, message: '修复方案不能为空' })
     }
-    if (resolvedRequirements.requireRemark && !payload.remark) {
+    if (finalRequirements.requireRemark && !payload.remark) {
       return res.status(400).json({ success: false, message: '备注不能为空' })
     }
 
