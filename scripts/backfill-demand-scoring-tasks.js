@@ -45,9 +45,9 @@ async function listEligibleDemands() {
        ) AS scoring_actual_hours
      FROM work_demands d
      WHERE d.status = 'DONE'
-       AND DATE(COALESCE(d.completed_at, d.updated_at, d.created_at)) >= ?
+       AND DATE(d.expected_release_date) >= ?
      HAVING scoring_actual_hours > 0
-     ORDER BY COALESCE(d.completed_at, d.updated_at, d.created_at) ASC, d.id ASC`,
+     ORDER BY d.expected_release_date ASC, d.id ASC`,
     [DemandScoring.SCORING_COMPLETED_CUTOFF_DATE],
   )
   return rows

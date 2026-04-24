@@ -103,12 +103,24 @@ const OWNER_IS_PM_ROLE_WEIGHTS = Object.freeze({
   [ROLE_KEYS.PROJECT_MANAGER]: 20,
   [ROLE_KEYS.COLLABORATOR]: 20,
 })
-const SCORING_COMPLETED_CUTOFF_DATE = '2026-04-13'
-
-const DIMENSION_WEIGHTS = Object.freeze({
-  delivery_score: 0.5,
-  collaboration_score: 0.3,
-  responsibility_score: 0.2,
+const SCORING_COMPLETED_CUTOFF_DATE = '2026-04-20'
+const ROLE_SCORE_ITEMS = Object.freeze({
+  [ROLE_KEYS.DEMAND_OWNER]: {
+    item_key: 'DELIVERY_TIMELINESS',
+    item_label: '完成质量&完成时间',
+  },
+  [ROLE_KEYS.DIRECT_OWNER]: {
+    item_key: 'OWNER_PERFORMANCE',
+    item_label: '结合职级、任务难度的表现分',
+  },
+  [ROLE_KEYS.COLLABORATOR]: {
+    item_key: 'COLLABORATION',
+    item_label: '协作表现分',
+  },
+  [ROLE_KEYS.PROJECT_MANAGER]: {
+    item_key: 'PROCESS',
+    item_label: '项目流程表现分',
+  },
 })
 
 function toPositiveInt(value) {
@@ -119,8 +131,8 @@ function toPositiveInt(value) {
 function toScore(value) {
   const num = Number(value)
   if (!Number.isFinite(num)) return null
-  if (num < 1 || num > 10) return null
-  return Math.round(num * 10) / 10
+  if (num < 0 || num > 100) return null
+  return Math.round(num)
 }
 
 function roundScore(value) {
@@ -198,18 +210,14 @@ function formatDateTime(value) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
-function getDemandScoringCompletedDate(demand = {}) {
-  const completedDate = normalizeDate(demand.completed_at)
-  if (completedDate) return completedDate
-  const updatedDate = normalizeDate(demand.updated_at)
-  if (updatedDate) return updatedDate
-  return normalizeDate(demand.created_at)
+function getDemandScoringScopeDate(demand = {}) {
+  return normalizeDate(demand.expected_release_date)
 }
 
 function isDemandEligibleForScoring(demand = {}) {
-  const completedDate = getDemandScoringCompletedDate(demand)
-  if (!completedDate) return false
-  return completedDate >= SCORING_COMPLETED_CUTOFF_DATE
+  const scopeDate = getDemandScoringScopeDate(demand)
+  if (!scopeDate) return false
+  return scopeDate >= SCORING_COMPLETED_CUTOFF_DATE
 }
 
 function getDemandScoringActualHours(demand = {}) {
@@ -222,19 +230,6 @@ function getDemandScoringActualHours(demand = {}) {
 
 function isDemandEligibleByActualHours(demand = {}) {
   return getDemandScoringActualHours(demand) > 0
-}
-
-function scoreOverall(record) {
-  if (!record) return null
-  const deliveryScore = Number(record.delivery_score)
-  const collaborationScore = Number(record.collaboration_score)
-  const responsibilityScore = Number(record.responsibility_score)
-  if (![deliveryScore, collaborationScore, responsibilityScore].every(Number.isFinite)) return null
-  return roundScore(
-    deliveryScore * DIMENSION_WEIGHTS.delivery_score +
-      collaborationScore * DIMENSION_WEIGHTS.collaboration_score +
-      responsibilityScore * DIMENSION_WEIGHTS.responsibility_score,
-  )
 }
 
 function buildPairKey(demandId, userId) {
@@ -273,27 +268,106 @@ function parseParticipantRolesFromRemark(rawRemark) {
   return normalizeParticipantRoleList(parsed.participant_roles || parsed.participantRoles || [])
 }
 
-function addFormalEvaluator(formalMap, evaluatorUserId, roleKey, roleWeightOverride = null) {
-  const evaluatorId = toPositiveInt(evaluatorUserId)
-  if (!evaluatorId || !roleKey) return
+function getPrimaryRoleKey(roleKeys = []) {
+  const normalizedRoleKeys = Array.isArray(roleKeys) ? roleKeys : []
+  return normalizeText(normalizedRoleKeys[0], 64).toUpperCase() || ''
+}
 
-  const current = formalMap.get(evaluatorId) || {
-    evaluator_user_id: evaluatorId,
-    base_weight: 0,
-    role_keys: [],
+function getRoleScoreItem(roleKey) {
+  const normalizedRoleKey = normalizeText(roleKey, 64).toUpperCase()
+  return ROLE_SCORE_ITEMS[normalizedRoleKey] || {
+    item_key: normalizedRoleKey || 'GENERAL',
+    item_label: ROLE_LABELS[normalizedRoleKey] || normalizedRoleKey || '评分',
   }
-  if (!current.role_keys.includes(roleKey)) {
-    current.role_keys.push(roleKey)
-    const roleWeight = roleWeightOverride === null || roleWeightOverride === undefined
-      ? Number(ROLE_WEIGHTS[roleKey] || 0)
-      : Number(roleWeightOverride || 0)
-    current.base_weight += roleWeight
+}
+
+function isSubmittedSlot(slot = {}) {
+  return String(slot?.status || '').trim().toUpperCase() === SLOT_STATUS.SUBMITTED && Number.isFinite(Number(slot?.score_value))
+}
+
+function calculateRoleScoreSummary(slotRows = []) {
+  const roleSlotMap = new Map()
+  ;(Array.isArray(slotRows) ? slotRows : []).forEach((slot) => {
+    const roleKey = getPrimaryRoleKey(parseJson(slot?.role_keys_json ?? slot?.role_keys, []))
+    if (!roleKey) return
+    if (!roleSlotMap.has(roleKey)) roleSlotMap.set(roleKey, [])
+    roleSlotMap.get(roleKey).push(slot)
+  })
+
+  const submittedRoleKeys = []
+  const missingRoleKeys = []
+  const roleScores = {}
+  const roleWeights = {}
+  let expectedWeight = 0
+  let weightedTotal = 0
+  let hasAnySubmittedScore = false
+
+  Object.values(ROLE_KEYS).forEach((roleKey) => {
+    const roleSlots = roleSlotMap.get(roleKey) || []
+    if (roleSlots.length === 0) return
+
+    const roleWeight = Number(roleSlots[0]?.base_weight || 0)
+    if (roleWeight > 0) {
+      roleWeights[roleKey] = roleWeight
+      expectedWeight += roleWeight
+    }
+
+    if (roleKey === ROLE_KEYS.COLLABORATOR) {
+      const submittedSlots = roleSlots.filter(isSubmittedSlot)
+      if (submittedSlots.length === roleSlots.length && roleSlots.length > 0) {
+        const averageScore =
+          submittedSlots.reduce((acc, slot) => acc + Number(slot.score_value || 0), 0) / submittedSlots.length
+        const normalizedScore = roundScore(averageScore)
+        roleScores[roleKey] = normalizedScore
+        weightedTotal += normalizedScore * roleWeight
+        submittedRoleKeys.push(roleKey)
+        hasAnySubmittedScore = true
+      } else {
+        missingRoleKeys.push(roleKey)
+        if (submittedSlots.length > 0) hasAnySubmittedScore = true
+      }
+      return
+    }
+
+    const slot = roleSlots[0]
+    if (isSubmittedSlot(slot)) {
+      const normalizedScore = roundScore(slot.score_value)
+      roleScores[roleKey] = normalizedScore
+      weightedTotal += normalizedScore * roleWeight
+      submittedRoleKeys.push(roleKey)
+      hasAnySubmittedScore = true
+    } else {
+      missingRoleKeys.push(roleKey)
+    }
+  })
+
+  const finalScore =
+    expectedWeight > 0 && missingRoleKeys.length === 0
+      ? roundScore(weightedTotal / expectedWeight)
+      : null
+  const status =
+    finalScore !== null
+      ? SUBJECT_STATUS.COMPLETED
+      : hasAnySubmittedScore
+        ? SUBJECT_STATUS.PARTIAL
+        : SUBJECT_STATUS.PENDING
+
+  return {
+    status,
+    final_score: finalScore,
+    effective_weight: expectedWeight,
+    submitted_role_keys: Array.from(new Set(submittedRoleKeys)),
+    missing_role_keys: Array.from(new Set(missingRoleKeys)),
+    role_scores: roleScores,
+    role_weights: roleWeights,
+    hasAnySubmittedScore,
   }
-  formalMap.set(evaluatorId, current)
 }
 
 function mapSlotRow(row = {}) {
   const roleKeys = parseJson(row.role_keys_json, [])
+  const primaryRoleKey = getPrimaryRoleKey(roleKeys)
+  const scoreItem = getRoleScoreItem(primaryRoleKey)
   return {
     ...row,
     id: Number(row.id || 0),
@@ -304,6 +378,9 @@ function mapSlotRow(row = {}) {
     base_weight: Number(row.base_weight || 0),
     role_keys: Array.isArray(roleKeys) ? roleKeys : [],
     role_labels: (Array.isArray(roleKeys) ? roleKeys : []).map((roleKey) => ROLE_LABELS[roleKey] || roleKey),
+    primary_role_key: primaryRoleKey,
+    score_item_key: scoreItem.item_key,
+    score_item_label: scoreItem.item_label,
     participation_role_keys: normalizeParticipantRoleList(row.participation_role_keys || []),
     participation_role_labels: (Array.isArray(row.participation_role_labels) ? row.participation_role_labels : []).filter(Boolean),
     participation_node_names: Array.from(
@@ -314,10 +391,7 @@ function mapSlotRow(row = {}) {
     score_record: row.record_id
       ? {
           id: Number(row.record_id || 0),
-          delivery_score: Number(row.record_delivery_score || 0),
-          collaboration_score: Number(row.record_collaboration_score || 0),
-          responsibility_score: Number(row.record_responsibility_score || 0),
-          weighted_score: Number(row.record_weighted_score || 0),
+          score: Number(row.record_weighted_score || 0),
           comment: row.record_comment || '',
           submitted_at: row.record_submitted_at || null,
           updated_at: row.record_updated_at || null,
@@ -760,32 +834,42 @@ async function replaceTaskDetails(conn, task, demand, subjectUserIds, directOwne
       ],
     )
     const subjectId = Number(subjectResult.insertId)
-    const formalMap = new Map()
+    const formalEvaluators = []
 
-    if (toPositiveInt(demand.owner_user_id) !== evaluateeUserId) {
-      addFormalEvaluator(formalMap, demand.owner_user_id, ROLE_KEYS.DEMAND_OWNER, roleWeightMap[ROLE_KEYS.DEMAND_OWNER])
+    if (toPositiveInt(demand.owner_user_id) !== evaluateeUserId && Number(roleWeightMap[ROLE_KEYS.DEMAND_OWNER] || 0) > 0) {
+      formalEvaluators.push({
+        evaluator_user_id: toPositiveInt(demand.owner_user_id),
+        role_key: ROLE_KEYS.DEMAND_OWNER,
+        base_weight: Number(roleWeightMap[ROLE_KEYS.DEMAND_OWNER] || 0),
+      })
     }
 
     const directOwnerUserId = directOwnerMap.get(evaluateeUserId)
-    if (toPositiveInt(directOwnerUserId) && toPositiveInt(directOwnerUserId) !== evaluateeUserId) {
-      addFormalEvaluator(
-        formalMap,
-        directOwnerUserId,
-        ROLE_KEYS.DIRECT_OWNER,
-        roleWeightMap[ROLE_KEYS.DIRECT_OWNER],
-      )
+    if (
+      toPositiveInt(directOwnerUserId) &&
+      toPositiveInt(directOwnerUserId) !== evaluateeUserId &&
+      Number(roleWeightMap[ROLE_KEYS.DIRECT_OWNER] || 0) > 0
+    ) {
+      formalEvaluators.push({
+        evaluator_user_id: toPositiveInt(directOwnerUserId),
+        role_key: ROLE_KEYS.DIRECT_OWNER,
+        base_weight: Number(roleWeightMap[ROLE_KEYS.DIRECT_OWNER] || 0),
+      })
     }
 
-    if (toPositiveInt(demand.project_manager) && toPositiveInt(demand.project_manager) !== evaluateeUserId) {
-      addFormalEvaluator(
-        formalMap,
-        demand.project_manager,
-        ROLE_KEYS.PROJECT_MANAGER,
-        roleWeightMap[ROLE_KEYS.PROJECT_MANAGER],
-      )
+    if (
+      toPositiveInt(demand.project_manager) &&
+      toPositiveInt(demand.project_manager) !== evaluateeUserId &&
+      Number(roleWeightMap[ROLE_KEYS.PROJECT_MANAGER] || 0) > 0
+    ) {
+      formalEvaluators.push({
+        evaluator_user_id: toPositiveInt(demand.project_manager),
+        role_key: ROLE_KEYS.PROJECT_MANAGER,
+        base_weight: Number(roleWeightMap[ROLE_KEYS.PROJECT_MANAGER] || 0),
+      })
     }
 
-    for (const formalSlot of formalMap.values()) {
+    for (const formalSlot of formalEvaluators) {
       await conn.query(
         `INSERT INTO demand_score_slots (
            task_id,
@@ -808,15 +892,15 @@ async function replaceTaskDetails(conn, task, demand, subjectUserIds, directOwne
           formalSlot.evaluator_user_id,
           userNameMap.get(formalSlot.evaluator_user_id) || `用户${formalSlot.evaluator_user_id}`,
           SLOT_TYPES.FORMAL,
-          `FORMAL_${formalSlot.evaluator_user_id}`,
-          formalSlot.base_weight,
-          JSON.stringify(formalSlot.role_keys),
+          formalSlot.role_key,
+          Number(formalSlot.base_weight || 0),
+          JSON.stringify([formalSlot.role_key]),
           SLOT_STATUS.PENDING,
         ],
       )
     }
 
-    const formalEvaluatorSet = new Set(Array.from(formalMap.keys()))
+    const formalEvaluatorSet = new Set(formalEvaluators.map((item) => item.evaluator_user_id).filter(Boolean))
     const collaboratorIds = subjectUserIds.filter(
       (userId) => userId !== evaluateeUserId && !formalEvaluatorSet.has(userId),
     )
@@ -864,80 +948,18 @@ async function recalculateSubject(subjectId, { conn = pool } = {}) {
        s.base_weight,
        s.role_keys_json,
        s.status,
-       r.delivery_score,
-       r.collaboration_score,
-       r.responsibility_score,
-       r.weighted_score
+       r.weighted_score AS score_value
      FROM demand_score_slots s
      LEFT JOIN demand_score_records r ON r.slot_id = s.id
      WHERE s.subject_id = ?`,
     [normalizedSubjectId],
   )
-
-  const submittedRoleKeys = []
-  const missingRoleKeys = []
-  let weightedTotal = 0
-  let deliveryTotal = 0
-  let collaborationTotal = 0
-  let responsibilityTotal = 0
-  let effectiveWeight = 0
-  const collaboratorRecords = []
-
-  slotRows.forEach((slot) => {
-    const roleKeys = parseJson(slot.role_keys_json, [])
-    if (slot.slot_type === SLOT_TYPES.COLLABORATOR) {
-      if (slot.status === SLOT_STATUS.SUBMITTED && slot.weighted_score !== null) {
-        collaboratorRecords.push(slot)
-      }
-      return
-    }
-
-    if (slot.status !== SLOT_STATUS.SUBMITTED || slot.weighted_score === null) {
-      roleKeys.forEach((roleKey) => {
-        if (!missingRoleKeys.includes(roleKey)) missingRoleKeys.push(roleKey)
-      })
-      return
-    }
-
-    roleKeys.forEach((roleKey) => {
-      if (!submittedRoleKeys.includes(roleKey)) submittedRoleKeys.push(roleKey)
-    })
-    const weight = Number(slot.base_weight || 0)
-    weightedTotal += Number(slot.weighted_score || 0) * weight
-    deliveryTotal += Number(slot.delivery_score || 0) * weight
-    collaborationTotal += Number(slot.collaboration_score || 0) * weight
-    responsibilityTotal += Number(slot.responsibility_score || 0) * weight
-    effectiveWeight += weight
-  })
-
-  if (collaboratorRecords.length > 0) {
-    const avg = collaboratorRecords.reduce(
-      (acc, row) => {
-        acc.weighted += Number(row.weighted_score || 0)
-        acc.delivery += Number(row.delivery_score || 0)
-        acc.collaboration += Number(row.collaboration_score || 0)
-        acc.responsibility += Number(row.responsibility_score || 0)
-        return acc
-      },
-      { weighted: 0, delivery: 0, collaboration: 0, responsibility: 0 },
-    )
-    const count = collaboratorRecords.length
-    const weight = collaboratorRecords.reduce((acc, row) => acc + Number(row.base_weight || 0), 0) / count
-    weightedTotal += (avg.weighted / count) * weight
-    deliveryTotal += (avg.delivery / count) * weight
-    collaborationTotal += (avg.collaboration / count) * weight
-    responsibilityTotal += (avg.responsibility / count) * weight
-    effectiveWeight += weight
-    submittedRoleKeys.push(ROLE_KEYS.COLLABORATOR)
-  }
-
-  const finalScore = effectiveWeight > 0 ? roundScore(weightedTotal / effectiveWeight) : null
-  const status =
-    finalScore === null
-      ? SUBJECT_STATUS.PENDING
-      : missingRoleKeys.length > 0
-        ? SUBJECT_STATUS.PARTIAL
-        : SUBJECT_STATUS.COMPLETED
+  const summary = calculateRoleScoreSummary(
+    (slotRows || []).map((slot) => ({
+      ...slot,
+      score_value: slot?.score_value === null ? null : Number(slot?.score_value),
+    })),
+  )
 
   await conn.query(
     `UPDATE demand_score_subjects
@@ -953,23 +975,24 @@ async function recalculateSubject(subjectId, { conn = pool } = {}) {
        result_calculated_at = CURRENT_TIMESTAMP
      WHERE id = ?`,
     [
-      status,
-      finalScore,
-      effectiveWeight > 0 ? roundScore(deliveryTotal / effectiveWeight) : null,
-      effectiveWeight > 0 ? roundScore(collaborationTotal / effectiveWeight) : null,
-      effectiveWeight > 0 ? roundScore(responsibilityTotal / effectiveWeight) : null,
-      effectiveWeight,
-      JSON.stringify(Array.from(new Set(submittedRoleKeys))),
-      JSON.stringify(Array.from(new Set(missingRoleKeys))),
+      summary.status,
+      summary.final_score,
+      null,
+      null,
+      null,
+      summary.effective_weight,
+      JSON.stringify(summary.submitted_role_keys),
+      JSON.stringify(summary.missing_role_keys),
       normalizedSubjectId,
     ],
   )
 
   return {
     subject_id: normalizedSubjectId,
-    final_score: finalScore,
-    effective_weight: effectiveWeight,
-    missing_role_keys: missingRoleKeys,
+    final_score: summary.final_score,
+    effective_weight: summary.effective_weight,
+    missing_role_keys: summary.missing_role_keys,
+    role_scores: summary.role_scores,
   }
 }
 
@@ -990,26 +1013,30 @@ async function recalculateTask(taskId, { conn = pool } = {}) {
   const [[summary]] = await conn.query(
     `SELECT
        COUNT(*) AS slot_count,
-       SUM(CASE WHEN status = 'SUBMITTED' THEN 1 ELSE 0 END) AS submitted_count,
-       SUM(CASE WHEN slot_type = 'FORMAL' THEN 1 ELSE 0 END) AS required_count,
-       SUM(CASE WHEN slot_type = 'FORMAL' AND status = 'SUBMITTED' THEN 1 ELSE 0 END) AS required_submitted_count
+       SUM(CASE WHEN status = 'SUBMITTED' THEN 1 ELSE 0 END) AS submitted_count
      FROM demand_score_slots
      WHERE task_id = ?`,
     [normalizedTaskId],
   )
-  const requiredCount = Number(summary?.required_count || 0)
-  const requiredSubmittedCount = Number(summary?.required_submitted_count || 0)
+  const slotCount = Number(summary?.slot_count || 0)
   const submittedCount = Number(summary?.submitted_count || 0)
   const subjectCount = Number(subjectRows?.length || 0)
-  const hasScorableSubjects = subjectCount > 0 && requiredCount > 0
-  const allRequiredSubmitted = hasScorableSubjects && requiredSubmittedCount >= requiredCount
-  const status = allRequiredSubmitted
+  const hasScorableSubjects = subjectCount > 0 && slotCount > 0
+  const allSlotsSubmitted = hasScorableSubjects && submittedCount >= slotCount
+  const [[partialSummary]] = await conn.query(
+    `SELECT COUNT(*) AS partial_subject_count
+     FROM demand_score_subjects
+     WHERE task_id = ?
+       AND status = ?`,
+    [normalizedTaskId, SUBJECT_STATUS.PARTIAL],
+  )
+  const status = allSlotsSubmitted
     ? TASK_STATUS.COMPLETED
     : submittedCount > 0
       ? TASK_STATUS.SCORING
       : TASK_STATUS.PENDING
-  const resultReady = allRequiredSubmitted ? 1 : 0
-  const partialMissing = !allRequiredSubmitted && resultReady ? 1 : 0
+  const resultReady = allSlotsSubmitted ? 1 : 0
+  const partialMissing = Number(partialSummary?.partial_subject_count || 0) > 0 ? 1 : 0
 
   await conn.query(
     `UPDATE demand_score_tasks
@@ -1025,12 +1052,93 @@ async function recalculateTask(taskId, { conn = pool } = {}) {
   return { task_id: normalizedTaskId, status, result_ready: resultReady, partial_missing: partialMissing }
 }
 
+function averageScores(values = []) {
+  const normalizedValues = (Array.isArray(values) ? values : [])
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item))
+  if (normalizedValues.length === 0) return null
+  return roundScore(normalizedValues.reduce((acc, item) => acc + item, 0) / normalizedValues.length)
+}
+
+function buildSlotResultRow(row = {}) {
+  const roleKeys = parseJson(row.role_keys_json, [])
+  const primaryRoleKey = getPrimaryRoleKey(roleKeys)
+  const scoreItem = getRoleScoreItem(primaryRoleKey)
+  return {
+    id: Number(row?.id || 0),
+    subject_id: Number(row?.subject_id || 0),
+    evaluatee_user_id: Number(row?.evaluatee_user_id || 0),
+    evaluator_user_id: Number(row?.evaluator_user_id || 0),
+    evaluator_name: row?.evaluator_name || '',
+    slot_type: row?.slot_type || '',
+    status: row?.status || '',
+    base_weight: Number(row?.base_weight || 0),
+    role_keys: Array.isArray(roleKeys) ? roleKeys : [],
+    role_labels: (Array.isArray(roleKeys) ? roleKeys : []).map((roleKey) => ROLE_LABELS[roleKey] || roleKey),
+    primary_role_key: primaryRoleKey,
+    score_item_key: scoreItem.item_key,
+    score_item_label: scoreItem.item_label,
+    score: row?.record_weighted_score === null ? null : Number(row?.record_weighted_score),
+    comment: row?.record_comment || '',
+    submitted_at: row?.record_submitted_at || null,
+    updated_at: row?.record_updated_at || null,
+  }
+}
+
+function buildSubjectResultRow(row = {}, slotRows = []) {
+  const slotRecords = (Array.isArray(slotRows) ? slotRows : []).map(buildSlotResultRow)
+  const scoreSummary = calculateRoleScoreSummary(
+    slotRecords.map((slot) => ({
+      role_keys: slot.role_keys,
+      status: slot.status,
+      base_weight: slot.base_weight,
+      score_value: slot.score,
+    })),
+  )
+  return {
+    ...row,
+    id: Number(row.id || 0),
+    evaluatee_user_id: Number(row.evaluatee_user_id || 0),
+    status: row?.status || scoreSummary.status,
+    final_score: row?.final_score === null || row?.final_score === undefined ? scoreSummary.final_score : Number(row.final_score),
+    effective_weight: Number(row?.effective_weight || scoreSummary.effective_weight || 0),
+    submitted_role_keys: parseJson(row?.submitted_role_keys_json, scoreSummary.submitted_role_keys),
+    missing_role_keys: parseJson(row?.missing_role_keys_json, scoreSummary.missing_role_keys),
+    submitted_role_labels: parseJson(row?.submitted_role_keys_json, scoreSummary.submitted_role_keys).map((roleKey) => ROLE_LABELS[roleKey] || roleKey),
+    missing_role_labels: parseJson(row?.missing_role_keys_json, scoreSummary.missing_role_keys).map((roleKey) => ROLE_LABELS[roleKey] || roleKey),
+    demand_owner_score: scoreSummary.role_scores[ROLE_KEYS.DEMAND_OWNER] ?? null,
+    direct_owner_score: scoreSummary.role_scores[ROLE_KEYS.DIRECT_OWNER] ?? null,
+    collaborator_score: scoreSummary.role_scores[ROLE_KEYS.COLLABORATOR] ?? null,
+    project_manager_score: scoreSummary.role_scores[ROLE_KEYS.PROJECT_MANAGER] ?? null,
+    slot_records: slotRecords,
+  }
+}
+
+function buildDemandAggregateFromSubjects(task = {}, subjects = []) {
+  const normalizedSubjects = Array.isArray(subjects) ? subjects : []
+  const completedSubjects = normalizedSubjects.filter(
+    (subject) => String(subject?.status || '').trim().toUpperCase() === SUBJECT_STATUS.COMPLETED && Number.isFinite(Number(subject?.final_score)),
+  )
+  const isResultReady = Number(task?.result_ready || 0) === 1
+  return {
+    subject_count: normalizedSubjects.length,
+    avg_final_score: isResultReady ? averageScores(completedSubjects.map((subject) => subject.final_score)) : null,
+    avg_demand_owner_score: isResultReady ? averageScores(completedSubjects.map((subject) => subject.demand_owner_score)) : null,
+    avg_direct_owner_score: isResultReady ? averageScores(completedSubjects.map((subject) => subject.direct_owner_score)) : null,
+    avg_collaborator_score: isResultReady ? averageScores(completedSubjects.map((subject) => subject.collaborator_score)) : null,
+    avg_project_manager_score: isResultReady ? averageScores(completedSubjects.map((subject) => subject.project_manager_score)) : null,
+    partial_subject_count: normalizedSubjects.filter(
+      (subject) => String(subject?.status || '').trim().toUpperCase() === SUBJECT_STATUS.PARTIAL,
+    ).length,
+  }
+}
+
 const DemandScoring = {
   TASK_STATUS,
   SLOT_STATUS,
   ROLE_LABELS,
   ROLE_WEIGHTS,
-  DIMENSION_WEIGHTS,
+  ROLE_SCORE_ITEMS,
   SCORING_COMPLETED_CUTOFF_DATE,
 
   async purgeTaskByDemand(demandId, { conn = null } = {}) {
@@ -1078,7 +1186,7 @@ const DemandScoring = {
       throw err
     }
     if (!isDemandEligibleForScoring(demand)) {
-      const err = new Error(`仅完成时间不早于 ${SCORING_COMPLETED_CUTOFF_DATE} 的需求进入评分范围`)
+      const err = new Error(`仅预期上线时间不早于 ${SCORING_COMPLETED_CUTOFF_DATE} 的需求进入评分范围`)
       err.code = 'DEMAND_NOT_IN_SCORING_WINDOW'
       throw err
     }
@@ -1142,7 +1250,8 @@ const DemandScoring = {
        INNER JOIN work_demands d
          ON d.id COLLATE utf8mb4_unicode_ci = t.demand_id
        WHERE ${whereSql}
-         AND DATE(COALESCE(d.completed_at, t.completed_at, t.created_at)) >= ?`,
+         AND COALESCE(d.status, '') <> 'CANCELLED'
+         AND DATE(d.expected_release_date) >= ?`,
       [...params, SCORING_COMPLETED_CUTOFF_DATE],
     )
     const [rows] = await pool.query(
@@ -1172,7 +1281,8 @@ const DemandScoring = {
          ON d.id COLLATE utf8mb4_unicode_ci = t.demand_id
        LEFT JOIN demand_score_records r ON r.slot_id = s.id
        WHERE ${whereSql}
-         AND DATE(COALESCE(d.completed_at, t.completed_at, t.created_at)) >= ?
+         AND COALESCE(d.status, '') <> 'CANCELLED'
+         AND DATE(d.expected_release_date) >= ?
        ORDER BY
          CASE WHEN d.expected_release_date IS NULL THEN 1 ELSE 0 END ASC,
          d.expected_release_date DESC,
@@ -1225,7 +1335,8 @@ const DemandScoring = {
        LEFT JOIN demand_score_records r ON r.slot_id = s.id
        WHERE s.id = ?
          AND s.evaluator_user_id = ?
-         AND DATE(COALESCE(d.completed_at, t.completed_at, t.created_at)) >= ?
+         AND COALESCE(d.status, '') <> 'CANCELLED'
+         AND DATE(d.expected_release_date) >= ?
        LIMIT 1`,
       [normalizedSlotId, evaluatorUserId, SCORING_COMPLETED_CUTOFF_DATE],
     )
@@ -1243,18 +1354,16 @@ const DemandScoring = {
       throw err
     }
 
-    const deliveryScore = toScore(payload.delivery_score)
-    const collaborationScore = toScore(payload.collaboration_score)
-    const responsibilityScore = toScore(payload.responsibility_score)
-    if ([deliveryScore, collaborationScore, responsibilityScore].some((score) => score === null)) {
-      const err = new Error('三个维度评分均需在 1-10 分之间')
+    const score = toScore(payload.score)
+    if (score === null) {
+      const err = new Error('评分需在 0-100 分之间')
       err.code = 'INVALID_SCORE'
       throw err
     }
 
     const comment = normalizeText(payload.comment, 2000)
-    if ([deliveryScore, collaborationScore, responsibilityScore].some((score) => score <= 6) && !comment) {
-      const err = new Error('任一维度小于等于 6 分时，必须填写评价说明')
+    if (score < 80 && !comment) {
+      const err = new Error('评分低于 80 分时，必须填写评价说明')
       err.code = 'COMMENT_REQUIRED'
       throw err
     }
@@ -1277,12 +1386,6 @@ const DemandScoring = {
         err.code = 'SLOT_NOT_FOUND'
         throw err
       }
-
-      const weightedScore = scoreOverall({
-        delivery_score: deliveryScore,
-        collaboration_score: collaborationScore,
-        responsibility_score: responsibilityScore,
-      })
 
       await conn.query(
         `INSERT INTO demand_score_records (
@@ -1312,10 +1415,10 @@ const DemandScoring = {
           slot.demand_id,
           slot.evaluatee_user_id,
           slot.evaluator_user_id,
-          deliveryScore,
-          collaborationScore,
-          responsibilityScore,
-          weightedScore,
+          score,
+          score,
+          score,
+          score,
           comment || null,
         ],
       )
@@ -1344,7 +1447,8 @@ const DemandScoring = {
     const normalizedPage = toPositiveInt(page) || 1
     const normalizedPageSize = Math.min(toPositiveInt(pageSize) || 20, 100)
     const where = [
-      'DATE(COALESCE(d.completed_at, t.completed_at, t.created_at)) >= ?',
+      `COALESCE(d.status, '') <> 'CANCELLED'`,
+      'DATE(d.expected_release_date) >= ?',
       'EXISTS (SELECT 1 FROM demand_score_subjects sub_exists WHERE sub_exists.task_id = t.id)',
     ]
     const params = [SCORING_COMPLETED_CUTOFF_DATE]
@@ -1354,11 +1458,11 @@ const DemandScoring = {
       params.push(`%${keywordText}%`, `%${keywordText}%`)
     }
     if (/^\d{4}-\d{2}-\d{2}$/.test(String(startDate || ''))) {
-      where.push('DATE(COALESCE(d.completed_at, t.created_at)) >= ?')
+      where.push('DATE(d.expected_release_date) >= ?')
       params.push(startDate)
     }
     if (/^\d{4}-\d{2}-\d{2}$/.test(String(endDate || ''))) {
-      where.push('DATE(COALESCE(d.completed_at, t.created_at)) <= ?')
+      where.push('DATE(d.expected_release_date) <= ?')
       params.push(endDate)
     }
     const whereSql = where.join(' AND ')
@@ -1379,20 +1483,14 @@ const DemandScoring = {
          t.status,
          t.result_ready,
          t.partial_missing,
+         DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
          DATE_FORMAT(t.deadline_at, '%Y-%m-%d %H:%i:%s') AS deadline_at,
-         DATE_FORMAT(MAX(COALESCE(d.completed_at, t.created_at)), '%Y-%m-%d %H:%i:%s') AS demand_completed_at,
-         COUNT(sub.id) AS subject_count,
-         AVG(sub.final_score) AS avg_final_score,
-         AVG(sub.delivery_score) AS avg_delivery_score,
-         AVG(sub.collaboration_score) AS avg_collaboration_score,
-         AVG(sub.responsibility_score) AS avg_responsibility_score,
-         SUM(CASE WHEN JSON_LENGTH(COALESCE(sub.missing_role_keys_json, JSON_ARRAY())) > 0 THEN 1 ELSE 0 END) AS partial_subject_count,
+         DATE_FORMAT(COALESCE(d.completed_at, t.created_at), '%Y-%m-%d %H:%i:%s') AS demand_completed_at,
          COALESCE(pending.pending_slot_count, 0) AS pending_slot_count,
          COALESCE(pending.pending_evaluator_names, '') AS pending_evaluator_names
        FROM demand_score_tasks t
        LEFT JOIN work_demands d
          ON d.id COLLATE utf8mb4_unicode_ci = t.demand_id
-       LEFT JOIN demand_score_subjects sub ON sub.task_id = t.id
        LEFT JOIN (
          SELECT
            task_id,
@@ -1407,21 +1505,74 @@ const DemandScoring = {
          GROUP BY task_id
        ) pending ON pending.task_id = t.id
        WHERE ${whereSql}
-       GROUP BY t.id
-       ORDER BY MAX(COALESCE(d.completed_at, t.created_at)) DESC, t.id DESC
+       ORDER BY COALESCE(d.completed_at, t.created_at) DESC, t.id DESC
        LIMIT ? OFFSET ?`,
       [...params, normalizedPageSize, (normalizedPage - 1) * normalizedPageSize],
     )
+    const taskIds = rows.map((row) => Number(row?.id || 0)).filter((id) => Number.isInteger(id) && id > 0)
+    const subjectMapByTaskId = new Map()
+
+    if (taskIds.length > 0) {
+      const [subjectRows, slotRows] = await Promise.all([
+        pool.query(
+          `SELECT
+             id,
+             task_id,
+             evaluatee_user_id,
+             evaluatee_name,
+             status,
+             final_score,
+             effective_weight,
+             submitted_role_keys_json,
+             missing_role_keys_json
+           FROM demand_score_subjects
+           WHERE task_id IN (?)
+           ORDER BY id ASC`,
+          [taskIds],
+        ),
+        pool.query(
+          `SELECT
+             s.id,
+             s.task_id,
+             s.subject_id,
+             s.evaluatee_user_id,
+             s.evaluator_user_id,
+             s.evaluator_name,
+             s.slot_type,
+             s.status,
+             s.base_weight,
+             s.role_keys_json,
+             r.weighted_score AS record_weighted_score,
+             r.comment AS record_comment,
+             DATE_FORMAT(r.submitted_at, '%Y-%m-%d %H:%i:%s') AS record_submitted_at,
+             DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at
+           FROM demand_score_slots s
+           LEFT JOIN demand_score_records r ON r.slot_id = s.id
+           WHERE s.task_id IN (?)
+           ORDER BY s.subject_id ASC, s.id ASC`,
+          [taskIds],
+        ),
+      ])
+      const slotMapBySubjectId = new Map()
+      ;(slotRows[0] || []).forEach((row) => {
+        const subjectId = Number(row?.subject_id || 0)
+        if (!Number.isInteger(subjectId) || subjectId <= 0) return
+        if (!slotMapBySubjectId.has(subjectId)) slotMapBySubjectId.set(subjectId, [])
+        slotMapBySubjectId.get(subjectId).push(row)
+      })
+      ;(subjectRows[0] || []).forEach((row) => {
+        const taskId = Number(row?.task_id || 0)
+        if (!Number.isInteger(taskId) || taskId <= 0) return
+        if (!subjectMapByTaskId.has(taskId)) subjectMapByTaskId.set(taskId, [])
+        subjectMapByTaskId.get(taskId).push(buildSubjectResultRow(row, slotMapBySubjectId.get(Number(row?.id || 0)) || []))
+      })
+    }
+
     return {
       list: rows.map((row) => ({
         ...row,
         id: Number(row.id || 0),
-        subject_count: Number(row.subject_count || 0),
-        avg_final_score: roundScore(row.avg_final_score),
-        avg_delivery_score: roundScore(row.avg_delivery_score),
-        avg_collaboration_score: roundScore(row.avg_collaboration_score),
-        avg_responsibility_score: roundScore(row.avg_responsibility_score),
-        partial_subject_count: Number(row.partial_subject_count || 0),
+        ...buildDemandAggregateFromSubjects(row, subjectMapByTaskId.get(Number(row.id || 0)) || []),
         pending_slot_count: Number(row.pending_slot_count || 0),
         pending_evaluator_names: String(row.pending_evaluator_names || '')
           .split('、')
@@ -1446,7 +1597,8 @@ const DemandScoring = {
        INNER JOIN work_demands d
          ON d.id COLLATE utf8mb4_unicode_ci = t.demand_id
        WHERE t.id = ?
-         AND DATE(COALESCE(d.completed_at, t.completed_at, t.created_at)) >= ?
+         AND COALESCE(d.status, '') <> 'CANCELLED'
+         AND DATE(d.expected_release_date) >= ?
        LIMIT 1`,
       [normalizedTaskId, SCORING_COMPLETED_CUTOFF_DATE],
     )
@@ -1456,13 +1608,11 @@ const DemandScoring = {
     const [subjects] = await pool.query(
       `SELECT
          id,
+         task_id,
          evaluatee_user_id,
          evaluatee_name,
          status,
          final_score,
-         delivery_score,
-         collaboration_score,
-         responsibility_score,
          effective_weight,
          submitted_role_keys_json,
          missing_role_keys_json,
@@ -1480,17 +1630,14 @@ const DemandScoring = {
          s.evaluatee_user_id,
          s.evaluator_user_id,
          s.evaluator_name,
-         s.slot_type,
-         s.status,
-         s.base_weight,
-         s.role_keys_json,
-         r.delivery_score AS record_delivery_score,
-         r.collaboration_score AS record_collaboration_score,
-         r.responsibility_score AS record_responsibility_score,
-         r.weighted_score AS record_weighted_score,
-         r.comment AS record_comment,
-         DATE_FORMAT(r.submitted_at, '%Y-%m-%d %H:%i:%s') AS record_submitted_at,
-         DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at
+        s.slot_type,
+        s.status,
+        s.base_weight,
+        s.role_keys_json,
+        r.weighted_score AS record_weighted_score,
+        r.comment AS record_comment,
+        DATE_FORMAT(r.submitted_at, '%Y-%m-%d %H:%i:%s') AS record_submitted_at,
+        DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at
        FROM demand_score_slots s
        LEFT JOIN demand_score_records r ON r.slot_id = s.id
        WHERE s.task_id = ?
@@ -1502,29 +1649,8 @@ const DemandScoring = {
     ;(slotRows || []).forEach((row) => {
       const subjectId = Number(row?.subject_id || 0)
       if (!Number.isInteger(subjectId) || subjectId <= 0) return
-      if (!slotMapBySubjectId.has(subjectId)) {
-        slotMapBySubjectId.set(subjectId, [])
-      }
-      const roleKeys = parseJson(row?.role_keys_json, [])
-      slotMapBySubjectId.get(subjectId).push({
-        id: Number(row?.id || 0),
-        subject_id: subjectId,
-        evaluatee_user_id: Number(row?.evaluatee_user_id || 0),
-        evaluator_user_id: Number(row?.evaluator_user_id || 0),
-        evaluator_name: row?.evaluator_name || '',
-        slot_type: row?.slot_type || '',
-        status: row?.status || '',
-        base_weight: Number(row?.base_weight || 0),
-        role_keys: Array.isArray(roleKeys) ? roleKeys : [],
-        role_labels: (Array.isArray(roleKeys) ? roleKeys : []).map((roleKey) => ROLE_LABELS[roleKey] || roleKey),
-        delivery_score: row?.record_delivery_score === null ? null : Number(row?.record_delivery_score),
-        collaboration_score: row?.record_collaboration_score === null ? null : Number(row?.record_collaboration_score),
-        responsibility_score: row?.record_responsibility_score === null ? null : Number(row?.record_responsibility_score),
-        weighted_score: row?.record_weighted_score === null ? null : Number(row?.record_weighted_score),
-        comment: row?.record_comment || '',
-        submitted_at: row?.record_submitted_at || null,
-        updated_at: row?.record_updated_at || null,
-      })
+      if (!slotMapBySubjectId.has(subjectId)) slotMapBySubjectId.set(subjectId, [])
+      slotMapBySubjectId.get(subjectId).push(row)
     })
 
     return {
@@ -1535,65 +1661,33 @@ const DemandScoring = {
         project_manager_user_id: toPositiveInt(task.project_manager_user_id),
       },
       subjects: subjects.map((row) => ({
-        ...row,
-        id: Number(row.id || 0),
-        evaluatee_user_id: Number(row.evaluatee_user_id || 0),
-        final_score: row.final_score === null ? null : Number(row.final_score),
-        delivery_score: row.delivery_score === null ? null : Number(row.delivery_score),
-        collaboration_score: row.collaboration_score === null ? null : Number(row.collaboration_score),
-        responsibility_score: row.responsibility_score === null ? null : Number(row.responsibility_score),
-        effective_weight: Number(row.effective_weight || 0),
-        submitted_role_keys: parseJson(row.submitted_role_keys_json, []),
-        missing_role_keys: parseJson(row.missing_role_keys_json, []),
-        slot_records: slotMapBySubjectId.get(Number(row.id || 0)) || [],
+        ...buildSubjectResultRow(row, slotMapBySubjectId.get(Number(row.id || 0)) || []),
       })),
     }
   },
 
   async listTeamRanking({ startDate = '', endDate = '' } = {}) {
-    const where = ['t.result_ready = 1', 'DATE(COALESCE(d.completed_at, t.completed_at, t.created_at)) >= ?']
+    const where = ['t.result_ready = 1', `COALESCE(d.status, '') <> 'CANCELLED'`, 'DATE(d.expected_release_date) >= ?']
     const params = [SCORING_COMPLETED_CUTOFF_DATE]
     if (/^\d{4}-\d{2}-\d{2}$/.test(String(startDate || ''))) {
-      where.push('DATE(COALESCE(d.completed_at, t.created_at)) >= ?')
+      where.push('DATE(d.expected_release_date) >= ?')
       params.push(startDate)
     }
     if (/^\d{4}-\d{2}-\d{2}$/.test(String(endDate || ''))) {
-      where.push('DATE(COALESCE(d.completed_at, t.created_at)) <= ?')
+      where.push('DATE(d.expected_release_date) <= ?')
       params.push(endDate)
     }
-    const [rows] = await pool.query(
-      `SELECT
-         sub.evaluatee_user_id,
-         sub.evaluatee_name,
-         COUNT(*) AS demand_count,
-         AVG(sub.final_score) AS avg_final_score,
-         AVG(sub.delivery_score) AS avg_delivery_score,
-         AVG(sub.collaboration_score) AS avg_collaboration_score,
-         AVG(sub.responsibility_score) AS avg_responsibility_score,
-         SUM(CASE WHEN JSON_LENGTH(COALESCE(sub.missing_role_keys_json, JSON_ARRAY())) > 0 THEN 1 ELSE 0 END) AS partial_count
-       FROM demand_score_subjects sub
-       INNER JOIN demand_score_tasks t ON t.id = sub.task_id
-       LEFT JOIN work_demands d
-         ON d.id COLLATE utf8mb4_unicode_ci = t.demand_id
-       WHERE ${where.join(' AND ')}
-         AND sub.status = 'COMPLETED'
-         AND sub.final_score IS NOT NULL
-       GROUP BY sub.evaluatee_user_id, sub.evaluatee_name
-       ORDER BY avg_final_score DESC, demand_count DESC, sub.evaluatee_user_id ASC`,
-      params,
-    )
-
     const [detailRows] = await pool.query(
       `SELECT
+         sub.id,
          sub.evaluatee_user_id,
+         sub.evaluatee_name,
+         sub.task_id,
          t.id AS task_id,
          t.demand_id,
          t.demand_name,
          DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
          sub.final_score,
-         sub.delivery_score,
-         sub.collaboration_score,
-         sub.responsibility_score,
          CASE WHEN JSON_LENGTH(COALESCE(sub.missing_role_keys_json, JSON_ARRAY())) > 0 THEN 1 ELSE 0 END AS partial_flag,
          DATE_FORMAT(COALESCE(d.expected_release_date, d.completed_at, t.completed_at, t.created_at), '%Y-%m-%d') AS demand_date
        FROM demand_score_subjects sub
@@ -1609,11 +1703,55 @@ const DemandScoring = {
          t.id DESC`,
       params,
     )
+    const subjectIds = detailRows
+      .map((row) => Number(row?.id || 0))
+      .filter((id) => Number.isInteger(id) && id > 0)
+    const [slotRows] = subjectIds.length > 0
+      ? await pool.query(
+          `SELECT
+             s.id,
+             s.subject_id,
+             s.evaluatee_user_id,
+             s.evaluator_user_id,
+             s.evaluator_name,
+             s.slot_type,
+             s.status,
+             s.base_weight,
+             s.role_keys_json,
+             r.weighted_score AS record_weighted_score,
+             r.comment AS record_comment,
+             DATE_FORMAT(r.submitted_at, '%Y-%m-%d %H:%i:%s') AS record_submitted_at,
+             DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at
+           FROM demand_score_slots s
+           LEFT JOIN demand_score_records r ON r.slot_id = s.id
+           WHERE s.subject_id IN (?)
+           ORDER BY s.subject_id ASC, s.id ASC`,
+          [subjectIds],
+        )
+      : [[]]
 
+    const slotMapBySubjectId = new Map()
+    ;(slotRows || []).forEach((row) => {
+      const subjectId = Number(row?.subject_id || 0)
+      if (!Number.isInteger(subjectId) || subjectId <= 0) return
+      if (!slotMapBySubjectId.has(subjectId)) slotMapBySubjectId.set(subjectId, [])
+      slotMapBySubjectId.get(subjectId).push(row)
+    })
+
+    const memberMap = new Map()
     const detailMap = new Map()
     ;(detailRows || []).forEach((row) => {
       const evaluateeUserId = Number(row.evaluatee_user_id || 0)
       if (!Number.isInteger(evaluateeUserId) || evaluateeUserId <= 0) return
+      const subject = buildSubjectResultRow(row, slotMapBySubjectId.get(Number(row?.id || 0)) || [])
+      if (!memberMap.has(evaluateeUserId)) {
+        memberMap.set(evaluateeUserId, {
+          evaluatee_user_id: evaluateeUserId,
+          evaluatee_name: row.evaluatee_name || '',
+          subjects: [],
+        })
+      }
+      memberMap.get(evaluateeUserId).subjects.push(subject)
       if (!detailMap.has(evaluateeUserId)) {
         detailMap.set(evaluateeUserId, [])
       }
@@ -1623,26 +1761,48 @@ const DemandScoring = {
         demand_name: row.demand_name || '',
         expected_release_date: row.expected_release_date || '',
         demand_date: row.demand_date || '',
-        final_score: roundScore(row.final_score),
-        delivery_score: roundScore(row.delivery_score),
-        collaboration_score: roundScore(row.collaboration_score),
-        responsibility_score: roundScore(row.responsibility_score),
+        final_score: roundScore(subject.final_score),
+        demand_owner_score: roundScore(subject.demand_owner_score),
+        direct_owner_score: roundScore(subject.direct_owner_score),
+        collaborator_score: roundScore(subject.collaborator_score),
+        project_manager_score: roundScore(subject.project_manager_score),
         partial_flag: Number(row.partial_flag || 0),
       })
     })
 
-    return rows.map((row, index) => ({
+    return Array.from(memberMap.values())
+      .map((member) => ({
+        evaluatee_user_id: member.evaluatee_user_id,
+        evaluatee_name: member.evaluatee_name,
+        demand_count: member.subjects.length,
+        avg_final_score: averageScores(member.subjects.map((subject) => subject.final_score)),
+        avg_demand_owner_score: averageScores(member.subjects.map((subject) => subject.demand_owner_score)),
+        avg_direct_owner_score: averageScores(member.subjects.map((subject) => subject.direct_owner_score)),
+        avg_collaborator_score: averageScores(member.subjects.map((subject) => subject.collaborator_score)),
+        avg_project_manager_score: averageScores(member.subjects.map((subject) => subject.project_manager_score)),
+        partial_count: member.subjects.filter((subject) => subject.missing_role_keys.length > 0).length,
+        demand_records: detailMap.get(member.evaluatee_user_id) || [],
+      }))
+      .sort((left, right) => {
+        const scoreDiff = (Number(right.avg_final_score || 0) - Number(left.avg_final_score || 0))
+        if (scoreDiff !== 0) return scoreDiff
+        const demandDiff = Number(right.demand_count || 0) - Number(left.demand_count || 0)
+        if (demandDiff !== 0) return demandDiff
+        return Number(left.evaluatee_user_id || 0) - Number(right.evaluatee_user_id || 0)
+      })
+      .map((row, index) => ({
       rank: index + 1,
-      evaluatee_user_id: Number(row.evaluatee_user_id || 0),
-      evaluatee_name: row.evaluatee_name || '',
-      demand_count: Number(row.demand_count || 0),
-      avg_final_score: roundScore(row.avg_final_score),
-      avg_delivery_score: roundScore(row.avg_delivery_score),
-      avg_collaboration_score: roundScore(row.avg_collaboration_score),
-      avg_responsibility_score: roundScore(row.avg_responsibility_score),
-      partial_count: Number(row.partial_count || 0),
-      demand_records: detailMap.get(Number(row.evaluatee_user_id || 0)) || [],
-    }))
+        evaluatee_user_id: Number(row.evaluatee_user_id || 0),
+        evaluatee_name: row.evaluatee_name || '',
+        demand_count: Number(row.demand_count || 0),
+        avg_final_score: roundScore(row.avg_final_score),
+        avg_demand_owner_score: roundScore(row.avg_demand_owner_score),
+        avg_direct_owner_score: roundScore(row.avg_direct_owner_score),
+        avg_collaborator_score: roundScore(row.avg_collaborator_score),
+        avg_project_manager_score: roundScore(row.avg_project_manager_score),
+        partial_count: Number(row.partial_count || 0),
+        demand_records: row.demand_records || [],
+      }))
   },
 }
 

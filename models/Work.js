@@ -3472,18 +3472,30 @@ const Work = {
     const relatedLogCount = await this.countLogsByDemandId(demandId)
 
     if (relatedLogCount > 0) {
-      const [result] = await pool.query(
-        `UPDATE work_demands
-         SET
-           status = 'CANCELLED',
-           completed_at = COALESCE(completed_at, NOW())
-         WHERE id = ?`,
-        [normalizedDemandId],
-      )
-      return {
-        mode: 'ARCHIVED',
-        affected_rows: Number(result?.affectedRows || 0),
-        related_log_count: relatedLogCount,
+      const conn = await pool.getConnection()
+      try {
+        await conn.beginTransaction()
+        const [result] = await conn.query(
+          `UPDATE work_demands
+           SET
+             status = 'CANCELLED',
+             completed_at = COALESCE(completed_at, NOW())
+           WHERE id = ?`,
+          [normalizedDemandId],
+        )
+        const scoringStats = await cleanupDemandScoringArtifacts(conn, normalizedDemandId)
+        await conn.commit()
+        return {
+          mode: 'ARCHIVED',
+          affected_rows: Number(result?.affectedRows || 0),
+          related_log_count: relatedLogCount,
+          ...scoringStats,
+        }
+      } catch (err) {
+        await conn.rollback()
+        throw err
+      } finally {
+        conn.release()
       }
     }
 

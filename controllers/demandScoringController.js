@@ -58,9 +58,7 @@ const submitMyDemandScoreSlot = async (req, res) => {
 
   try {
     const slot = await DemandScoring.submitSlot(slotId, req.user?.id, {
-      delivery_score: req.body.delivery_score,
-      collaboration_score: req.body.collaboration_score,
-      responsibility_score: req.body.responsibility_score,
+      score: req.body.score,
       comment: req.body.comment,
     })
     return res.json({ success: true, message: '评分已提交', data: slot })

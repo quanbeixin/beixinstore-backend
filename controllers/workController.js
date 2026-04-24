@@ -495,6 +495,25 @@ async function safeGetDemandWorkflowSnapshot(demandId) {
   }
 }
 
+async function ensureDemandScoringAfterWorkflowCompletion({ demandId, demandBefore, operatorUserId }) {
+  const normalizedDemandId = normalizeDemandId(demandId)
+  if (!normalizedDemandId) return null
+
+  const updatedDemand = await Work.findDemandById(normalizedDemandId)
+  const previousStatus = String(demandBefore?.status || '').trim().toUpperCase()
+  const nextStatus = String(updatedDemand?.status || '').trim().toUpperCase()
+
+  if (previousStatus !== 'DONE' && nextStatus === 'DONE') {
+    try {
+      await DemandScoring.ensureTaskForDemand(normalizedDemandId, { operatorUserId })
+    } catch (scoreErr) {
+      console.error('流程自动完成后生成评分任务失败:', scoreErr)
+    }
+  }
+
+  return updatedDemand
+}
+
 async function emitAutoCompletedNodeNotificationsFromSyncResults({ demandId, req, syncResults = [] }) {
   const normalizedDemandId = normalizeDemandId(demandId)
   if (!normalizedDemandId || !req) return
@@ -2180,6 +2199,9 @@ const createDemand = async (req, res) => {
   ) {
     return res.status(400).json({ success: false, message: 'expected_release_date 格式错误，需为 YYYY-MM-DD' })
   }
+  if (normalizeStatus(status) === 'DONE' && !expectedReleaseDate) {
+    return res.status(400).json({ success: false, message: '需求进入已完成前，预期上线日期必填' })
+  }
 
   if (req.body.owner_estimate_hours !== undefined) {
     return res.status(400).json({ success: false, message: '需求池接口不允许传 owner_estimate_hours' })
@@ -2552,6 +2574,9 @@ const updateDemand = async (req, res) => {
         }
         expectedReleaseDate = normalized
       }
+    }
+    if (isDemandOpen(status) === false && !expectedReleaseDate) {
+      return res.status(400).json({ success: false, message: '需求进入已完成前，预期上线日期必填' })
     }
     const description =
       req.body.description === undefined
@@ -3185,6 +3210,10 @@ const createLog = async (req, res) => {
       console.error('创建工作记录后初始化日计划失败:', dailyPlanErr)
     }
 
+    const demandBeforeWorkflowSync = demandId
+      ? await Work.findDemandById(demandId)
+      : null
+
     let workflowSync = null
     try {
       workflowSync = await Workflow.syncFromWorkLogStatusChange({
@@ -3204,6 +3233,11 @@ const createLog = async (req, res) => {
     }
 
     await refreshDemandHourSummaryQuietly(demandId)
+    await ensureDemandScoringAfterWorkflowCompletion({
+      demandId,
+      demandBefore: demandBeforeWorkflowSync,
+      operatorUserId: req.user.id,
+    })
     await emitAutoCompletedNodeNotificationsFromSyncResults({
       demandId,
       req,
@@ -3477,6 +3511,10 @@ const createOwnerAssignedLog = async (req, res) => {
       throw ownerEstimateErr
     }
 
+    const demandBeforeWorkflowSync = demandId
+      ? await Work.findDemandById(demandId)
+      : null
+
     let workflowSync = null
     try {
       workflowSync = await Workflow.syncFromWorkLogStatusChange({
@@ -3496,6 +3534,11 @@ const createOwnerAssignedLog = async (req, res) => {
     }
 
     await refreshDemandHourSummaryQuietly(demandId)
+    await ensureDemandScoringAfterWorkflowCompletion({
+      demandId,
+      demandBefore: demandBeforeWorkflowSync,
+      operatorUserId: req.user.id,
+    })
     await emitAutoCompletedNodeNotificationsFromSyncResults({
       demandId,
       req,
@@ -3770,6 +3813,10 @@ const updateLog = async (req, res) => {
       console.error('更新工作记录后同步日计划失败:', dailyPlanErr)
     }
 
+    const demandBeforeWorkflowSync = demandId
+      ? await Work.findDemandById(demandId)
+      : null
+
     let workflowSync = null
     try {
       workflowSync = await Workflow.syncFromWorkLogStatusChange({
@@ -3811,6 +3858,11 @@ const updateLog = async (req, res) => {
     if (String(existing.demand_id || '') !== String(demandId || '')) {
       await refreshDemandHourSummaryQuietly(demandId)
     }
+    await ensureDemandScoringAfterWorkflowCompletion({
+      demandId,
+      demandBefore: demandBeforeWorkflowSync,
+      operatorUserId: req.user.id,
+    })
     await emitAutoCompletedNodeNotificationsFromSyncResults({
       demandId,
       req,
@@ -5048,6 +5100,11 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
       skipAssigneeCheck: isSuperAdmin,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+    await ensureDemandScoringAfterWorkflowCompletion({
+      demandId,
+      demandBefore: demand,
+      operatorUserId: req.user.id,
+    })
 
     await emitWorkflowNodeNotificationEvent({
       eventType: 'node_complete',
@@ -5143,6 +5200,11 @@ const submitDemandWorkflowNode = async (req, res) => {
       skipAssigneeCheck: isSuperAdmin,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+    await ensureDemandScoringAfterWorkflowCompletion({
+      demandId,
+      demandBefore: demand,
+      operatorUserId: req.user.id,
+    })
 
     await emitWorkflowNodeNotificationEvent({
       eventType: 'node_complete',
@@ -5413,6 +5475,11 @@ const forceCompleteDemandWorkflowCurrentNode = async (req, res) => {
       skipAssigneeCheck: true,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+    await ensureDemandScoringAfterWorkflowCompletion({
+      demandId,
+      demandBefore: demand,
+      operatorUserId: req.user.id,
+    })
 
     await emitWorkflowNodeNotificationEvent({
       eventType: 'node_complete',
@@ -5503,6 +5570,11 @@ const forceCompleteDemandWorkflowNode = async (req, res) => {
       skipAssigneeCheck: true,
     })
     await refreshDemandHourSummaryQuietly(demandId)
+    await ensureDemandScoringAfterWorkflowCompletion({
+      demandId,
+      demandBefore: demand,
+      operatorUserId: req.user.id,
+    })
 
     await emitWorkflowNodeNotificationEvent({
       eventType: 'node_complete',
@@ -6798,6 +6870,10 @@ async function updateAssignedLog(req, res) {
       ownerEstimateRequired: null,
     })
 
+    const demandBeforeWorkflowSync = existing.demand_id
+      ? await Work.findDemandById(existing.demand_id)
+      : null
+
     let workflowSync = null
     try {
       const itemType = await Work.findItemTypeById(existing.item_type_id)
@@ -6818,6 +6894,11 @@ async function updateAssignedLog(req, res) {
     }
 
     await refreshDemandHourSummaryQuietly(existing.demand_id)
+    await ensureDemandScoringAfterWorkflowCompletion({
+      demandId: existing.demand_id,
+      demandBefore: demandBeforeWorkflowSync,
+      operatorUserId: req.user.id,
+    })
     await emitAutoCompletedNodeNotificationsFromSyncResults({
       demandId: existing.demand_id,
       req,

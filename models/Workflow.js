@@ -653,7 +653,11 @@ async function refreshInstanceProgressState(conn, instance, demandId, instanceRo
   await conn.query(
     `UPDATE work_demands
      SET status = CASE WHEN status = 'CANCELLED' THEN status ELSE 'DONE' END,
-         completed_at = CASE WHEN status = 'CANCELLED' THEN completed_at ELSE COALESCE(completed_at, NOW()) END
+         completed_at = CASE WHEN status = 'CANCELLED' THEN completed_at ELSE COALESCE(completed_at, NOW()) END,
+         expected_release_date = CASE
+           WHEN status = 'CANCELLED' THEN expected_release_date
+           ELSE COALESCE(expected_release_date, DATE(COALESCE(completed_at, NOW())))
+         END
      WHERE id = ?`,
     [demandId],
   )
