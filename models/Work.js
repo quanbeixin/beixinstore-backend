@@ -101,6 +101,7 @@ const DEMAND_VIEW_SCOPE_FILTER_SET = new Set(['all', 'mine'])
 const DEMAND_VIEW_ALLOWED_PRIORITY_ORDER_SET = new Set(['asc', 'desc'])
 let demandSavedViewTableReady = false
 let demandSavedViewTablePromise = null
+const WORK_LOG_OWNERSHIP_DATE_SQL = 'COALESCE(l.expected_completion_date, l.expected_start_date, l.log_date)'
 
 const ITEM_TYPE_LOOKUP_SQL = `
   SELECT
@@ -1884,33 +1885,54 @@ function buildDemandInsightWhere({
   memberUserId = null,
   keyword = '',
   completedOnly = false,
+  scopeMode = 'entry_or_log_date',
 } = {}) {
+  const normalizedScopeMode = String(scopeMode || '').trim().toLowerCase() === 'ownership_date'
+    ? 'ownership_date'
+    : 'entry_or_log_date'
   const conditions = [
     'l.demand_id IS NOT NULL',
     "COALESCE(u.status_code, 'ACTIVE') = 'ACTIVE'",
     'COALESCE(u.include_in_metrics, 1) = 1',
-    `(
-      EXISTS (
-        SELECT 1
-        FROM work_log_daily_entries e
-        WHERE e.log_id = l.id
-          AND e.user_id = l.user_id
-          AND e.entry_date >= ?
-          AND e.entry_date <= ?
-      )
-      OR (
-        l.log_date >= ?
-        AND l.log_date <= ?
-        AND NOT EXISTS (
-          SELECT 1
-          FROM work_log_daily_entries ae
-          WHERE ae.log_id = l.id
-            AND ae.user_id = l.user_id
-        )
-      )
-    )`,
   ]
-  const params = [startDate, endDate, startDate, endDate]
+  const params = []
+
+  if (normalizedScopeMode === 'ownership_date') {
+    if (startDate && endDate) {
+      conditions.push(`${WORK_LOG_OWNERSHIP_DATE_SQL} BETWEEN ? AND ?`)
+      params.push(startDate, endDate)
+    } else if (startDate) {
+      conditions.push(`${WORK_LOG_OWNERSHIP_DATE_SQL} >= ?`)
+      params.push(startDate)
+    } else if (endDate) {
+      conditions.push(`${WORK_LOG_OWNERSHIP_DATE_SQL} <= ?`)
+      params.push(endDate)
+    }
+  } else {
+    conditions.push(
+      `(
+        EXISTS (
+          SELECT 1
+          FROM work_log_daily_entries e
+          WHERE e.log_id = l.id
+            AND e.user_id = l.user_id
+            AND e.entry_date >= ?
+            AND e.entry_date <= ?
+        )
+        OR (
+          l.log_date >= ?
+          AND l.log_date <= ?
+          AND NOT EXISTS (
+            SELECT 1
+            FROM work_log_daily_entries ae
+            WHERE ae.log_id = l.id
+              AND ae.user_id = l.user_id
+          )
+        )
+      )`,
+    )
+    params.push(startDate, endDate, startDate, endDate)
+  }
 
   if (departmentId) {
     conditions.push('u.department_id = ?')
@@ -7976,7 +7998,7 @@ const Work = {
         departmentId: normalizedDepartmentId || null,
         departmentIds: normalizedDepartmentId ? [] : normalizedDepartmentIds,
         completedOnly: normalizedCompletedOnly,
-        scopeMode: 'schedule_overlap',
+        scopeMode: 'ownership_date',
       }),
       previousRange.startDate && previousRange.endDate
         ? this.getMemberInsight({
@@ -7985,7 +8007,7 @@ const Work = {
             departmentId: normalizedDepartmentId || null,
             departmentIds: normalizedDepartmentId ? [] : normalizedDepartmentIds,
             completedOnly: normalizedCompletedOnly,
-            scopeMode: 'schedule_overlap',
+            scopeMode: 'ownership_date',
           })
         : Promise.resolve({ member_list: [] }),
       pool.query(
@@ -8278,6 +8300,7 @@ const Work = {
     memberUserId = null,
     keyword = '',
     completedOnly = false,
+    scopeMode = 'entry_or_log_date',
   } = {}) {
     await ensureDailyTables()
     const { whereSql, params } = buildDemandInsightWhere({
@@ -8289,6 +8312,7 @@ const Work = {
       memberUserId,
       keyword,
       completedOnly,
+      scopeMode,
     })
 
     const demandInsightFallbackByLogSql = `CASE
@@ -8646,7 +8670,7 @@ const Work = {
     const normalizedScopeMode =
       String(scopeMode || '').trim().toLowerCase() === 'schedule_overlap'
         ? 'schedule_overlap'
-        : 'entry_or_log_date'
+        : (String(scopeMode || '').trim().toLowerCase() === 'ownership_date' ? 'ownership_date' : 'entry_or_log_date')
     const calendarRange = buildChinaBusinessCalendarRange(startDate, endDate)
     const calendarDates = Array.isArray(calendarRange?.dates) ? calendarRange.dates : []
     const workdayCountPerMember = Number(calendarRange?.workday_count || 0)
@@ -8809,6 +8833,17 @@ const Work = {
           )`,
         )
         logParams.push(endDate, endDate)
+      }
+    } else if (normalizedScopeMode === 'ownership_date') {
+      if (startDate && endDate) {
+        logConditions.push(`${WORK_LOG_OWNERSHIP_DATE_SQL} BETWEEN ? AND ?`)
+        logParams.push(startDate, endDate)
+      } else if (startDate) {
+        logConditions.push(`${WORK_LOG_OWNERSHIP_DATE_SQL} >= ?`)
+        logParams.push(startDate)
+      } else if (endDate) {
+        logConditions.push(`${WORK_LOG_OWNERSHIP_DATE_SQL} <= ?`)
+        logParams.push(endDate)
       }
     } else {
       logConditions.push(
@@ -9484,12 +9519,13 @@ const Work = {
         startDate,
         endDate,
         departmentId: normalizedDepartmentId,
-        scopeMode: 'schedule_overlap',
+        scopeMode: 'ownership_date',
       }),
       this.getDemandInsight({
         startDate,
         endDate,
         departmentId: normalizedDepartmentId,
+        scopeMode: 'ownership_date',
       }),
     ])
 
@@ -9740,51 +9776,15 @@ const Work = {
     const storedRowsPromise = this.listEfficiencyFactorSettings()
     const logConditions = ['l.user_id = ?']
     const logParams = [normalizedUserId]
-    const plannedStartDateSql = 'COALESCE(l.expected_start_date, l.expected_completion_date)'
-    const plannedEndDateSql = 'COALESCE(l.expected_completion_date, l.expected_start_date)'
     if (startDate && endDate) {
-      logConditions.push(
-        `(
-          (
-            ${plannedStartDateSql} IS NOT NULL
-            AND ${plannedStartDateSql} <= ?
-            AND ${plannedEndDateSql} >= ?
-          )
-          OR (
-            ${plannedStartDateSql} IS NULL
-            AND l.log_date BETWEEN ? AND ?
-          )
-        )`,
-      )
-      logParams.push(endDate, startDate, startDate, endDate)
+      logConditions.push(`${WORK_LOG_OWNERSHIP_DATE_SQL} BETWEEN ? AND ?`)
+      logParams.push(startDate, endDate)
     } else if (startDate) {
-      logConditions.push(
-        `(
-          (
-            ${plannedEndDateSql} IS NOT NULL
-            AND ${plannedEndDateSql} >= ?
-          )
-          OR (
-            ${plannedEndDateSql} IS NULL
-            l.log_date >= ?
-          )
-        )`,
-      )
-      logParams.push(startDate, startDate)
+      logConditions.push(`${WORK_LOG_OWNERSHIP_DATE_SQL} >= ?`)
+      logParams.push(startDate)
     } else if (endDate) {
-      logConditions.push(
-        `(
-          (
-            ${plannedStartDateSql} IS NOT NULL
-            AND ${plannedStartDateSql} <= ?
-          )
-          OR (
-            ${plannedStartDateSql} IS NULL
-            l.log_date <= ?
-          )
-        )`,
-      )
-      logParams.push(endDate, endDate)
+      logConditions.push(`${WORK_LOG_OWNERSHIP_DATE_SQL} <= ?`)
+      logParams.push(endDate)
     }
     if (completedOnly) {
       logConditions.push("COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'")
@@ -9966,13 +9966,15 @@ const Work = {
           Boolean(logDate)
           && (!startDate || logDate >= startDate)
           && (!endDate || logDate <= endDate)
-        const scheduleInRange = Boolean(
-          plannedStartDate
-          && plannedEndDate
-          && (!startDate || plannedEndDate >= startDate)
-          && (!endDate || plannedStartDate <= endDate),
+        const ownershipDate =
+          expectedCompletionDate
+          || expectedStartDate
+          || logDate
+        const itemInSelectedRange = Boolean(
+          ownershipDate
+          && (!startDate || ownershipDate >= startDate)
+          && (!endDate || ownershipDate <= endDate),
         )
-        const itemInSelectedRange = scheduleInRange || (!plannedStartDate && logDateInRange)
         const normalizedTaskDifficultyCode =
           String(item?.effective_task_difficulty_code || DEFAULT_TASK_DIFFICULTY_CODE).trim().toUpperCase()
           || DEFAULT_TASK_DIFFICULTY_CODE
@@ -9984,7 +9986,7 @@ const Work = {
         const actualHours = itemInSelectedRange ? toDecimal1(item.actual_hours) : 0
         const ownerComparableActualHours =
           Number(item?.owner_estimate_covered || 0) > 0 ? toDecimal1(actualHours) : 0
-        const effectiveLogDate = plannedStartDate
+        const effectiveLogDate = ownershipDate
           || (hasExplicitEntry && !logDateInRange
             ? (entryAgg?.last_entry_date || entryAgg?.first_entry_date || item.log_date)
             : item.log_date)
