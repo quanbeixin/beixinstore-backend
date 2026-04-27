@@ -5,7 +5,7 @@ const ConfigDict = require('../models/ConfigDict')
 const NotificationEvent = require('../models/NotificationEvent')
 const DemandScoring = require('../models/DemandScoring')
 const pool = require('../utils/db')
-const { sendNotification, createFeishuDemandChat } = require('../utils/notificationSender')
+const { sendNotification, createFeishuDemandChat, addFeishuChatMembers } = require('../utils/notificationSender')
 const {
   normalizeTemplateGraph,
   filterTemplateGraphByParticipantRoles,
@@ -850,6 +850,26 @@ async function resolveOpenIdsByUserIds(userIds = []) {
   } catch {
     return []
   }
+}
+
+function extractParticipantRoleUserIds(participantRoleUserMap = {}, participantRoles = []) {
+  const normalizedRoleMap =
+    normalizeParticipantRoleUserMapFromBody(participantRoleUserMap || {}, participantRoles || []).value || {}
+  return Array.from(
+    new Set(
+      Object.values(normalizedRoleMap)
+        .flatMap((item) => (Array.isArray(item) ? item : [item]))
+        .map((item) => toPositiveInt(item))
+        .filter(Boolean),
+    ),
+  )
+}
+
+async function buildDemandAutoGroupMemberOpenIds({ ownerOpenId = '', participantRoleUserMap = {}, participantRoles = [] } = {}) {
+  const normalizedOwnerOpenId = normalizeText(ownerOpenId, 128)
+  const roleUserIds = extractParticipantRoleUserIds(participantRoleUserMap, participantRoles)
+  const participantOpenIds = await resolveOpenIdsByUserIds(roleUserIds)
+  return Array.from(new Set([normalizedOwnerOpenId, ...participantOpenIds].filter(Boolean)))
 }
 
 function validateTemplateParticipantRoles(template, participantRoles = []) {
@@ -2302,16 +2322,11 @@ const createDemand = async (req, res) => {
       if (!ownerOpenId) {
         autoGroupChatWarning = '需求负责人未绑定飞书 OpenID，未能自动拉群'
       } else {
-        const roleUserIds = Array.from(
-          new Set(
-            Object.values(syncedParticipantRolePayload.participantRoleUserMap || {})
-              .flatMap((item) => (Array.isArray(item) ? item : [item]))
-              .map((item) => toPositiveInt(item))
-              .filter(Boolean),
-          ),
-        )
-        const participantOpenIds = await resolveOpenIdsByUserIds(roleUserIds)
-        const memberOpenIds = Array.from(new Set([ownerOpenId, ...participantOpenIds]))
+        const memberOpenIds = await buildDemandAutoGroupMemberOpenIds({
+          ownerOpenId,
+          participantRoleUserMap: syncedParticipantRolePayload.participantRoleUserMap || {},
+          participantRoles: syncedParticipantRolePayload.participantRoles || [],
+        })
 
         const chatResult = await createFeishuDemandChat({
           demandId: finalDemandId,
@@ -2630,6 +2645,17 @@ const updateDemand = async (req, res) => {
       normalizedExistingParticipantRoles,
       normalizedNextParticipantRoles,
     )
+    const groupChatModeChanged =
+      String(existing.group_chat_mode || 'none').toLowerCase() !== String(groupChatMode || 'none').toLowerCase()
+    const shouldSyncAutoGroupChat =
+      String(groupChatMode || 'none').toLowerCase() === 'auto' &&
+      (
+        groupChatModeChanged ||
+        parsedOwnerUserId !== undefined ||
+        req.body.project_manager !== undefined ||
+        participantRolesResult.value !== undefined ||
+        participantRoleUserMapResult.value !== undefined
+      )
 
     await Work.updateDemand(demandId, {
       name,
@@ -2704,7 +2730,61 @@ const updateDemand = async (req, res) => {
     }
 
     await refreshDemandHourSummaryQuietly(demandId)
-    const updated = await Work.findDemandById(demandId)
+    let updated = await Work.findDemandById(demandId)
+    let autoGroupChatWarning = ''
+    let autoGroupChatResult = null
+
+    if (shouldSyncAutoGroupChat) {
+      const ownerOpenId = normalizeText(owner?.feishu_open_id, 128)
+      if (!ownerOpenId) {
+        autoGroupChatWarning = '需求负责人未绑定飞书 OpenID，未能自动拉群'
+      } else {
+        const memberOpenIds = await buildDemandAutoGroupMemberOpenIds({
+          ownerOpenId,
+          participantRoleUserMap: finalParticipantRoleUserMap || {},
+          participantRoles: finalParticipantRoles || [],
+        })
+        const currentChatId = normalizeDemandGroupChatId(updated?.group_chat_id) || null
+
+        if (currentChatId) {
+          const syncResult = await addFeishuChatMembers({
+            chatId: currentChatId,
+            memberOpenIds,
+          })
+          if (syncResult?.success) {
+            autoGroupChatResult = {
+              mode: 'auto',
+              chat_id: currentChatId,
+              added_member_count: Number(syncResult?.data?.added_member_count || 0),
+            }
+          } else {
+            autoGroupChatWarning = `自动补群成员失败：${syncResult?.error_message || '请检查飞书应用权限'}`
+          }
+        } else {
+          const chatResult = await createFeishuDemandChat({
+            demandId,
+            demandName: name,
+            ownerOpenId,
+            memberOpenIds,
+          })
+          if (chatResult?.success && chatResult?.data?.chat_id) {
+            await Work.updateDemandGroupChatBinding(demandId, {
+              groupChatMode: 'auto',
+              groupChatId: chatResult.data.chat_id,
+            })
+            updated = await Work.findDemandById(demandId)
+            autoGroupChatResult = {
+              mode: 'auto',
+              chat_id: chatResult.data.chat_id,
+              chat_name: chatResult.data.name || null,
+              added_member_count: Number(memberOpenIds.length || 0),
+            }
+          } else {
+            autoGroupChatWarning = `自动拉群失败：${chatResult?.error_message || '请检查飞书应用权限'}`
+          }
+        }
+      }
+    }
 
     const prevOwnerUserId = toPositiveInt(existing?.owner_user_id)
     const nextOwnerUserId = toPositiveInt(updated?.owner_user_id)
@@ -2746,15 +2826,19 @@ const updateDemand = async (req, res) => {
 
     return res.json({
       success: true,
-      message: workflowAutoReplaced
-        ? '需求更新成功，流程已自动同步'
-        : workflowSyncNotice
-          ? `需求更新成功（${workflowSyncNotice}）`
-          : '需求更新成功',
+      message: (() => {
+        const warnings = []
+        if (workflowAutoReplaced) warnings.push('流程已自动同步')
+        else if (workflowSyncNotice) warnings.push(workflowSyncNotice)
+        if (autoGroupChatWarning) warnings.push(autoGroupChatWarning)
+        return warnings.length > 0 ? `需求更新成功（${warnings.join('；')}）` : '需求更新成功'
+      })(),
       data: {
         ...updated,
         workflow_auto_replaced: workflowAutoReplaced ? 1 : 0,
         workflow_sync_notice: workflowSyncNotice || null,
+        auto_group_chat_warning: autoGroupChatWarning || null,
+        auto_group_chat_result: autoGroupChatResult,
       },
     })
   } catch (err) {

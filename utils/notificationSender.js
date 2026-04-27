@@ -880,6 +880,97 @@ function buildDemandChatName({ demandId, demandName }) {
   return normalizeText(rawName, 50) || `需求协作-${Date.now()}`
 }
 
+async function listFeishuChatMemberOpenIds({ chatId = '', token = '', timeoutMs = 8000 } = {}) {
+  const normalizedChatId = normalizeText(chatId, 128)
+  const normalizedToken = normalizeText(token, 2048)
+  if (!normalizedChatId || !normalizedToken) {
+    return {
+      success: false,
+      error_code: 'FEISHU_CHAT_MEMBER_LIST_ARGS_INVALID',
+      error_message: '缺少 chat_id 或 token，无法获取群成员',
+      response: {},
+      data: [],
+    }
+  }
+
+  const memberOpenIds = new Set()
+  let pageToken = ''
+  let hasMore = true
+
+  while (hasMore) {
+    const query = new URLSearchParams({
+      member_id_type: 'open_id',
+      page_size: '100',
+    })
+    if (pageToken) query.set('page_token', pageToken)
+
+    try {
+      const response = await requestWithTimeout(
+        `https://open.feishu.cn/open-apis/im/v1/chats/${encodeURIComponent(normalizedChatId)}/members?${query.toString()}`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${normalizedToken}`,
+            'Content-Type': 'application/json',
+          },
+        },
+        timeoutMs,
+      )
+
+      const parsed = await response.json().catch(() => null)
+      if (!response.ok) {
+        return {
+          success: false,
+          error_code: 'FEISHU_CHAT_MEMBER_LIST_HTTP_ERROR',
+          error_message: `获取飞书群成员失败: HTTP ${response.status}`,
+          response: {
+            http_status: response.status,
+            body: parsed,
+          },
+          data: [],
+        }
+      }
+
+      if (!parsed || Number(parsed.code) !== 0) {
+        return {
+          success: false,
+          error_code: 'FEISHU_CHAT_MEMBER_LIST_FAILED',
+          error_message: parsed?.msg || '获取飞书群成员失败',
+          response: {
+            http_status: response.status,
+            body: parsed,
+          },
+          data: [],
+        }
+      }
+
+      const items = Array.isArray(parsed?.data?.items) ? parsed.data.items : []
+      items.forEach((item) => {
+        const memberId = normalizeText(item?.member_id, 128)
+        if (memberId) memberOpenIds.add(memberId)
+      })
+
+      hasMore = Boolean(parsed?.data?.has_more)
+      pageToken = normalizeText(parsed?.data?.page_token, 256)
+      if (hasMore && !pageToken) break
+    } catch (error) {
+      return {
+        success: false,
+        error_code: 'FEISHU_CHAT_MEMBER_LIST_REQUEST_FAILED',
+        error_message: error?.message || '获取飞书群成员请求失败',
+        response: {},
+        data: [],
+      }
+    }
+  }
+
+  return {
+    success: true,
+    data: Array.from(memberOpenIds),
+    response: {},
+  }
+}
+
 async function createFeishuDemandChat({ demandId = '', demandName = '', ownerOpenId = '', memberOpenIds = [] } = {}) {
   const normalizedOwnerOpenId = normalizeText(ownerOpenId, 128)
   if (!normalizedOwnerOpenId) {
@@ -1014,6 +1105,140 @@ async function createFeishuDemandChat({ demandId = '', demandName = '', ownerOpe
     success: false,
     error_code: 'FEISHU_CHAT_CREATE_FAILED',
     error_message: '创建飞书群失败',
+    response: {},
+  }
+}
+
+async function addFeishuChatMembers({ chatId = '', memberOpenIds = [] } = {}) {
+  const normalizedChatId = normalizeText(chatId, 128)
+  if (!normalizedChatId) {
+    return {
+      success: false,
+      error_code: 'FEISHU_CHAT_ID_INVALID',
+      error_message: '缺少有效的 chat_id，无法补充群成员',
+      response: {},
+    }
+  }
+
+  const normalizedMemberOpenIds = Array.from(
+    new Set(
+      (Array.isArray(memberOpenIds) ? memberOpenIds : [])
+        .map((item) => normalizeText(item, 128))
+        .filter(Boolean),
+    ),
+  )
+  if (normalizedMemberOpenIds.length === 0) {
+    return {
+      success: true,
+      data: {
+        chat_id: normalizedChatId,
+        added_member_count: 0,
+        member_open_ids: [],
+      },
+      response: {},
+    }
+  }
+
+  const tokenResult = await getTenantAccessToken()
+  if (!tokenResult.success) {
+    return {
+      success: false,
+      error_code: tokenResult.error_code || 'TOKEN_ERROR',
+      error_message: tokenResult.error_message || '获取飞书 token 失败',
+      response: tokenResult.response || {},
+    }
+  }
+
+  const { timeoutMs } = pickFeishuConfig()
+  const currentMembersResult = await listFeishuChatMemberOpenIds({
+    chatId: normalizedChatId,
+    token: tokenResult.token,
+    timeoutMs,
+  })
+  if (!currentMembersResult.success) {
+    return currentMembersResult
+  }
+
+  const currentMemberSet = new Set(currentMembersResult.data || [])
+  const missingMemberOpenIds = normalizedMemberOpenIds.filter((item) => !currentMemberSet.has(item))
+  if (missingMemberOpenIds.length === 0) {
+    return {
+      success: true,
+      data: {
+        chat_id: normalizedChatId,
+        added_member_count: 0,
+        member_open_ids: [],
+      },
+      response: currentMembersResult.response || {},
+    }
+  }
+
+  const addChunks = []
+  for (let index = 0; index < missingMemberOpenIds.length; index += 50) {
+    addChunks.push(missingMemberOpenIds.slice(index, index + 50))
+  }
+
+  const addedMemberOpenIds = []
+  for (const chunk of addChunks) {
+    try {
+      const response = await requestWithTimeout(
+        `https://open.feishu.cn/open-apis/im/v1/chats/${encodeURIComponent(normalizedChatId)}/members?member_id_type=open_id`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${tokenResult.token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            id_list: chunk,
+          }),
+        },
+        timeoutMs,
+      )
+
+      const parsed = await response.json().catch(() => null)
+      if (!response.ok) {
+        return {
+          success: false,
+          error_code: 'FEISHU_CHAT_ADD_MEMBERS_HTTP_ERROR',
+          error_message: `补充飞书群成员失败: HTTP ${response.status}`,
+          response: {
+            http_status: response.status,
+            body: parsed,
+          },
+        }
+      }
+
+      if (!parsed || Number(parsed.code) !== 0) {
+        return {
+          success: false,
+          error_code: 'FEISHU_CHAT_ADD_MEMBERS_FAILED',
+          error_message: parsed?.msg || '飞书返回补充群成员失败',
+          response: {
+            http_status: response.status,
+            body: parsed,
+          },
+        }
+      }
+
+      addedMemberOpenIds.push(...chunk)
+    } catch (error) {
+      return {
+        success: false,
+        error_code: 'FEISHU_CHAT_ADD_MEMBERS_REQUEST_FAILED',
+        error_message: error?.message || '补充飞书群成员请求失败',
+        response: {},
+      }
+    }
+  }
+
+  return {
+    success: true,
+    data: {
+      chat_id: normalizedChatId,
+      added_member_count: addedMemberOpenIds.length,
+      member_open_ids: addedMemberOpenIds,
+    },
     response: {},
   }
 }
@@ -1270,5 +1495,6 @@ module.exports = {
   updateNotificationSendControl,
   listFeishuChats,
   createFeishuDemandChat,
+  addFeishuChatMembers,
   buildBugCommentReplyCardPayload,
 }
