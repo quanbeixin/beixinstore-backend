@@ -11,7 +11,7 @@ const BUG_VIEW_VISIBILITY = Object.freeze({
   PRIVATE: 'PRIVATE',
   SHARED: 'SHARED',
 })
-const BUG_VIEW_GROUP_FIELD_SET = new Set(['status', 'reporter', 'bug_type', 'assignee'])
+const BUG_VIEW_GROUP_FIELD_SET = new Set(['status', 'reporter', 'bug_type', 'priority', 'severity', 'assignee'])
 const BUG_VIEW_ALLOWED_PAGE_SIZE_SET = new Set([20, 50, 100])
 const DEFAULT_WORKFLOW_TRANSITIONS = Object.freeze([
   {
