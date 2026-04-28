@@ -19,6 +19,7 @@ const BUSINESS_GROUP_DICT_KEY = 'business_group'
 const JOB_LEVEL_DICT_KEY = 'job_level'
 const TASK_DIFFICULTY_DICT_KEY = 'task_difficulty'
 const DEFAULT_TASK_DIFFICULTY_CODE = 'N1'
+const OWNER_WORKBENCH_ESTIMATE_ITEM_LIMIT = 2000
 const EFFICIENCY_FACTOR_TYPES = {
   JOB_LEVEL_WEIGHT: 'JOB_LEVEL_WEIGHT',
   TASK_DIFFICULTY_WEIGHT: 'TASK_DIFFICULTY_WEIGHT',
@@ -7729,15 +7730,9 @@ const Work = {
      LEFT JOIN config_dict_items pdi
        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
       AND pdi.item_code = l.phase_key
-     WHERE ${ownerEstimateQueryConditions.join(' AND ')}
-     ORDER BY
-       CASE
-         WHEN l.owner_estimated_at IS NOT NULL OR l.owner_estimated_by IS NOT NULL THEN 1
-         ELSE 0
-       END ASC,
-       l.updated_at DESC,
-       l.id DESC
-     LIMIT 400`
+	     WHERE ${ownerEstimateQueryConditions.join(' AND ')}
+	     ORDER BY l.updated_at DESC, l.id DESC
+	     LIMIT ${OWNER_WORKBENCH_ESTIMATE_ITEM_LIMIT}`
 
     const ownerEstimateOwnerOnlySql = `SELECT
        l.id,
@@ -7782,9 +7777,9 @@ const Work = {
      LEFT JOIN config_dict_items pdi
        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
       AND pdi.item_code = l.phase_key
-     WHERE ${ownerEstimateQueryConditions.join(' AND ')}
-     ORDER BY l.updated_at DESC, l.id DESC
-     LIMIT 400`
+	     WHERE ${ownerEstimateQueryConditions.join(' AND ')}
+	     ORDER BY l.updated_at DESC, l.id DESC
+	     LIMIT ${OWNER_WORKBENCH_ESTIMATE_ITEM_LIMIT}`
 
     const ownerEstimateLegacySql = `SELECT
        l.id,
@@ -7823,9 +7818,9 @@ const Work = {
      LEFT JOIN config_dict_items pdi
        ON pdi.type_key = '${DEMAND_PHASE_DICT_KEY}'
       AND pdi.item_code = l.phase_key
-     WHERE ${ownerEstimateQueryConditions.join(' AND ')}
-     ORDER BY l.updated_at DESC, l.id DESC
-     LIMIT 400`
+	     WHERE ${ownerEstimateQueryConditions.join(' AND ')}
+	     ORDER BY l.updated_at DESC, l.id DESC
+	     LIMIT ${OWNER_WORKBENCH_ESTIMATE_ITEM_LIMIT}`
 
     try {
       const [queryRows] = await pool.query(ownerEstimateSql, ownerEstimateQueryParams)
