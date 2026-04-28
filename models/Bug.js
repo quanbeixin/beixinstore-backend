@@ -225,6 +225,8 @@ function sanitizeBugViewConfig(config = {}) {
     keyword: normalizeText(source.keyword, 100),
     status_code: normalizeCode(source.status_code),
     severity_code: normalizeCode(source.severity_code),
+    issue_stage: normalizeCode(source.issue_stage),
+    demand_id: normalizeText(source.demand_id, 50),
     assignee_id: toPositiveInt(source.assignee_id),
     reporter_id: toPositiveInt(source.reporter_id),
     start_date: normalizeDateText(source.start_date),
