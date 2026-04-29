@@ -1,4 +1,5 @@
 const DemandScoring = require('../models/DemandScoring')
+const { emitDemandScoreAssignNotifications } = require('../utils/demandScoreNotification')
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -22,6 +23,7 @@ const listMyDemandScoreSlots = async (req, res) => {
   try {
     const data = await DemandScoring.listMySlots(req.user?.id, {
       status: req.query.status,
+      demandId: req.query.demand_id,
       page: req.query.page,
       pageSize: req.query.pageSize,
     })
@@ -99,6 +101,12 @@ const generateDemandScoreTask = async (req, res) => {
       operatorUserId: req.user?.id,
       forceRebuild: req.body?.force_rebuild === true || req.body?.force_rebuild === 1 || req.body?.force_rebuild === '1',
     })
+    if (result?.created || result?.rebuilt) {
+      await emitDemandScoreAssignNotifications({
+        demandId,
+        operatorUserId: req.user?.id || null,
+      })
+    }
     return res.json({ success: true, message: result.created ? '评分任务已生成' : '评分任务已存在', data: result })
   } catch (err) {
     if (err?.code === 'DEMAND_NOT_FOUND') {

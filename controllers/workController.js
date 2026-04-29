@@ -5,6 +5,7 @@ const ConfigDict = require('../models/ConfigDict')
 const NotificationEvent = require('../models/NotificationEvent')
 const DemandScoring = require('../models/DemandScoring')
 const pool = require('../utils/db')
+const { emitDemandScoreAssignNotifications } = require('../utils/demandScoreNotification')
 const { sendNotification, createFeishuDemandChat, addFeishuChatMembers } = require('../utils/notificationSender')
 const {
   normalizeTemplateGraph,
@@ -505,7 +506,13 @@ async function ensureDemandScoringAfterWorkflowCompletion({ demandId, demandBefo
 
   if (previousStatus !== 'DONE' && nextStatus === 'DONE') {
     try {
-      await DemandScoring.ensureTaskForDemand(normalizedDemandId, { operatorUserId })
+      const result = await DemandScoring.ensureTaskForDemand(normalizedDemandId, { operatorUserId })
+      if (result?.created || result?.rebuilt) {
+        await emitDemandScoreAssignNotifications({
+          demandId: normalizedDemandId,
+          operatorUserId,
+        })
+      }
     } catch (scoreErr) {
       console.error('流程自动完成后生成评分任务失败:', scoreErr)
     }
@@ -2309,7 +2316,13 @@ const createDemand = async (req, res) => {
 
     if (normalizeStatus(status) === 'DONE') {
       try {
-        await DemandScoring.ensureTaskForDemand(finalDemandId, { operatorUserId: req.user.id })
+        const result = await DemandScoring.ensureTaskForDemand(finalDemandId, { operatorUserId: req.user.id })
+        if (result?.created || result?.rebuilt) {
+          await emitDemandScoreAssignNotifications({
+            demandId: finalDemandId,
+            operatorUserId: req.user.id,
+          })
+        }
       } catch (scoreErr) {
         console.error('需求创建后生成评分任务失败:', scoreErr)
       }
@@ -2818,7 +2831,13 @@ const updateDemand = async (req, res) => {
 
     if (prevStatus !== 'DONE' && nextStatus === 'DONE') {
       try {
-        await DemandScoring.ensureTaskForDemand(demandId, { operatorUserId: req.user.id })
+        const result = await DemandScoring.ensureTaskForDemand(demandId, { operatorUserId: req.user.id })
+        if (result?.created || result?.rebuilt) {
+          await emitDemandScoreAssignNotifications({
+            demandId,
+            operatorUserId: req.user.id,
+          })
+        }
       } catch (scoreErr) {
         console.error('需求完成后生成评分任务失败:', scoreErr)
       }

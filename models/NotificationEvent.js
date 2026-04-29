@@ -129,6 +129,15 @@ function buildWorklogPageUrlFromEventData(eventData = {}) {
   return buildPortalUrl('/work-logs', query)
 }
 
+function buildDemandScorePageUrlFromEventData(eventData = {}) {
+  const demandId = normalizeDemandId(eventData?.demand_id)
+  if (!demandId) return ''
+  return buildPortalUrl('/demand-scores', {
+    demand_id: demandId,
+    status: 'PENDING',
+  })
+}
+
 function buildActionMetaByEventType(eventType, eventData = {}) {
   const normalizedEventType = normalizeText(eventType, 64).toLowerCase()
 
@@ -139,6 +148,7 @@ function buildActionMetaByEventType(eventType, eventData = {}) {
     'task_assign',
     'task_deadline',
     'daily_report_notify',
+    'demand_score_assign',
   ])
 
   const viewDemandDetailEvents = new Set([
@@ -150,8 +160,12 @@ function buildActionMetaByEventType(eventType, eventData = {}) {
   ])
 
   if (goFillReportEvents.has(normalizedEventType)) {
-    const url = buildWorklogPageUrlFromEventData(eventData)
-    return url ? { detail_url: url, detail_action_text: '去填报' } : null
+    const url =
+      normalizedEventType === 'demand_score_assign'
+        ? buildDemandScorePageUrlFromEventData(eventData)
+        : buildWorklogPageUrlFromEventData(eventData)
+    const detailActionText = normalizedEventType === 'demand_score_assign' ? '去评分' : '去填报'
+    return url ? { detail_url: url, detail_action_text: detailActionText } : null
   }
 
   if (viewDemandDetailEvents.has(normalizedEventType)) {
@@ -1094,7 +1108,7 @@ const NotificationEvent = {
       } else {
         const resolvedTargets = await resolveTargets(rule, data)
         const filteredTargetsResult = excludeOperatorSelfTargets(resolvedTargets, operatorContext, {
-          allowSelfTargets: normalizedEventType.startsWith('bug_'),
+          allowSelfTargets: normalizedEventType.startsWith('bug_') || normalizedEventType === 'demand_score_assign',
         })
         const targets = filteredTargetsResult.targets
         const removedSelfCount = Number(filteredTargetsResult.removed_count || 0)

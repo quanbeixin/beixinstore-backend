@@ -1241,18 +1241,23 @@ const DemandScoring = {
     }
   },
 
-  async listMySlots(userId, { status = '', page = 1, pageSize = 20 } = {}) {
+  async listMySlots(userId, { status = '', demandId = '', page = 1, pageSize = 20 } = {}) {
     const evaluatorUserId = toPositiveInt(userId)
     if (!evaluatorUserId) return { list: [], total: 0, page: 1, pageSize: 20 }
 
     const normalizedPage = toPositiveInt(page) || 1
     const normalizedPageSize = Math.min(toPositiveInt(pageSize) || 20, 100)
     const statusText = normalizeText(status, 32).toUpperCase()
+    const normalizedDemandId = normalizeDemandId(demandId)
     const where = ['s.evaluator_user_id = ?']
     const params = [evaluatorUserId]
     if (statusText && ['PENDING', 'SUBMITTED'].includes(statusText)) {
       where.push('s.status = ?')
       params.push(statusText)
+    }
+    if (normalizedDemandId) {
+      where.push('t.demand_id = ?')
+      params.push(normalizedDemandId)
     }
 
     const whereSql = where.join(' AND ')
@@ -1314,6 +1319,54 @@ const DemandScoring = {
       page: normalizedPage,
       pageSize: normalizedPageSize,
     }
+  },
+
+  async listPendingNotificationReceiversByDemand(demandId, { conn = pool } = {}) {
+    const normalizedDemandId = normalizeDemandId(demandId)
+    if (!normalizedDemandId) return []
+
+    const [rows] = await conn.query(
+      `SELECT
+         t.demand_id,
+         t.demand_name,
+         dict.id AS business_line_id,
+         s.evaluator_user_id,
+         COALESCE(NULLIF(TRIM(u.real_name), ''), NULLIF(TRIM(u.username), ''), CONCAT('用户', s.evaluator_user_id)) AS evaluator_name,
+         COUNT(*) AS pending_slot_count,
+         GROUP_CONCAT(DISTINCT NULLIF(TRIM(sub.evaluatee_name), '') ORDER BY sub.evaluatee_name SEPARATOR '、') AS evaluatee_names
+       FROM demand_score_slots s
+       INNER JOIN demand_score_tasks t ON t.id = s.task_id
+       INNER JOIN demand_score_subjects sub ON sub.id = s.subject_id
+       INNER JOIN work_demands d
+         ON d.id COLLATE utf8mb4_unicode_ci = t.demand_id
+       LEFT JOIN users u ON u.id = s.evaluator_user_id
+       LEFT JOIN config_dict_items dict
+         ON dict.type_key = 'business_group'
+        AND dict.item_code = d.business_group_code
+       WHERE t.demand_id = ?
+         AND s.status = ?
+         AND COALESCE(d.status, '') <> 'CANCELLED'
+         AND DATE(d.expected_release_date) >= ?
+       GROUP BY
+         t.demand_id,
+         t.demand_name,
+         dict.id,
+         s.evaluator_user_id,
+         u.real_name,
+         u.username
+       ORDER BY s.evaluator_user_id ASC`,
+      [normalizedDemandId, SLOT_STATUS.PENDING, SCORING_COMPLETED_CUTOFF_DATE],
+    )
+
+    return rows.map((row) => ({
+      demand_id: normalizeDemandId(row?.demand_id),
+      demand_name: normalizeText(row?.demand_name, 200) || '',
+      business_line_id: toPositiveInt(row?.business_line_id),
+      evaluator_user_id: toPositiveInt(row?.evaluator_user_id),
+      evaluator_name: normalizeText(row?.evaluator_name, 100) || '',
+      pending_slot_count: Number(row?.pending_slot_count || 0),
+      evaluatee_names: normalizeText(row?.evaluatee_names, 1000) || '',
+    })).filter((row) => row.demand_id && row.evaluator_user_id && row.pending_slot_count > 0)
   },
 
   async getSlotForEvaluator(slotId, userId) {
