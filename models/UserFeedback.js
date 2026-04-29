@@ -11,6 +11,7 @@ const DEFAULT_PROMPT_CONFIG = Object.freeze({
     '语气亲切自然，像朋友聊天一样。表达同理心，理解用户的困扰。避免过于正式的套话，用简洁口语化表达。',
   limitations: '回复必须基于知识库内容，用户需求请尽量简练。',
 })
+const IMPORTANT_EMAIL_STYLE_OPTIONS = new Set(['RED', 'STAR', 'RED_STAR'])
 
 let ensureTablesPromise = null
 let tablesReady = false
@@ -112,6 +113,10 @@ function normalizeStringList(value, maxItemLength = 100) {
 function normalizeNullableJsonArray(value, maxItemLength = 100) {
   const list = normalizeStringList(value, maxItemLength)
   return list.length > 0 ? JSON.stringify(list) : null
+}
+
+function normalizeEmailAddress(value) {
+  return normalizeText(value, 255).toLowerCase()
 }
 
 function parseJsonArray(value) {
@@ -222,6 +227,16 @@ function buildFilterClauses(filters = {}) {
     params.push(dateEnd)
   }
 
+  const importantEmails = Array.isArray(filters.importantEmails)
+    ? [...new Set(filters.importantEmails.map((item) => normalizeEmailAddress(item)).filter(Boolean))]
+    : []
+  if (importantEmails.length > 0) {
+    clauses.push(`LOWER(TRIM(user_email)) IN (${importantEmails.map(() => '?').join(', ')})`)
+    params.push(...importantEmails)
+  } else if (filters.onlyImportantEmail === true) {
+    clauses.push('1 = 0')
+  }
+
   const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
   return { whereSql, params }
 }
@@ -239,6 +254,40 @@ function normalizePromptConfig(value = {}) {
     replyStyle: normalizeText(next.replyStyle) || DEFAULT_PROMPT_CONFIG.replyStyle,
     limitations: normalizeText(next.limitations) || DEFAULT_PROMPT_CONFIG.limitations,
   }
+}
+
+function normalizeImportantEmailRule(value = {}) {
+  const next = value && typeof value === 'object' ? value : {}
+  const email = normalizeEmailAddress(next.email)
+  const style = String(next.style || '').trim().toUpperCase()
+
+  if (!email) return null
+
+  return {
+    email,
+    style: IMPORTANT_EMAIL_STYLE_OPTIONS.has(style) ? style : 'STAR',
+    note: normalizeText(next.note, 255),
+    enabled: toTinyBool(next.enabled, 1) === 1,
+  }
+}
+
+function normalizeImportantEmailConfig(value = []) {
+  const list = Array.isArray(value)
+    ? value
+    : Array.isArray(value?.rules)
+      ? value.rules
+      : []
+
+  const seenEmails = new Set()
+
+  return list
+    .map((item) => normalizeImportantEmailRule(item))
+    .filter((item) => {
+      if (!item?.email) return false
+      if (seenEmails.has(item.email)) return false
+      seenEmails.add(item.email)
+      return true
+    })
 }
 
 async function ensureTables() {
@@ -371,7 +420,16 @@ const UserFeedback = {
     )
     const offset = (normalizedPage - 1) * normalizedPageSize
 
-    const { whereSql, params } = buildFilterClauses(filters)
+    const importantEmailRules = filters.onlyImportantEmail ? await this.getImportantEmailConfig() : []
+    const importantEmails = importantEmailRules
+      .filter((item) => item?.enabled !== false)
+      .map((item) => item?.email)
+      .filter(Boolean)
+    const resolvedFilters = filters.onlyImportantEmail
+      ? { ...filters, importantEmails }
+      : filters
+
+    const { whereSql, params } = buildFilterClauses(resolvedFilters)
 
     const [countRows] = await pool.query(
       `SELECT COUNT(*) AS total FROM user_feedback ${whereSql}`,
@@ -426,7 +484,15 @@ const UserFeedback = {
 
   async listAllFeedback(filters = {}) {
     await ensureTables()
-    const { whereSql, params } = buildFilterClauses(filters)
+    const importantEmailRules = filters.onlyImportantEmail ? await this.getImportantEmailConfig() : []
+    const importantEmails = importantEmailRules
+      .filter((item) => item?.enabled !== false)
+      .map((item) => item?.email)
+      .filter(Boolean)
+    const resolvedFilters = filters.onlyImportantEmail
+      ? { ...filters, importantEmails }
+      : filters
+    const { whereSql, params } = buildFilterClauses(resolvedFilters)
     const [rows] = await pool.query(
       `SELECT
          id,
@@ -1098,6 +1164,50 @@ const UserFeedback = {
     )
 
     return this.getPromptConfig()
+  },
+
+  async getImportantEmailConfig() {
+    await ensureTables()
+    const [rows] = await pool.query(
+      `SELECT config_value_json
+       FROM feedback_ai_prompt_configs
+       WHERE config_key = 'important_emails'
+       LIMIT 1`,
+    )
+
+    const raw = rows?.[0]?.config_value_json
+    if (!raw) {
+      return []
+    }
+
+    if (typeof raw === 'object' && raw !== null) {
+      return normalizeImportantEmailConfig(raw)
+    }
+
+    try {
+      return normalizeImportantEmailConfig(JSON.parse(String(raw)))
+    } catch {
+      return []
+    }
+  },
+
+  async updateImportantEmailConfig(configValue = [], options = {}) {
+    await ensureTables()
+
+    const normalized = normalizeImportantEmailConfig(configValue)
+    const operatorUserId = toPositiveInt(options.operatorUserId)
+
+    await pool.query(
+      `INSERT INTO feedback_ai_prompt_configs (config_key, config_value_json, updated_by)
+       VALUES ('important_emails', CAST(? AS JSON), ?)
+       ON DUPLICATE KEY UPDATE
+         config_value_json = VALUES(config_value_json),
+         updated_by = VALUES(updated_by),
+         updated_at = CURRENT_TIMESTAMP`,
+      [JSON.stringify(normalized), operatorUserId],
+    )
+
+    return this.getImportantEmailConfig()
   },
 }
 

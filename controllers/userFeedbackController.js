@@ -23,6 +23,7 @@ function hasPagedQuery(query = {}) {
     'pageSize',
     'searchText',
     'product',
+    'onlyImportantEmail',
     'status',
     'isNewRequest',
     'aiCategory',
@@ -40,6 +41,7 @@ async function getAllFeedback(req, res) {
         filters: {
           searchText: req.query.searchText,
           product: req.query.product,
+          onlyImportantEmail: parseBoolean(req.query.onlyImportantEmail),
           status: req.query.status,
           isNewRequest: parseBoolean(req.query.isNewRequest),
           aiCategory: req.query.aiCategory,
@@ -272,6 +274,33 @@ async function updatePromptConfig(req, res) {
   }
 }
 
+async function getImportantEmailConfig(req, res) {
+  try {
+    const config = await UserFeedback.getImportantEmailConfig()
+    return res.json({ success: true, data: config })
+  } catch (error) {
+    console.error('获取重点邮箱配置失败:', error)
+    return res.status(500).json({ success: false, message: '获取配置失败' })
+  }
+}
+
+async function updateImportantEmailConfig(req, res) {
+  try {
+    const config = await UserFeedback.updateImportantEmailConfig(req.body || [], {
+      operatorUserId: req.user?.id,
+    })
+
+    return res.json({
+      success: true,
+      message: '配置更新成功',
+      data: config,
+    })
+  } catch (error) {
+    console.error('更新重点邮箱配置失败:', error)
+    return res.status(500).json({ success: false, message: '更新配置失败' })
+  }
+}
+
 module.exports = {
   getAllFeedback,
   getFeedbackById,
@@ -285,4 +314,6 @@ module.exports = {
   analyzeSingle,
   getPromptConfig,
   updatePromptConfig,
+  getImportantEmailConfig,
+  updateImportantEmailConfig,
 }
