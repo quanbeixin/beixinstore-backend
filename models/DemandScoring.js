@@ -794,6 +794,79 @@ async function replaceTaskDetails(conn, task, demand, subjectUserIds, directOwne
   await conn.query('DELETE FROM demand_score_slots WHERE task_id = ?', [task.id])
   await conn.query('DELETE FROM demand_score_subjects WHERE task_id = ?', [task.id])
 
+  return syncTaskDetails(conn, task, demand, subjectUserIds, directOwnerMap, {
+    preserveExisting: false,
+  })
+}
+
+function buildExpectedSlotDefinitions({
+  demand,
+  evaluateeUserId,
+  subjectUserIds,
+  directOwnerMap,
+  productManagerUserIds,
+} = {}) {
+  const isDemandOwnerEvaluatee = toPositiveInt(demand.owner_user_id) === evaluateeUserId
+  const isDemandOwnerAlsoProductManager = isDemandOwnerEvaluatee && productManagerUserIds.includes(evaluateeUserId)
+  const roleWeightMap = isDemandOwnerAlsoProductManager
+    ? OWNER_IS_PM_ROLE_WEIGHTS
+    : ROLE_WEIGHTS
+
+  const formalEvaluators = []
+  if (toPositiveInt(demand.owner_user_id) !== evaluateeUserId && Number(roleWeightMap[ROLE_KEYS.DEMAND_OWNER] || 0) > 0) {
+    formalEvaluators.push({
+      evaluator_user_id: toPositiveInt(demand.owner_user_id),
+      role_key: ROLE_KEYS.DEMAND_OWNER,
+      base_weight: Number(roleWeightMap[ROLE_KEYS.DEMAND_OWNER] || 0),
+      slot_type: SLOT_TYPES.FORMAL,
+      slot_key: ROLE_KEYS.DEMAND_OWNER,
+    })
+  }
+
+  const directOwnerUserId = directOwnerMap.get(evaluateeUserId)
+  if (
+    toPositiveInt(directOwnerUserId) &&
+    toPositiveInt(directOwnerUserId) !== evaluateeUserId &&
+    Number(roleWeightMap[ROLE_KEYS.DIRECT_OWNER] || 0) > 0
+  ) {
+    formalEvaluators.push({
+      evaluator_user_id: toPositiveInt(directOwnerUserId),
+      role_key: ROLE_KEYS.DIRECT_OWNER,
+      base_weight: Number(roleWeightMap[ROLE_KEYS.DIRECT_OWNER] || 0),
+      slot_type: SLOT_TYPES.FORMAL,
+      slot_key: ROLE_KEYS.DIRECT_OWNER,
+    })
+  }
+
+  if (
+    toPositiveInt(demand.project_manager) &&
+    toPositiveInt(demand.project_manager) !== evaluateeUserId &&
+    Number(roleWeightMap[ROLE_KEYS.PROJECT_MANAGER] || 0) > 0
+  ) {
+    formalEvaluators.push({
+      evaluator_user_id: toPositiveInt(demand.project_manager),
+      role_key: ROLE_KEYS.PROJECT_MANAGER,
+      base_weight: Number(roleWeightMap[ROLE_KEYS.PROJECT_MANAGER] || 0),
+      slot_type: SLOT_TYPES.FORMAL,
+      slot_key: ROLE_KEYS.PROJECT_MANAGER,
+    })
+  }
+
+  const formalEvaluatorSet = new Set(formalEvaluators.map((item) => item.evaluator_user_id).filter(Boolean))
+  const collaboratorSlots = subjectUserIds
+    .filter((userId) => userId !== evaluateeUserId && !formalEvaluatorSet.has(userId))
+    .map((collaboratorId) => ({
+      evaluator_user_id: collaboratorId,
+      role_key: ROLE_KEYS.COLLABORATOR,
+      base_weight: Number(roleWeightMap[ROLE_KEYS.COLLABORATOR] || ROLE_WEIGHTS.COLLABORATOR),
+      slot_type: SLOT_TYPES.COLLABORATOR,
+      slot_key: ROLE_KEYS.COLLABORATOR,
+    }))
+
+  return [...formalEvaluators, ...collaboratorSlots]
+}
+
+async function syncTaskDetails(conn, task, demand, subjectUserIds, directOwnerMap, { preserveExisting = false } = {}) {
   const allEvaluatorIds = new Set([
     toPositiveInt(demand.owner_user_id),
     toPositiveInt(demand.project_manager),
@@ -803,73 +876,103 @@ async function replaceTaskDetails(conn, task, demand, subjectUserIds, directOwne
   const userNameMap = await listUserNames([...new Set([...subjectUserIds, ...allEvaluatorIds])])
   const roleUserMap = normalizeRoleUserMap(demand?.participant_role_user_map_json)
   const productManagerUserIds = normalizeUserIdList(roleUserMap?.PRODUCT_MANAGER || [])
+  const sourceJson = {
+    from_role_map: true,
+    exclude_project_manager: true,
+  }
+
+  const created = {
+    subject_count: 0,
+    slot_count: 0,
+  }
+  const existingSubjectMap = new Map()
+  const existingSlotMap = new Map()
+
+  if (preserveExisting) {
+    const [existingSubjects] = await conn.query(
+      `SELECT id, evaluatee_user_id
+       FROM demand_score_subjects
+       WHERE task_id = ?`,
+      [task.id],
+    )
+    existingSubjects.forEach((row) => {
+      const evaluateeUserId = toPositiveInt(row?.evaluatee_user_id)
+      const subjectId = toPositiveInt(row?.id)
+      if (evaluateeUserId && subjectId) {
+        existingSubjectMap.set(evaluateeUserId, subjectId)
+      }
+    })
+
+    const [existingSlots] = await conn.query(
+      `SELECT id, subject_id, evaluator_user_id, slot_key
+       FROM demand_score_slots
+       WHERE task_id = ?`,
+      [task.id],
+    )
+    existingSlots.forEach((row) => {
+      const subjectId = toPositiveInt(row?.subject_id)
+      const evaluatorUserId = toPositiveInt(row?.evaluator_user_id)
+      const slotKey = normalizeText(row?.slot_key, 64)
+      if (!subjectId || !evaluatorUserId || !slotKey) return
+      existingSlotMap.set(`${subjectId}:${evaluatorUserId}:${slotKey}`, toPositiveInt(row?.id) || 0)
+    })
+  }
 
   for (const evaluateeUserId of subjectUserIds) {
-    const isDemandOwnerEvaluatee = toPositiveInt(demand.owner_user_id) === evaluateeUserId
-    const isDemandOwnerAlsoProductManager = isDemandOwnerEvaluatee && productManagerUserIds.includes(evaluateeUserId)
-    const roleWeightMap = isDemandOwnerAlsoProductManager
-      ? OWNER_IS_PM_ROLE_WEIGHTS
-      : ROLE_WEIGHTS
-
-    const sourceJson = {
-      from_role_map: true,
-      exclude_project_manager: true,
-    }
-    const [subjectResult] = await conn.query(
-      `INSERT INTO demand_score_subjects (
-         task_id,
-         demand_id,
-         evaluatee_user_id,
-         evaluatee_name,
-         source_json,
-         status
-       ) VALUES (?, ?, ?, ?, CAST(? AS JSON), ?)`,
-      [
-        task.id,
-        normalizeDemandId(demand.id),
-        evaluateeUserId,
-        userNameMap.get(evaluateeUserId) || `用户${evaluateeUserId}`,
-        JSON.stringify(sourceJson),
-        SUBJECT_STATUS.PENDING,
-      ],
-    )
-    const subjectId = Number(subjectResult.insertId)
-    const formalEvaluators = []
-
-    if (toPositiveInt(demand.owner_user_id) !== evaluateeUserId && Number(roleWeightMap[ROLE_KEYS.DEMAND_OWNER] || 0) > 0) {
-      formalEvaluators.push({
-        evaluator_user_id: toPositiveInt(demand.owner_user_id),
-        role_key: ROLE_KEYS.DEMAND_OWNER,
-        base_weight: Number(roleWeightMap[ROLE_KEYS.DEMAND_OWNER] || 0),
-      })
-    }
-
-    const directOwnerUserId = directOwnerMap.get(evaluateeUserId)
-    if (
-      toPositiveInt(directOwnerUserId) &&
-      toPositiveInt(directOwnerUserId) !== evaluateeUserId &&
-      Number(roleWeightMap[ROLE_KEYS.DIRECT_OWNER] || 0) > 0
-    ) {
-      formalEvaluators.push({
-        evaluator_user_id: toPositiveInt(directOwnerUserId),
-        role_key: ROLE_KEYS.DIRECT_OWNER,
-        base_weight: Number(roleWeightMap[ROLE_KEYS.DIRECT_OWNER] || 0),
-      })
+    let subjectId = existingSubjectMap.get(evaluateeUserId) || 0
+    if (subjectId) {
+      await conn.query(
+        `UPDATE demand_score_subjects
+         SET
+           demand_id = ?,
+           evaluatee_name = ?,
+           source_json = CAST(? AS JSON),
+           updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          normalizeDemandId(demand.id),
+          userNameMap.get(evaluateeUserId) || `用户${evaluateeUserId}`,
+          JSON.stringify(sourceJson),
+          subjectId,
+        ],
+      )
+    } else {
+      const [subjectResult] = await conn.query(
+        `INSERT INTO demand_score_subjects (
+           task_id,
+           demand_id,
+           evaluatee_user_id,
+           evaluatee_name,
+           source_json,
+           status
+         ) VALUES (?, ?, ?, ?, CAST(? AS JSON), ?)`,
+        [
+          task.id,
+          normalizeDemandId(demand.id),
+          evaluateeUserId,
+          userNameMap.get(evaluateeUserId) || `用户${evaluateeUserId}`,
+          JSON.stringify(sourceJson),
+          SUBJECT_STATUS.PENDING,
+        ],
+      )
+      subjectId = Number(subjectResult.insertId)
+      existingSubjectMap.set(evaluateeUserId, subjectId)
+      created.subject_count += 1
     }
 
-    if (
-      toPositiveInt(demand.project_manager) &&
-      toPositiveInt(demand.project_manager) !== evaluateeUserId &&
-      Number(roleWeightMap[ROLE_KEYS.PROJECT_MANAGER] || 0) > 0
-    ) {
-      formalEvaluators.push({
-        evaluator_user_id: toPositiveInt(demand.project_manager),
-        role_key: ROLE_KEYS.PROJECT_MANAGER,
-        base_weight: Number(roleWeightMap[ROLE_KEYS.PROJECT_MANAGER] || 0),
-      })
-    }
+    const slotDefinitions = buildExpectedSlotDefinitions({
+      demand,
+      evaluateeUserId,
+      subjectUserIds,
+      directOwnerMap,
+      productManagerUserIds,
+    })
 
-    for (const formalSlot of formalEvaluators) {
+    for (const slotDefinition of slotDefinitions) {
+      const slotIdentityKey = `${subjectId}:${slotDefinition.evaluator_user_id}:${slotDefinition.slot_key}`
+      if (preserveExisting && existingSlotMap.has(slotIdentityKey)) {
+        continue
+      }
       await conn.query(
         `INSERT INTO demand_score_slots (
            task_id,
@@ -889,52 +992,21 @@ async function replaceTaskDetails(conn, task, demand, subjectUserIds, directOwne
           subjectId,
           normalizeDemandId(demand.id),
           evaluateeUserId,
-          formalSlot.evaluator_user_id,
-          userNameMap.get(formalSlot.evaluator_user_id) || `用户${formalSlot.evaluator_user_id}`,
-          SLOT_TYPES.FORMAL,
-          formalSlot.role_key,
-          Number(formalSlot.base_weight || 0),
-          JSON.stringify([formalSlot.role_key]),
+          slotDefinition.evaluator_user_id,
+          userNameMap.get(slotDefinition.evaluator_user_id) || `用户${slotDefinition.evaluator_user_id}`,
+          slotDefinition.slot_type,
+          slotDefinition.slot_key,
+          Number(slotDefinition.base_weight || 0),
+          JSON.stringify([slotDefinition.role_key]),
           SLOT_STATUS.PENDING,
         ],
       )
-    }
-
-    const formalEvaluatorSet = new Set(formalEvaluators.map((item) => item.evaluator_user_id).filter(Boolean))
-    const collaboratorIds = subjectUserIds.filter(
-      (userId) => userId !== evaluateeUserId && !formalEvaluatorSet.has(userId),
-    )
-    for (const collaboratorId of collaboratorIds) {
-      await conn.query(
-        `INSERT INTO demand_score_slots (
-           task_id,
-           subject_id,
-           demand_id,
-           evaluatee_user_id,
-           evaluator_user_id,
-           evaluator_name,
-           slot_type,
-           slot_key,
-           base_weight,
-           role_keys_json,
-           status
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON), ?)`,
-        [
-          task.id,
-          subjectId,
-          normalizeDemandId(demand.id),
-          evaluateeUserId,
-          collaboratorId,
-          userNameMap.get(collaboratorId) || `用户${collaboratorId}`,
-          SLOT_TYPES.COLLABORATOR,
-          ROLE_KEYS.COLLABORATOR,
-          Number(roleWeightMap[ROLE_KEYS.COLLABORATOR] || ROLE_WEIGHTS.COLLABORATOR),
-          JSON.stringify([ROLE_KEYS.COLLABORATOR]),
-          SLOT_STATUS.PENDING,
-        ],
-      )
+      existingSlotMap.set(slotIdentityKey, 1)
+      created.slot_count += 1
     }
   }
+
+  return created
 }
 
 async function recalculateSubject(subjectId, { conn = pool } = {}) {
@@ -1229,10 +1301,26 @@ const DemandScoring = {
       const subjectUserIds = await listDemandSubjectUserIds(demand)
       const directOwnerMap = await listDirectOwnerMap(subjectUserIds)
       const task = await createTaskRow(conn, demand, operatorUserId)
-      await replaceTaskDetails(conn, task, demand, subjectUserIds, directOwnerMap)
+      let syncSummary = { subject_count: 0, slot_count: 0 }
+      let safeRebuilt = false
+      if (existingRows[0] && forceRebuild && await this.hasSubmittedRecordsForDemand(demand.id, { conn })) {
+        syncSummary = await syncTaskDetails(conn, task, demand, subjectUserIds, directOwnerMap, {
+          preserveExisting: true,
+        })
+        safeRebuilt = true
+      } else {
+        syncSummary = await replaceTaskDetails(conn, task, demand, subjectUserIds, directOwnerMap)
+      }
       await recalculateTask(task.id, { conn })
       await conn.commit()
-      return { task_id: Number(task.id), created: !existingRows[0], rebuilt: Boolean(existingRows[0]) }
+      return {
+        task_id: Number(task.id),
+        created: !existingRows[0],
+        rebuilt: Boolean(existingRows[0]),
+        safe_rebuilt: safeRebuilt,
+        created_subject_count: Number(syncSummary?.subject_count || 0),
+        created_slot_count: Number(syncSummary?.slot_count || 0),
+      }
     } catch (err) {
       await conn.rollback()
       throw err

@@ -87,16 +87,6 @@ const generateDemandScoreTask = async (req, res) => {
   }
 
   try {
-    if (
-      (req.body?.force_rebuild === true || req.body?.force_rebuild === 1 || req.body?.force_rebuild === '1') &&
-      await DemandScoring.hasSubmittedRecordsForDemand(demandId)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: '当前需求评分任务已存在已提交评分，禁止重建，请联系管理员人工处理',
-      })
-    }
-
     const result = await DemandScoring.ensureTaskForDemand(demandId, {
       operatorUserId: req.user?.id,
       forceRebuild: req.body?.force_rebuild === true || req.body?.force_rebuild === 1 || req.body?.force_rebuild === '1',
@@ -107,7 +97,14 @@ const generateDemandScoreTask = async (req, res) => {
         operatorUserId: req.user?.id || null,
       })
     }
-    return res.json({ success: true, message: result.created ? '评分任务已生成' : '评分任务已存在', data: result })
+    const messageText = result.created
+      ? '评分任务已生成'
+      : result.safe_rebuilt
+        ? `评分任务已安全补齐${Number(result.created_slot_count || 0) > 0 ? `，新增 ${Number(result.created_slot_count || 0)} 条评分项` : ''}`
+        : result.rebuilt
+          ? '评分任务已重建'
+          : '评分任务已存在'
+    return res.json({ success: true, message: messageText, data: result })
   } catch (err) {
     if (err?.code === 'DEMAND_NOT_FOUND') {
       return res.status(404).json({ success: false, message: err.message })
