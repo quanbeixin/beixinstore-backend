@@ -85,6 +85,16 @@ const generateDemandScoreTask = async (req, res) => {
   }
 
   try {
+    if (
+      (req.body?.force_rebuild === true || req.body?.force_rebuild === 1 || req.body?.force_rebuild === '1') &&
+      await DemandScoring.hasSubmittedRecordsForDemand(demandId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: '当前需求评分任务已存在已提交评分，禁止重建，请联系管理员人工处理',
+      })
+    }
+
     const result = await DemandScoring.ensureTaskForDemand(demandId, {
       operatorUserId: req.user?.id,
       forceRebuild: req.body?.force_rebuild === true || req.body?.force_rebuild === 1 || req.body?.force_rebuild === '1',

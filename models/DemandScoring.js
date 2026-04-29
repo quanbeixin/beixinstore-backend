@@ -1173,6 +1173,20 @@ const DemandScoring = {
     }
   },
 
+  async hasSubmittedRecordsForDemand(demandId, { conn = pool } = {}) {
+    const normalizedDemandId = normalizeDemandId(demandId)
+    if (!normalizedDemandId) return false
+
+    const [[row]] = await conn.query(
+      `SELECT COUNT(*) AS total
+       FROM demand_score_records
+       WHERE demand_id = ?`,
+      [normalizedDemandId],
+    )
+
+    return Number(row?.total || 0) > 0
+  },
+
   async ensureTaskForDemand(demandId, { operatorUserId = null, forceRebuild = false } = {}) {
     const demand = await getDemandForScoring(demandId)
     if (!demand) {
