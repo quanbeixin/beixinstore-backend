@@ -884,9 +884,13 @@ async function syncTaskDetails(conn, task, demand, subjectUserIds, directOwnerMa
   const created = {
     subject_count: 0,
     slot_count: 0,
+    deleted_subject_count: 0,
+    deleted_slot_count: 0,
+    deleted_record_count: 0,
   }
   const existingSubjectMap = new Map()
   const existingSlotMap = new Map()
+  const existingSubjectSlotRowsMap = new Map()
 
   if (preserveExisting) {
     const [existingSubjects] = await conn.query(
@@ -895,7 +899,61 @@ async function syncTaskDetails(conn, task, demand, subjectUserIds, directOwnerMa
        WHERE task_id = ?`,
       [task.id],
     )
+    const desiredEvaluateeUserIdSet = new Set(subjectUserIds)
+    const obsoleteSubjectRows = []
     existingSubjects.forEach((row) => {
+      const evaluateeUserId = toPositiveInt(row?.evaluatee_user_id)
+      const subjectId = toPositiveInt(row?.id)
+      if (!evaluateeUserId || !subjectId) return
+      if (!desiredEvaluateeUserIdSet.has(evaluateeUserId)) {
+        obsoleteSubjectRows.push({ subjectId, evaluateeUserId })
+        return
+      }
+      existingSubjectMap.set(evaluateeUserId, subjectId)
+    })
+
+    if (obsoleteSubjectRows.length > 0) {
+      const obsoleteSubjectIds = obsoleteSubjectRows.map((item) => item.subjectId)
+      const placeholders = obsoleteSubjectIds.map(() => '?').join(', ')
+      const [[recordSummary]] = await conn.query(
+        `SELECT COUNT(*) AS total
+         FROM demand_score_records
+         WHERE subject_id IN (${placeholders})`,
+        obsoleteSubjectIds,
+      )
+      const [[slotSummary]] = await conn.query(
+        `SELECT COUNT(*) AS total
+         FROM demand_score_slots
+         WHERE subject_id IN (${placeholders})`,
+        obsoleteSubjectIds,
+      )
+      await conn.query(
+        `DELETE FROM demand_score_records
+         WHERE subject_id IN (${placeholders})`,
+        obsoleteSubjectIds,
+      )
+      await conn.query(
+        `DELETE FROM demand_score_slots
+         WHERE subject_id IN (${placeholders})`,
+        obsoleteSubjectIds,
+      )
+      await conn.query(
+        `DELETE FROM demand_score_subjects
+         WHERE id IN (${placeholders})`,
+        obsoleteSubjectIds,
+      )
+      created.deleted_record_count += Number(recordSummary?.total || 0)
+      created.deleted_slot_count += Number(slotSummary?.total || 0)
+      created.deleted_subject_count += obsoleteSubjectIds.length
+    }
+
+    const [remainingSubjects] = await conn.query(
+      `SELECT id, evaluatee_user_id
+       FROM demand_score_subjects
+       WHERE task_id = ?`,
+      [task.id],
+    )
+    remainingSubjects.forEach((row) => {
       const evaluateeUserId = toPositiveInt(row?.evaluatee_user_id)
       const subjectId = toPositiveInt(row?.id)
       if (evaluateeUserId && subjectId) {
@@ -914,7 +972,15 @@ async function syncTaskDetails(conn, task, demand, subjectUserIds, directOwnerMa
       const evaluatorUserId = toPositiveInt(row?.evaluator_user_id)
       const slotKey = normalizeText(row?.slot_key, 64)
       if (!subjectId || !evaluatorUserId || !slotKey) return
-      existingSlotMap.set(`${subjectId}:${evaluatorUserId}:${slotKey}`, toPositiveInt(row?.id) || 0)
+      const normalizedRow = {
+        id: toPositiveInt(row?.id) || 0,
+        subject_id: subjectId,
+        evaluator_user_id: evaluatorUserId,
+        slot_key: slotKey,
+      }
+      existingSlotMap.set(`${subjectId}:${evaluatorUserId}:${slotKey}`, normalizedRow.id)
+      if (!existingSubjectSlotRowsMap.has(subjectId)) existingSubjectSlotRowsMap.set(subjectId, [])
+      existingSubjectSlotRowsMap.get(subjectId).push(normalizedRow)
     })
   }
 
@@ -967,6 +1033,48 @@ async function syncTaskDetails(conn, task, demand, subjectUserIds, directOwnerMa
       directOwnerMap,
       productManagerUserIds,
     })
+    const desiredSlotIdentitySet = new Set(
+      slotDefinitions.map((item) => `${subjectId}:${item.evaluator_user_id}:${item.slot_key}`),
+    )
+
+    if (preserveExisting) {
+      const subjectExistingSlots = existingSubjectSlotRowsMap.get(subjectId) || []
+      const obsoleteSlotRows = subjectExistingSlots.filter(
+        (item) => !desiredSlotIdentitySet.has(`${subjectId}:${item.evaluator_user_id}:${item.slot_key}`),
+      )
+      if (obsoleteSlotRows.length > 0) {
+        const obsoleteSlotIds = obsoleteSlotRows.map((item) => item.id).filter(Boolean)
+        if (obsoleteSlotIds.length > 0) {
+          const placeholders = obsoleteSlotIds.map(() => '?').join(', ')
+          const [[recordSummary]] = await conn.query(
+            `SELECT COUNT(*) AS total
+             FROM demand_score_records
+             WHERE slot_id IN (${placeholders})`,
+            obsoleteSlotIds,
+          )
+          await conn.query(
+            `DELETE FROM demand_score_records
+             WHERE slot_id IN (${placeholders})`,
+            obsoleteSlotIds,
+          )
+          await conn.query(
+            `DELETE FROM demand_score_slots
+             WHERE id IN (${placeholders})`,
+            obsoleteSlotIds,
+          )
+          created.deleted_record_count += Number(recordSummary?.total || 0)
+          created.deleted_slot_count += obsoleteSlotIds.length
+        }
+
+        obsoleteSlotRows.forEach((item) => {
+          existingSlotMap.delete(`${subjectId}:${item.evaluator_user_id}:${item.slot_key}`)
+        })
+        existingSubjectSlotRowsMap.set(
+          subjectId,
+          subjectExistingSlots.filter((item) => !obsoleteSlotRows.some((obsolete) => obsolete.id === item.id)),
+        )
+      }
+    }
 
     for (const slotDefinition of slotDefinitions) {
       const slotIdentityKey = `${subjectId}:${slotDefinition.evaluator_user_id}:${slotDefinition.slot_key}`
@@ -1002,6 +1110,13 @@ async function syncTaskDetails(conn, task, demand, subjectUserIds, directOwnerMa
         ],
       )
       existingSlotMap.set(slotIdentityKey, 1)
+      if (!existingSubjectSlotRowsMap.has(subjectId)) existingSubjectSlotRowsMap.set(subjectId, [])
+      existingSubjectSlotRowsMap.get(subjectId).push({
+        id: 0,
+        subject_id: subjectId,
+        evaluator_user_id: slotDefinition.evaluator_user_id,
+        slot_key: slotDefinition.slot_key,
+      })
       created.slot_count += 1
     }
   }

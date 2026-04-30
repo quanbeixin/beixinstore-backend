@@ -100,7 +100,12 @@ const generateDemandScoreTask = async (req, res) => {
     const messageText = result.created
       ? '评分任务已生成'
       : result.safe_rebuilt
-        ? `评分任务已安全补齐${Number(result.created_slot_count || 0) > 0 ? `，新增 ${Number(result.created_slot_count || 0)} 条评分项` : ''}`
+        ? [
+            '评分任务已安全重建',
+            Number(result.created_slot_count || 0) > 0 ? `新增 ${Number(result.created_slot_count || 0)} 条评分项` : '',
+            Number(result.deleted_subject_count || 0) > 0 ? `移除 ${Number(result.deleted_subject_count || 0)} 个被评价人` : '',
+            Number(result.deleted_slot_count || 0) > 0 ? `清理 ${Number(result.deleted_slot_count || 0)} 条评分项` : '',
+          ].filter(Boolean).join('，')
         : result.rebuilt
           ? '评分任务已重建'
           : '评分任务已存在'
