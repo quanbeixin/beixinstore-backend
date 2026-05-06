@@ -2757,7 +2757,11 @@ const updateDemand = async (req, res) => {
           participantRoleUserMap: finalParticipantRoleUserMap || {},
           participantRoles: finalParticipantRoles || [],
         })
-        const currentChatId = normalizeDemandGroupChatId(updated?.group_chat_id) || null
+        const currentChatId =
+          normalizeDemandGroupChatId(updated?.group_chat_id) ||
+          normalizeDemandGroupChatId(existing?.group_chat_id) ||
+          normalizeDemandGroupChatId(groupChatId) ||
+          null
 
         if (currentChatId) {
           const syncResult = await addFeishuChatMembers({
@@ -2765,6 +2769,13 @@ const updateDemand = async (req, res) => {
             memberOpenIds,
           })
           if (syncResult?.success) {
+            if (normalizeDemandGroupChatId(updated?.group_chat_id) !== currentChatId) {
+              await Work.updateDemandGroupChatBinding(demandId, {
+                groupChatMode: 'auto',
+                groupChatId: currentChatId,
+              })
+              updated = await Work.findDemandById(demandId)
+            }
             autoGroupChatResult = {
               mode: 'auto',
               chat_id: currentChatId,
