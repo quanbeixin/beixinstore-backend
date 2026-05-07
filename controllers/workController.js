@@ -1606,7 +1606,7 @@ const updateEfficiencyFactorSettings = async (req, res) => {
 
 const listDemands = async (req, res) => {
   const page = toPositiveInt(req.query.page) || 1
-  const pageSize = toPositiveInt(req.query.pageSize) || 10
+  const pageSize = Math.min(200, toPositiveInt(req.query.pageSize) || 10)
   const keyword = normalizeText(req.query.keyword, 100)
   const status = normalizeStatus(req.query.status || '')
   const priority = normalizePriority(req.query.priority || '')

@@ -2971,53 +2971,62 @@ const Work = {
       LIMIT ? OFFSET ?`
 
     const [rows] = await pool.query(listSql, [...params, pageSize, offset])
-    const [[{ total }]] = await pool.query(
-      `SELECT COUNT(*) AS total
-       FROM work_demands d
-       WHERE ${whereSql}`,
-      params,
-    )
-    const [[{ all_total: allTotal }]] = await pool.query(
-      `SELECT COUNT(*) AS all_total
-       FROM work_demands d
-       WHERE ${activeWhereSql}`,
-      baseParams,
-    )
-    const [[{ completed_total: completedTotal }]] = await pool.query(
-      `SELECT COUNT(*) AS completed_total
-       FROM work_demands d
-       WHERE ${baseConditions.join(' AND ')}
-         AND d.status = 'DONE'`,
-      baseParams,
-    )
-    const [[{ cancelled_total: cancelledTotal }]] = await pool.query(
-      `SELECT COUNT(*) AS cancelled_total
-       FROM work_demands d
-       WHERE ${baseConditions.join(' AND ')}
-         AND d.status = 'CANCELLED'`,
-      baseParams,
-    )
-    const [groupCountRows] = await pool.query(
-      `SELECT
-         COALESCE(d.business_group_code, '') AS business_group_code,
-         COALESCE(bg.item_name, d.business_group_code, '') AS business_group_name,
-         COUNT(*) AS total
-       FROM work_demands d
-       LEFT JOIN config_dict_items bg
-         ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
-        AND bg.item_code = d.business_group_code
-       WHERE ${activeWhereSql}
-       GROUP BY d.business_group_code, bg.item_name
-       ORDER BY total DESC, business_group_code ASC`,
-      baseParams,
-    )
-    const [templatePhaseRows] = await pool.query(
-      `SELECT item_code, item_name
-       FROM config_dict_items
-       WHERE type_key = ?
-         AND enabled = 1`,
-      [PROJECT_TEMPLATE_PHASE_DICT_KEY],
-    )
+    const [
+      [[{ total }]],
+      [[{ all_total: allTotal }]],
+      [[{ completed_total: completedTotal }]],
+      [[{ cancelled_total: cancelledTotal }]],
+      [groupCountRows],
+      [templatePhaseRows],
+    ] = await Promise.all([
+      pool.query(
+        `SELECT COUNT(*) AS total
+         FROM work_demands d
+         WHERE ${whereSql}`,
+        params,
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS all_total
+         FROM work_demands d
+         WHERE ${activeWhereSql}`,
+        baseParams,
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS completed_total
+         FROM work_demands d
+         WHERE ${baseConditions.join(' AND ')}
+           AND d.status = 'DONE'`,
+        baseParams,
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS cancelled_total
+         FROM work_demands d
+         WHERE ${baseConditions.join(' AND ')}
+           AND d.status = 'CANCELLED'`,
+        baseParams,
+      ),
+      pool.query(
+        `SELECT
+           COALESCE(d.business_group_code, '') AS business_group_code,
+           COALESCE(bg.item_name, d.business_group_code, '') AS business_group_name,
+           COUNT(*) AS total
+         FROM work_demands d
+         LEFT JOIN config_dict_items bg
+           ON bg.type_key = '${BUSINESS_GROUP_DICT_KEY}'
+          AND bg.item_code = d.business_group_code
+         WHERE ${activeWhereSql}
+         GROUP BY d.business_group_code, bg.item_name
+         ORDER BY total DESC, business_group_code ASC`,
+        baseParams,
+      ),
+      pool.query(
+        `SELECT item_code, item_name
+         FROM config_dict_items
+         WHERE type_key = ?
+           AND enabled = 1`,
+        [PROJECT_TEMPLATE_PHASE_DICT_KEY],
+      ),
+    ])
 
     const todayDate = getBeijingTodayDateString()
     const templatePhaseNameMap = buildPhaseNameMap(templatePhaseRows)
@@ -8425,7 +8434,7 @@ const Work = {
       ORDER BY total_actual_hours DESC, l.demand_id ASC
       LIMIT 400`
 
-    const phaseSql = `
+    const phaseBaseSql = `
       SELECT
         l.demand_id,
         COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__') AS phase_key,
@@ -8459,7 +8468,7 @@ const Work = {
       ORDER BY l.demand_id ASC, total_actual_hours DESC
       LIMIT 4000`
 
-    const participantSql = `
+    const participantBaseSql = `
       SELECT
         l.demand_id,
         COALESCE(NULLIF(l.phase_key, ''), '__NO_PHASE__') AS phase_key,
@@ -8487,11 +8496,24 @@ const Work = {
       ORDER BY l.demand_id ASC, phase_key ASC, actual_hours DESC
       LIMIT 8000`
 
-    const [demandRows, phaseRows, participantRows] = await Promise.all([
-      pool.query(demandSql, params).then((r) => r[0] || []),
-      pool.query(phaseSql, params).then((r) => r[0] || []),
-      pool.query(participantSql, params).then((r) => r[0] || []),
-    ])
+    const [demandRows] = await pool.query(demandSql, params).then((r) => [r[0] || []])
+    const scopedDemandIds = (demandRows || [])
+      .map((row) => String(row?.demand_id || '').trim())
+      .filter((item) => item)
+
+    let phaseRows = []
+    let participantRows = []
+    if (scopedDemandIds.length > 0) {
+      const scopedCondition = ' AND l.demand_id IN (?)'
+      const phaseSql = phaseBaseSql.replace(`WHERE ${whereSql}`, `WHERE ${whereSql}${scopedCondition}`)
+      const participantSql = participantBaseSql.replace(`WHERE ${whereSql}`, `WHERE ${whereSql}${scopedCondition}`)
+      const scopedParams = [...params, scopedDemandIds]
+
+      ;[phaseRows, participantRows] = await Promise.all([
+        pool.query(phaseSql, scopedParams).then((r) => r[0] || []),
+        pool.query(participantSql, scopedParams).then((r) => r[0] || []),
+      ])
+    }
 
     const phaseMap = new Map()
     ;(phaseRows || []).forEach((row) => {
