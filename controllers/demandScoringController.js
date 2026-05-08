@@ -177,6 +177,7 @@ const listDemandScoreTeamRanking = async (req, res) => {
     const data = await DemandScoring.listTeamRanking({
       startDate: normalizeDate(req.query.start_date),
       endDate: normalizeDate(req.query.end_date),
+      departmentId: toPositiveInt(req.query.department_id),
     })
     return res.json({ success: true, data })
   } catch (err) {

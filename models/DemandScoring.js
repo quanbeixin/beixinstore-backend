@@ -1632,8 +1632,8 @@ const DemandScoring = {
     }
 
     const comment = normalizeText(payload.comment, 2000)
-    if (score < 80 && !comment) {
-      const err = new Error('评分低于 80 分时，必须填写评价说明')
+    if ((score < 70 || score > 90) && !comment) {
+      const err = new Error('评分低于 70 分、或高于 90 分时，必须填写评价说明')
       err.code = 'COMMENT_REQUIRED'
       throw err
     }
@@ -1936,7 +1936,7 @@ const DemandScoring = {
     }
   },
 
-  async listTeamRanking({ startDate = '', endDate = '' } = {}) {
+  async listTeamRanking({ startDate = '', endDate = '', departmentId = null } = {}) {
     const where = ['t.result_ready = 1', `COALESCE(d.status, '') <> 'CANCELLED'`, 'DATE(d.expected_release_date) >= ?']
     const params = [SCORING_COMPLETED_CUTOFF_DATE]
     if (/^\d{4}-\d{2}-\d{2}$/.test(String(startDate || ''))) {
@@ -1947,11 +1947,18 @@ const DemandScoring = {
       where.push('DATE(d.expected_release_date) <= ?')
       params.push(endDate)
     }
+    const normalizedDepartmentId = toPositiveInt(departmentId)
+    if (normalizedDepartmentId) {
+      where.push('u.department_id = ?')
+      params.push(normalizedDepartmentId)
+    }
     const [detailRows] = await pool.query(
       `SELECT
          sub.id,
          sub.evaluatee_user_id,
          sub.evaluatee_name,
+         u.department_id,
+         dep.name AS department_name,
          sub.task_id,
          t.id AS task_id,
          t.demand_id,
@@ -1962,6 +1969,8 @@ const DemandScoring = {
          DATE_FORMAT(COALESCE(d.expected_release_date, d.completed_at, t.completed_at, t.created_at), '%Y-%m-%d') AS demand_date
        FROM demand_score_subjects sub
        INNER JOIN demand_score_tasks t ON t.id = sub.task_id
+       INNER JOIN users u ON u.id = sub.evaluatee_user_id
+       LEFT JOIN departments dep ON dep.id = u.department_id
        LEFT JOIN work_demands d
          ON d.id COLLATE utf8mb4_unicode_ci = t.demand_id
        WHERE ${where.join(' AND ')}
@@ -2018,6 +2027,8 @@ const DemandScoring = {
         memberMap.set(evaluateeUserId, {
           evaluatee_user_id: evaluateeUserId,
           evaluatee_name: row.evaluatee_name || '',
+          department_id: toPositiveInt(row.department_id),
+          department_name: row.department_name || '',
           subjects: [],
         })
       }
@@ -2044,6 +2055,8 @@ const DemandScoring = {
       .map((member) => ({
         evaluatee_user_id: member.evaluatee_user_id,
         evaluatee_name: member.evaluatee_name,
+        department_id: member.department_id,
+        department_name: member.department_name || '',
         demand_count: member.subjects.length,
         avg_final_score: averageScores(member.subjects.map((subject) => subject.final_score)),
         avg_demand_owner_score: averageScores(member.subjects.map((subject) => subject.demand_owner_score)),
@@ -2061,9 +2074,11 @@ const DemandScoring = {
         return Number(left.evaluatee_user_id || 0) - Number(right.evaluatee_user_id || 0)
       })
       .map((row, index) => ({
-      rank: index + 1,
+        rank: index + 1,
         evaluatee_user_id: Number(row.evaluatee_user_id || 0),
         evaluatee_name: row.evaluatee_name || '',
+        department_id: toPositiveInt(row.department_id),
+        department_name: row.department_name || '',
         demand_count: Number(row.demand_count || 0),
         avg_final_score: roundScore(row.avg_final_score),
         avg_demand_owner_score: roundScore(row.avg_demand_owner_score),
