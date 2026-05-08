@@ -873,11 +873,8 @@ async function listFeishuChats({ pageSize = 50, pageToken = '' } = {}) {
 function buildDemandChatName({ demandId, demandName }) {
   const normalizedDemandId = normalizeText(demandId, 64)
   const normalizedDemandName = normalizeText(demandName, 200)
-  const parts = []
-  if (normalizedDemandId) parts.push(normalizedDemandId)
-  if (normalizedDemandName) parts.push(normalizedDemandName)
-  const rawName = parts.length > 0 ? `需求协作-${parts.join('-')}` : `需求协作-${Date.now()}`
-  return normalizeText(rawName, 50) || `需求协作-${Date.now()}`
+  const rawName = normalizedDemandName || normalizedDemandId || `需求群-${Date.now()}`
+  return normalizeText(rawName, 50) || `需求群-${Date.now()}`
 }
 
 async function listFeishuChatMemberOpenIds({ chatId = '', token = '', timeoutMs = 8000 } = {}) {
