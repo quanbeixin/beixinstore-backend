@@ -1275,13 +1275,11 @@ function buildDateRange(startDate, endDate) {
   return result.length > 0 ? result : [start]
 }
 
-function isWeekendDate(dateText) {
+function isBusinessWorkday(dateText) {
   const normalized = normalizeDateOnly(dateText)
   if (!normalized) return false
-  const date = new Date(`${normalized}T00:00:00`)
-  if (Number.isNaN(date.getTime())) return false
-  const weekDay = date.getDay()
-  return weekDay === 0 || weekDay === 6
+  const dayInfo = getChinaBusinessDayInfo(normalized)
+  return Boolean(dayInfo?.is_workday)
 }
 
 function getPreviousWorkdayDate(dateText) {
@@ -1304,7 +1302,7 @@ function getPreviousWorkdayDate(dateText) {
 
 function buildWorkDateRange(startDate, endDate, { fallbackToStart = true } = {}) {
   const fullDateList = buildDateRange(startDate, endDate)
-  const workDateList = fullDateList.filter((date) => !isWeekendDate(date))
+  const workDateList = fullDateList.filter((date) => isBusinessWorkday(date))
   if (workDateList.length > 0) return workDateList
   if (fallbackToStart && fullDateList.length > 0) return [fullDateList[0]]
   return []
@@ -10380,7 +10378,7 @@ const Work = {
   // 方案7：预估修改后重新计算每日计划
   async recalculateDailyPlans(logId) {
     const [logs] = await pool.query(
-      'SELECT personal_estimate_hours, expected_start_date, expected_completion_date, log_status, log_completed_at FROM work_logs WHERE id = ?',
+      'SELECT user_id, personal_estimate_hours, expected_start_date, expected_completion_date, log_status, log_completed_at FROM work_logs WHERE id = ?',
       [logId]
     )
 
@@ -10402,27 +10400,19 @@ const Work = {
     })
 
     if (log.expected_start_date && effectiveEndDate && log.personal_estimate_hours > 0) {
-      const startDate = new Date(Math.max(new Date(log.expected_start_date), new Date(today)))
-      const endDate = new Date(effectiveEndDate)
+      const startDate = formatLocalDateOnly(
+        new Date(Math.max(new Date(log.expected_start_date), new Date(today))),
+      )
+      const dateList = buildWorkDateRange(startDate, effectiveEndDate, { fallbackToStart: false })
 
-      // 计算工作日数量（排除周末）
-      let workDays = 0
-      for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
-        if (d.getDay() !== 0 && d.getDay() !== 6) workDays++
-      }
+      if (dateList.length > 0) {
+        const dailyHours = (log.personal_estimate_hours / dateList.length).toFixed(1)
 
-      if (workDays > 0) {
-        const dailyHours = (log.personal_estimate_hours / workDays).toFixed(1)
-
-        // 插入新的每日计划
-        for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
-          if (d.getDay() !== 0 && d.getDay() !== 6) {
-            const planDate = d.toISOString().split('T')[0]
-            await pool.query(
-              'INSERT INTO work_log_daily_plans (log_id, plan_date, planned_hours, source) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE planned_hours = ?, source = ?',
-              [logId, planDate, dailyHours, 'AUTO', dailyHours, 'AUTO']
-            )
-          }
+        for (const planDate of dateList) {
+          await pool.query(
+            'INSERT INTO work_log_daily_plans (log_id, user_id, plan_date, planned_hours, source) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE planned_hours = ?, source = ?',
+            [logId, log.user_id, planDate, dailyHours, 'AUTO', dailyHours, 'AUTO']
+          )
         }
       }
     }
