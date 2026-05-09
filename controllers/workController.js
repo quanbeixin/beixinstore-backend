@@ -4,6 +4,7 @@ const Workflow = require('../models/Workflow')
 const ConfigDict = require('../models/ConfigDict')
 const NotificationEvent = require('../models/NotificationEvent')
 const DemandScoring = require('../models/DemandScoring')
+const FeishuUserBinding = require('../models/FeishuUserBinding')
 const pool = require('../utils/db')
 const { emitDemandScoreAssignNotifications } = require('../utils/demandScoreNotification')
 const { sendNotification, createFeishuDemandChat, addFeishuChatMembers } = require('../utils/notificationSender')
@@ -118,6 +119,26 @@ function normalizeText(value, maxLen = 500) {
 function normalizeDemandId(value) {
   const id = String(value || '').trim().toUpperCase()
   return id || null
+}
+
+async function resolveUserFeishuOpenId(userId, fallbackOpenId = '') {
+  const normalizedFallback = normalizeText(fallbackOpenId, 128)
+  if (normalizedFallback) {
+    return normalizedFallback
+  }
+
+  const normalizedUserId = toPositiveInt(userId)
+  if (!normalizedUserId) {
+    return ''
+  }
+
+  try {
+    const binding = await FeishuUserBinding.getByUserId(normalizedUserId)
+    return normalizeText(binding?.open_id, 128)
+  } catch (error) {
+    console.error('读取飞书账号映射失败:', error)
+    return ''
+  }
 }
 
 function isLocalHost(hostname = '') {
@@ -2331,7 +2352,7 @@ const createDemand = async (req, res) => {
     let autoGroupChatWarning = ''
     let autoGroupChatResult = null
     if (groupChatMode === 'auto') {
-      const ownerOpenId = normalizeText(owner?.feishu_open_id, 128)
+      const ownerOpenId = await resolveUserFeishuOpenId(ownerUserId, owner?.feishu_open_id)
       if (!ownerOpenId) {
         autoGroupChatWarning = '需求负责人未绑定飞书 OpenID，未能自动拉群'
       } else {
@@ -2748,7 +2769,7 @@ const updateDemand = async (req, res) => {
     let autoGroupChatResult = null
 
     if (shouldSyncAutoGroupChat) {
-      const ownerOpenId = normalizeText(owner?.feishu_open_id, 128)
+      const ownerOpenId = await resolveUserFeishuOpenId(ownerUserId, owner?.feishu_open_id)
       if (!ownerOpenId) {
         autoGroupChatWarning = '需求负责人未绑定飞书 OpenID，未能自动拉群'
       } else {

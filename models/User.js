@@ -375,6 +375,12 @@ const User = {
     }
   },
 
+  updateFeishuOpenId: async (id, openId = null) => {
+    const normalizedOpenId = String(openId || '').trim() || null
+    const [result] = await pool.query('UPDATE users SET feishu_open_id = ? WHERE id = ?', [normalizedOpenId, id])
+    return result.affectedRows
+  },
+
   findDefaultRegisterRoleId: async () => {
     // Preferred: explicit USER role_key.
     try {

@@ -312,32 +312,43 @@ const FeishuUserBinding = {
       throw error
     }
 
-    await pool.query(
-      `INSERT INTO feishu_user_bindings (
-         user_id,
-         feishu_snapshot_id,
-         open_id,
-         union_id,
-         feishu_user_id,
-         created_by,
-         updated_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         feishu_snapshot_id = VALUES(feishu_snapshot_id),
-         open_id = VALUES(open_id),
-         union_id = VALUES(union_id),
-         feishu_user_id = VALUES(feishu_user_id),
-         updated_by = VALUES(updated_by)`,
-      [
-        normalizedUserId,
-        normalizedSnapshotId,
-        normalizedOpenId,
-        normalizedUnionId,
-        normalizedFeishuUserId,
-        normalizedOperatorId,
-        normalizedOperatorId,
-      ],
-    )
+    const connection = await pool.getConnection()
+    try {
+      await connection.beginTransaction()
+      await connection.query(
+        `INSERT INTO feishu_user_bindings (
+           user_id,
+           feishu_snapshot_id,
+           open_id,
+           union_id,
+           feishu_user_id,
+           created_by,
+           updated_by
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           feishu_snapshot_id = VALUES(feishu_snapshot_id),
+           open_id = VALUES(open_id),
+           union_id = VALUES(union_id),
+           feishu_user_id = VALUES(feishu_user_id),
+           updated_by = VALUES(updated_by)`,
+        [
+          normalizedUserId,
+          normalizedSnapshotId,
+          normalizedOpenId,
+          normalizedUnionId,
+          normalizedFeishuUserId,
+          normalizedOperatorId,
+          normalizedOperatorId,
+        ],
+      )
+      await connection.query('UPDATE users SET feishu_open_id = ? WHERE id = ?', [normalizedOpenId, normalizedUserId])
+      await connection.commit()
+    } catch (error) {
+      await connection.rollback()
+      throw error
+    } finally {
+      connection.release()
+    }
 
     return this.getByUserId(normalizedUserId)
   },
@@ -348,8 +359,21 @@ const FeishuUserBinding = {
     const normalizedUserId = toPositiveInt(userId)
     if (!normalizedUserId) return 0
 
-    const [result] = await pool.query('DELETE FROM feishu_user_bindings WHERE user_id = ?', [normalizedUserId])
-    return Number(result?.affectedRows || 0)
+    const connection = await pool.getConnection()
+    try {
+      await connection.beginTransaction()
+      const [result] = await connection.query('DELETE FROM feishu_user_bindings WHERE user_id = ?', [normalizedUserId])
+      if (Number(result?.affectedRows || 0) > 0) {
+        await connection.query('UPDATE users SET feishu_open_id = NULL WHERE id = ?', [normalizedUserId])
+      }
+      await connection.commit()
+      return Number(result?.affectedRows || 0)
+    } catch (error) {
+      await connection.rollback()
+      throw error
+    } finally {
+      connection.release()
+    }
   },
 }
 
