@@ -2161,6 +2161,7 @@ const createDemand = async (req, res) => {
   const backendTechSolution = normalizeText(req.body.backend_tech_solution, 10000)
   const codeBranch = normalizeText(req.body.code_branch, 255)
   const releaseNote = normalizeText(req.body.release_note, 2000)
+  const businessValueExpectation = normalizeText(req.body.business_value_expectation, 2000)
   const expectedReleaseDateRaw = req.body.expected_release_date
   const expectedReleaseDate = normalizeDate(expectedReleaseDateRaw)
   const status = normalizeStatus(req.body.status)
@@ -2173,6 +2174,9 @@ const createDemand = async (req, res) => {
 
   if (!name) {
     return res.status(400).json({ success: false, message: '需求名称不能为空' })
+  }
+  if (!businessValueExpectation) {
+    return res.status(400).json({ success: false, message: '需求业务价值预期不能为空' })
   }
 
   if (ownerUserIdRaw !== undefined && ownerUserIdRaw !== null && ownerUserIdRaw !== '' && !parsedOwnerUserId) {
@@ -2306,6 +2310,7 @@ const createDemand = async (req, res) => {
       backendTechSolution: backendTechSolution || null,
       codeBranch: codeBranch || null,
       releaseNote: releaseNote || null,
+      businessValueExpectation: businessValueExpectation || null,
       businessGroupCode,
       expectedReleaseDate: expectedReleaseDate || null,
       status,
@@ -2611,6 +2616,10 @@ const updateDemand = async (req, res) => {
       req.body.release_note === undefined
         ? existing.release_note
         : normalizeText(req.body.release_note, 2000) || null
+    const businessValueExpectation =
+      req.body.business_value_expectation === undefined
+        ? existing.business_value_expectation
+        : normalizeText(req.body.business_value_expectation, 2000) || null
     let expectedReleaseDate = existing.expected_release_date || null
     if (req.body.expected_release_date !== undefined) {
       const raw = req.body.expected_release_date
@@ -2711,6 +2720,7 @@ const updateDemand = async (req, res) => {
       backendTechSolution,
       codeBranch,
       releaseNote,
+      businessValueExpectation,
       businessGroupCode,
       expectedReleaseDate,
       status,

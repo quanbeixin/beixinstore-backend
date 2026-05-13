@@ -544,6 +544,25 @@ function isMissingColumnError(err) {
   return err && err.code === 'ER_BAD_FIELD_ERROR'
 }
 
+function extractMissingColumnName(err) {
+  const message = String(err?.sqlMessage || err?.message || '')
+  const matched = message.match(/Unknown column '([^']+)'/i)
+  return matched?.[1] ? String(matched[1]).trim() : ''
+}
+
+function isMissingSpecificColumnError(err, expectedColumns = []) {
+  if (!isMissingColumnError(err)) return false
+  const normalizedExpected = new Set(
+    (Array.isArray(expectedColumns) ? expectedColumns : [expectedColumns])
+      .map((item) => String(item || '').trim().toLowerCase())
+      .filter(Boolean),
+  )
+  if (normalizedExpected.size === 0) return false
+  const missingColumnName = extractMissingColumnName(err).toLowerCase()
+  if (!missingColumnName) return false
+  return normalizedExpected.has(missingColumnName)
+}
+
 function isMissingTableError(err) {
   return err && (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146)
 }
@@ -2867,6 +2886,7 @@ const Work = {
         d.backend_tech_solution,
         d.code_branch,
         d.release_note,
+        d.business_value_expectation,
         d.group_chat_mode,
         d.group_chat_id,
         d.business_group_code,
@@ -2968,7 +2988,17 @@ const Work = {
       ${orderSql}
       LIMIT ? OFFSET ?`
 
-    const [rows] = await pool.query(listSql, [...params, pageSize, offset])
+    let rows = []
+    try {
+      ;[rows] = await pool.query(listSql, [...params, pageSize, offset])
+    } catch (err) {
+      if (!isMissingSpecificColumnError(err, ['d.business_value_expectation', 'business_value_expectation'])) throw err
+      const fallbackListSql = listSql.replace(
+        'd.business_value_expectation,',
+        'NULL AS business_value_expectation,',
+      )
+      ;[rows] = await pool.query(fallbackListSql, [...params, pageSize, offset])
+    }
     const [
       [[{ total }]],
       [[{ all_total: allTotal }]],
@@ -3059,7 +3089,7 @@ const Work = {
   },
 
   async findDemandById(id) {
-    const [rows] = await pool.query(
+    const demandDetailSql = 
       `SELECT
          d.id,
          d.name,
@@ -3082,6 +3112,7 @@ const Work = {
          d.backend_tech_solution,
          d.code_branch,
          d.release_note,
+         d.business_value_expectation,
          d.group_chat_mode,
          d.group_chat_id,
          COALESCE(d.overall_estimated_hours, 0) AS overall_estimated_hours,
@@ -3109,9 +3140,18 @@ const Work = {
          FROM project_members
          GROUP BY demand_id
        ) pm2 ON pm2.demand_id = d.id
-       WHERE d.id = ?`,
-      [id],
-    )
+       WHERE d.id = ?`
+    let rows = []
+    try {
+      ;[rows] = await pool.query(demandDetailSql, [id])
+    } catch (err) {
+      if (!isMissingSpecificColumnError(err, ['d.business_value_expectation', 'business_value_expectation'])) throw err
+      const fallbackDemandDetailSql = demandDetailSql.replace(
+        'd.business_value_expectation,',
+        'NULL AS business_value_expectation,',
+      )
+      ;[rows] = await pool.query(fallbackDemandDetailSql, [id])
+    }
     const todayDate = getBeijingTodayDateString()
     const row = rows[0] || null
     const normalizedRow = row
@@ -3154,6 +3194,7 @@ const Work = {
     backendTechSolution = null,
     codeBranch = null,
     releaseNote = null,
+    businessValueExpectation = null,
     businessGroupCode = null,
     expectedReleaseDate = null,
     status = 'TODO',
@@ -3166,48 +3207,61 @@ const Work = {
       await conn.beginTransaction()
 
       const finalDemandId = demandId || (await generateDemandId(conn))
-      await conn.query(
-        `INSERT INTO work_demands (
+      const insertSql = `INSERT INTO work_demands (
+        id, name, owner_user_id, management_mode, template_id, participant_roles_json, project_manager, health_status,
+        participant_role_user_map_json,
+        group_chat_mode, group_chat_id, actual_start_time, actual_end_time, doc_link, ui_design_link, test_case_link,
+        frontend_tech_solution, backend_tech_solution, business_group_code,
+        code_branch, release_note, business_value_expectation, expected_release_date, status, priority, description, created_by
+      ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      const insertParams = [
+        finalDemandId,
+        name,
+        ownerUserId,
+        normalizeManagementMode(managementMode),
+        toPositiveInt(templateId),
+        JSON.stringify(normalizeParticipantRoles(participantRoles)),
+        toPositiveInt(projectManager),
+        normalizeHealthStatus(healthStatus),
+        JSON.stringify(
+          normalizeParticipantRoleUserMap(
+            participantRoleUserMap,
+            normalizeParticipantRoles(participantRoles),
+          ),
+        ),
+        normalizeText(groupChatMode, 20) || 'none',
+        normalizeText(groupChatId, 128) || null,
+        normalizeDateTime(actualStartTime, null),
+        normalizeDateTime(actualEndTime, null),
+        normalizeText(docLink, 500) || null,
+        normalizeText(uiDesignLink, 500) || null,
+        normalizeText(testCaseLink, 500) || null,
+        normalizeText(frontendTechSolution, 10000) || null,
+        normalizeText(backendTechSolution, 10000) || null,
+        businessGroupCode || null,
+        normalizeText(codeBranch, 255) || null,
+        normalizeText(releaseNote, 2000) || null,
+        normalizeText(businessValueExpectation, 2000) || null,
+        expectedReleaseDate || null,
+        normalizeStatus(status),
+        normalizePriority(priority),
+        description || null,
+        createdBy,
+      ]
+      try {
+        await conn.query(insertSql, insertParams)
+      } catch (err) {
+        if (!isMissingSpecificColumnError(err, ['business_value_expectation'])) throw err
+        const fallbackInsertSql = `INSERT INTO work_demands (
           id, name, owner_user_id, management_mode, template_id, participant_roles_json, project_manager, health_status,
           participant_role_user_map_json,
           group_chat_mode, group_chat_id, actual_start_time, actual_end_time, doc_link, ui_design_link, test_case_link,
           frontend_tech_solution, backend_tech_solution, business_group_code,
           code_branch, release_note, expected_release_date, status, priority, description, created_by
-        ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          finalDemandId,
-          name,
-          ownerUserId,
-          normalizeManagementMode(managementMode),
-          toPositiveInt(templateId),
-          JSON.stringify(normalizeParticipantRoles(participantRoles)),
-          toPositiveInt(projectManager),
-          normalizeHealthStatus(healthStatus),
-          JSON.stringify(
-            normalizeParticipantRoleUserMap(
-              participantRoleUserMap,
-              normalizeParticipantRoles(participantRoles),
-            ),
-          ),
-          normalizeText(groupChatMode, 20) || 'none',
-          normalizeText(groupChatId, 128) || null,
-          normalizeDateTime(actualStartTime, null),
-          normalizeDateTime(actualEndTime, null),
-          normalizeText(docLink, 500) || null,
-          normalizeText(uiDesignLink, 500) || null,
-          normalizeText(testCaseLink, 500) || null,
-          normalizeText(frontendTechSolution, 10000) || null,
-          normalizeText(backendTechSolution, 10000) || null,
-          businessGroupCode || null,
-          normalizeText(codeBranch, 255) || null,
-          normalizeText(releaseNote, 2000) || null,
-          expectedReleaseDate || null,
-          normalizeStatus(status),
-          normalizePriority(priority),
-          description || null,
-          createdBy,
-        ],
-      )
+        ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        const fallbackInsertParams = insertParams.filter((_, index) => index !== 21)
+        await conn.query(fallbackInsertSql, fallbackInsertParams)
+      }
 
       const participantRoleUserIds = extractParticipantRoleUserIds(
         participantRoleUserMap,
@@ -3249,6 +3303,7 @@ const Work = {
       backendTechSolution = null,
       codeBranch = null,
       releaseNote = null,
+      businessValueExpectation = null,
       businessGroupCode = null,
       expectedReleaseDate = null,
       status,
@@ -3279,8 +3334,70 @@ const Work = {
       const userIdsToAdd = nextRoleUserIds.filter((item) => !previousRoleUserIds.includes(item))
       const userIdsToRemove = previousRoleUserIds.filter((item) => !nextRoleUserIds.includes(item))
 
-      const [result] = await conn.query(
-        `UPDATE work_demands
+      const updateSql = `UPDATE work_demands
+       SET
+         name = ?,
+         owner_user_id = ?,
+         management_mode = ?,
+         template_id = ?,
+         participant_roles_json = CAST(? AS JSON),
+         project_manager = ?,
+         health_status = ?,
+         participant_role_user_map_json = CAST(? AS JSON),
+         group_chat_mode = ?,
+         group_chat_id = ?,
+         actual_start_time = ?,
+         actual_end_time = ?,
+         doc_link = ?,
+         ui_design_link = ?,
+         test_case_link = ?,
+         frontend_tech_solution = ?,
+         backend_tech_solution = ?,
+         business_group_code = ?,
+         code_branch = ?,
+         release_note = ?,
+         business_value_expectation = ?,
+         expected_release_date = ?,
+         status = ?,
+         priority = ?,
+         description = ?,
+         completed_at = ?
+       WHERE id = ?`
+      const updateParams = [
+        name,
+        ownerUserId,
+        normalizeManagementMode(managementMode),
+        toPositiveInt(templateId),
+        JSON.stringify(normalizedParticipantRoles),
+        toPositiveInt(projectManager),
+        normalizeHealthStatus(healthStatus),
+        JSON.stringify(normalizedParticipantRoleUserMap),
+        normalizeText(groupChatMode, 20) || 'none',
+        normalizeText(groupChatId, 128) || null,
+        normalizeDateTime(actualStartTime, null),
+        normalizeDateTime(actualEndTime, null),
+        normalizeText(docLink, 500) || null,
+        normalizeText(uiDesignLink, 500) || null,
+        normalizeText(testCaseLink, 500) || null,
+        normalizeText(frontendTechSolution, 10000) || null,
+        normalizeText(backendTechSolution, 10000) || null,
+        businessGroupCode || null,
+        normalizeText(codeBranch, 255) || null,
+        normalizeText(releaseNote, 2000) || null,
+        normalizeText(businessValueExpectation, 2000) || null,
+        expectedReleaseDate || null,
+        normalizeStatus(status),
+        normalizePriority(priority),
+        description || null,
+        completedAt || null,
+        demandId,
+      ]
+      let result
+      try {
+        ;[result] = await conn.query(updateSql, updateParams)
+      } catch (err) {
+        if (!isMissingSpecificColumnError(err, ['business_value_expectation'])) throw err
+        const fallbackUpdateSql = `UPDATE work_demands
          SET
            name = ?,
            owner_user_id = ?,
@@ -3307,36 +3424,10 @@ const Work = {
            priority = ?,
            description = ?,
            completed_at = ?
-         WHERE id = ?`,
-        [
-          name,
-          ownerUserId,
-          normalizeManagementMode(managementMode),
-          toPositiveInt(templateId),
-          JSON.stringify(normalizedParticipantRoles),
-          toPositiveInt(projectManager),
-          normalizeHealthStatus(healthStatus),
-          JSON.stringify(normalizedParticipantRoleUserMap),
-          normalizeText(groupChatMode, 20) || 'none',
-          normalizeText(groupChatId, 128) || null,
-          normalizeDateTime(actualStartTime, null),
-          normalizeDateTime(actualEndTime, null),
-          normalizeText(docLink, 500) || null,
-          normalizeText(uiDesignLink, 500) || null,
-          normalizeText(testCaseLink, 500) || null,
-          normalizeText(frontendTechSolution, 10000) || null,
-          normalizeText(backendTechSolution, 10000) || null,
-          businessGroupCode || null,
-          normalizeText(codeBranch, 255) || null,
-          normalizeText(releaseNote, 2000) || null,
-          expectedReleaseDate || null,
-          normalizeStatus(status),
-          normalizePriority(priority),
-          description || null,
-          completedAt || null,
-          demandId,
-        ],
-      )
+         WHERE id = ?`
+        const fallbackUpdateParams = updateParams.filter((_, index) => index !== 20)
+        ;[result] = await conn.query(fallbackUpdateSql, fallbackUpdateParams)
+      }
 
       await syncDemandMemberRowsByUserIds(conn, demandId, {
         addUserIds: userIdsToAdd,

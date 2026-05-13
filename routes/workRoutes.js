@@ -44,6 +44,21 @@ const {
   listDemandScoreTeamRanking,
 } = require('../controllers/demandScoringController')
 const {
+  initDemandValueReview,
+  updateDemandValueReviewParticipants,
+  listDemandValueReviews,
+  getDemandValueReviewDetail,
+  updateDemandValueReviewDraft,
+  submitDemandValueReview,
+  skipDemandValueReview,
+  unskipDemandValueReview,
+  getDemandValueReviewByDemandId,
+  getDemandValueReviewMap,
+  listMyDemandValueReviews,
+  getMyDemandValueReviewDetail,
+  submitMyDemandValueReviewScore,
+} = require('../controllers/demandValueReviewController')
+const {
   listWorkItemTypes,
   listDemandPhaseTypes,
   listProjectTemplatePhaseTypes,
@@ -243,6 +258,72 @@ router.get(
 )
 router.get('/demand-score-results/:taskId', authMiddleware.requirePermission('demand.score.result.view'), getDemandScoreResultDetail)
 router.get('/demand-score-results', authMiddleware.requirePermission('demand.score.result.view'), listDemandScoreResults)
+
+router.post(
+  '/demand-value-reviews/demands/:demandId/init',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  initDemandValueReview,
+)
+router.put(
+  '/demand-value-reviews/:id/participants',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  updateDemandValueReviewParticipants,
+)
+router.get(
+  '/demand-value-reviews/by-demand/:demandId',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  getDemandValueReviewByDemandId,
+)
+router.get(
+  '/demand-value-reviews/map',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  getDemandValueReviewMap,
+)
+router.get(
+  '/demand-value-reviews/:id',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  getDemandValueReviewDetail,
+)
+router.put(
+  '/demand-value-reviews/:id',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  updateDemandValueReviewDraft,
+)
+router.post(
+  '/demand-value-reviews/:id/submit',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  submitDemandValueReview,
+)
+router.post(
+  '/demand-value-reviews/:id/skip',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  skipDemandValueReview,
+)
+router.post(
+  '/demand-value-reviews/:id/unskip',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  unskipDemandValueReview,
+)
+router.get(
+  '/demand-value-reviews',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  listDemandValueReviews,
+)
+router.get(
+  '/demand-value-reviews/my/pending',
+  authMiddleware.requirePermission('workbench.view.self'),
+  listMyDemandValueReviews,
+)
+router.get(
+  '/demand-value-reviews/my/:id',
+  authMiddleware.requirePermission('workbench.view.self'),
+  getMyDemandValueReviewDetail,
+)
+router.post(
+  '/demand-value-reviews/my/:id/submit',
+  authMiddleware.requirePermission('workbench.view.self'),
+  submitMyDemandValueReviewScore,
+)
 
 router.get('/demands', authMiddleware.requirePermission('demand.view'), listDemands)
 router.get('/demands/views', authMiddleware.requirePermission('demand.view'), listDemandViews)
