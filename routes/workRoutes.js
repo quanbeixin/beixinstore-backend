@@ -52,6 +52,7 @@ const {
   submitDemandValueReview,
   skipDemandValueReview,
   unskipDemandValueReview,
+  reopenDemandValueReview,
   deleteDemandValueReview,
   getDemandValueReviewByDemandId,
   getDemandValueReviewMap,
@@ -282,17 +283,17 @@ router.get(
 )
 router.get(
   '/demand-value-reviews/:id',
-  authMiddleware.requirePermission('demand.score.result.view'),
+  authMiddleware.requirePermission('workbench.view.self'),
   getDemandValueReviewDetail,
 )
 router.put(
   '/demand-value-reviews/:id',
-  authMiddleware.requirePermission('demand.score.result.view'),
+  authMiddleware.requirePermission('workbench.view.self'),
   updateDemandValueReviewDraft,
 )
 router.post(
   '/demand-value-reviews/:id/submit',
-  authMiddleware.requirePermission('demand.score.result.view'),
+  authMiddleware.requirePermission('workbench.view.self'),
   submitDemandValueReview,
 )
 router.post(
@@ -305,6 +306,11 @@ router.post(
   authMiddleware.requirePermission('demand.score.result.view'),
   unskipDemandValueReview,
 )
+router.post(
+  '/demand-value-reviews/:id/reopen',
+  authMiddleware.requirePermission('workbench.view.self'),
+  reopenDemandValueReview,
+)
 router.delete(
   '/demand-value-reviews/:id',
   authMiddleware.requirePermission('demand.score.result.view'),
@@ -312,7 +318,7 @@ router.delete(
 )
 router.get(
   '/demand-value-reviews',
-  authMiddleware.requirePermission('demand.score.result.view'),
+  authMiddleware.requirePermission('workbench.view.self'),
   listDemandValueReviews,
 )
 router.get(

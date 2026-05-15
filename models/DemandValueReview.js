@@ -16,6 +16,7 @@ const LOG_ACTION = Object.freeze({
   INIT: 'INIT',
   UPDATE: 'UPDATE',
   SUBMIT: 'SUBMIT',
+  REOPEN: 'REOPEN',
   SKIP: 'SKIP',
   UNSKIP: 'UNSKIP',
   PARTICIPANTS_UPDATE: 'PARTICIPANTS_UPDATE',
@@ -1243,6 +1244,59 @@ const DemandValueReview = {
         fromStatus: REVIEW_STATUS.SKIPPED,
         toStatus: REVIEW_STATUS.PENDING,
         actionNote: '撤销无需复盘',
+        operatorUserId: normalizedOperatorId,
+      })
+      await conn.commit()
+      return this.getDetailById(normalizedReviewId)
+    } catch (error) {
+      await conn.rollback()
+      throw error
+    } finally {
+      conn.release()
+    }
+  },
+
+  async reopenForEdit(reviewId, operatorUserId) {
+    await ensureTable()
+    const normalizedReviewId = toPositiveInt(reviewId)
+    const normalizedOperatorId = toPositiveInt(operatorUserId)
+    if (!normalizedReviewId || !normalizedOperatorId) {
+      const error = new Error('参数无效')
+      error.code = 'INVALID_PARAMS'
+      throw error
+    }
+
+    const existing = await getReviewById(normalizedReviewId)
+    if (!existing) {
+      const error = new Error('复盘任务不存在')
+      error.code = 'NOT_FOUND'
+      throw error
+    }
+    if (existing.status !== REVIEW_STATUS.COMPLETED) {
+      const error = new Error('仅已提交复盘可调整为复盘中')
+      error.code = 'INVALID_REOPEN_STATUS'
+      throw error
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      await conn.query(
+        `UPDATE demand_value_reviews
+         SET
+           status = ?,
+           submitted_at = NULL,
+           updated_by = ?,
+           updated_at = NOW()
+         WHERE id = ?`,
+        [REVIEW_STATUS.IN_REVIEW, normalizedOperatorId, normalizedReviewId],
+      )
+      await appendReviewLog(conn, {
+        reviewId: normalizedReviewId,
+        actionType: LOG_ACTION.REOPEN,
+        fromStatus: REVIEW_STATUS.COMPLETED,
+        toStatus: REVIEW_STATUS.IN_REVIEW,
+        actionNote: '调整状态为复盘中，允许继续编辑',
         operatorUserId: normalizedOperatorId,
       })
       await conn.commit()

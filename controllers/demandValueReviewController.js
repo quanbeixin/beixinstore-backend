@@ -92,8 +92,6 @@ const updateDemandValueReviewParticipants = async (req, res) => {
 }
 
 const listDemandValueReviews = async (req, res) => {
-  if (!ensureAdmin(req, res)) return
-
   try {
     const data = await DemandValueReview.list({
       keyword: req.query.keyword,
@@ -114,8 +112,6 @@ const listDemandValueReviews = async (req, res) => {
 }
 
 const getDemandValueReviewDetail = async (req, res) => {
-  if (!ensureAdmin(req, res)) return
-
   const reviewId = toPositiveInt(req.params.id)
   if (!reviewId) {
     return res.status(400).json({ success: false, message: '复盘 ID 无效' })
@@ -134,8 +130,6 @@ const getDemandValueReviewDetail = async (req, res) => {
 }
 
 const updateDemandValueReviewDraft = async (req, res) => {
-  if (!ensureAdmin(req, res)) return
-
   const reviewId = toPositiveInt(req.params.id)
   if (!reviewId) {
     return res.status(400).json({ success: false, message: '复盘 ID 无效' })
@@ -166,8 +160,6 @@ const updateDemandValueReviewDraft = async (req, res) => {
 }
 
 const submitDemandValueReview = async (req, res) => {
-  if (!ensureAdmin(req, res)) return
-
   const reviewId = toPositiveInt(req.params.id)
   if (!reviewId) {
     return res.status(400).json({ success: false, message: '复盘 ID 无效' })
@@ -239,6 +231,27 @@ const unskipDemandValueReview = async (req, res) => {
       return res.status(400).json({ success: false, message: err.message })
     }
     console.error('撤销无需复盘失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const reopenDemandValueReview = async (req, res) => {
+  const reviewId = toPositiveInt(req.params.id)
+  if (!reviewId) {
+    return res.status(400).json({ success: false, message: '复盘 ID 无效' })
+  }
+
+  try {
+    const data = await DemandValueReview.reopenForEdit(reviewId, req.user?.id)
+    return res.json({ success: true, message: '已调整为复盘中，可继续修改', data })
+  } catch (err) {
+    if (['NOT_FOUND'].includes(err?.code)) {
+      return res.status(404).json({ success: false, message: err.message })
+    }
+    if (['INVALID_REOPEN_STATUS'].includes(err?.code)) {
+      return res.status(400).json({ success: false, message: err.message })
+    }
+    console.error('调整复盘状态失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -370,6 +383,7 @@ module.exports = {
   submitDemandValueReview,
   skipDemandValueReview,
   unskipDemandValueReview,
+  reopenDemandValueReview,
   deleteDemandValueReview,
   getDemandValueReviewByDemandId,
   getDemandValueReviewMap,
