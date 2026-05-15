@@ -52,6 +52,7 @@ const {
   submitDemandValueReview,
   skipDemandValueReview,
   unskipDemandValueReview,
+  deleteDemandValueReview,
   getDemandValueReviewByDemandId,
   getDemandValueReviewMap,
   listMyDemandValueReviews,
@@ -303,6 +304,11 @@ router.post(
   '/demand-value-reviews/:id/unskip',
   authMiddleware.requirePermission('demand.score.result.view'),
   unskipDemandValueReview,
+)
+router.delete(
+  '/demand-value-reviews/:id',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  deleteDemandValueReview,
 )
 router.get(
   '/demand-value-reviews',

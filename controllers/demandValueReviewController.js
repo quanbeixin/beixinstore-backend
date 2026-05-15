@@ -243,6 +243,26 @@ const unskipDemandValueReview = async (req, res) => {
   }
 }
 
+const deleteDemandValueReview = async (req, res) => {
+  if (!ensureAdmin(req, res)) return
+
+  const reviewId = toPositiveInt(req.params.id)
+  if (!reviewId) {
+    return res.status(400).json({ success: false, message: '复盘 ID 无效' })
+  }
+
+  try {
+    const data = await DemandValueReview.deleteReview(reviewId, req.user?.id)
+    return res.json({ success: true, message: '复盘任务已删除', data })
+  } catch (err) {
+    if (['NOT_FOUND'].includes(err?.code)) {
+      return res.status(404).json({ success: false, message: err.message })
+    }
+    console.error('删除需求价值复盘失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const getDemandValueReviewByDemandId = async (req, res) => {
   if (!ensureAdmin(req, res)) return
 
@@ -350,6 +370,7 @@ module.exports = {
   submitDemandValueReview,
   skipDemandValueReview,
   unskipDemandValueReview,
+  deleteDemandValueReview,
   getDemandValueReviewByDemandId,
   getDemandValueReviewMap,
   listMyDemandValueReviews,

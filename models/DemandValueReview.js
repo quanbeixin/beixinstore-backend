@@ -1255,6 +1255,93 @@ const DemandValueReview = {
     }
   },
 
+  async deleteReview(reviewId, operatorUserId) {
+    await ensureTable()
+    const normalizedReviewId = toPositiveInt(reviewId)
+    const normalizedOperatorId = toPositiveInt(operatorUserId)
+    if (!normalizedReviewId || !normalizedOperatorId) {
+      const error = new Error('参数无效')
+      error.code = 'INVALID_PARAMS'
+      throw error
+    }
+
+    const existing = await getReviewById(normalizedReviewId)
+    if (!existing) {
+      const error = new Error('复盘任务不存在')
+      error.code = 'NOT_FOUND'
+      throw error
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const [participantRows] = await conn.query(
+        `SELECT id
+         FROM demand_value_review_participants
+         WHERE review_id = ?`,
+        [normalizedReviewId],
+      )
+      const participantIds = (Array.isArray(participantRows) ? participantRows : [])
+        .map((row) => Number(row?.id || 0))
+        .filter((id) => Number.isInteger(id) && id > 0)
+
+      let deletedScoreCount = 0
+      if (participantIds.length > 0) {
+        const placeholders = participantIds.map(() => '?').join(', ')
+        const [scoreDeleteResult] = await conn.query(
+          `DELETE FROM demand_value_review_participant_scores
+           WHERE participant_id IN (${placeholders})`,
+          participantIds,
+        )
+        deletedScoreCount = Number(scoreDeleteResult?.affectedRows || 0)
+      }
+
+      const [participantDeleteResult] = await conn.query(
+        `DELETE FROM demand_value_review_participants
+         WHERE review_id = ?`,
+        [normalizedReviewId],
+      )
+      const deletedParticipantCount = Number(participantDeleteResult?.affectedRows || 0)
+
+      const [logDeleteResult] = await conn.query(
+        `DELETE FROM demand_value_review_logs
+         WHERE review_id = ?`,
+        [normalizedReviewId],
+      )
+      const deletedLogCount = Number(logDeleteResult?.affectedRows || 0)
+
+      const [reviewDeleteResult] = await conn.query(
+        `DELETE FROM demand_value_reviews
+         WHERE id = ?
+         LIMIT 1`,
+        [normalizedReviewId],
+      )
+      if (Number(reviewDeleteResult?.affectedRows || 0) <= 0) {
+        const error = new Error('复盘任务不存在')
+        error.code = 'NOT_FOUND'
+        throw error
+      }
+
+      await conn.commit()
+      return {
+        review_id: normalizedReviewId,
+        demand_id: existing.demand_id || '',
+        deleted_counts: {
+          scores: deletedScoreCount,
+          participants: deletedParticipantCount,
+          logs: deletedLogCount,
+          reviews: Number(reviewDeleteResult?.affectedRows || 0),
+        },
+      }
+    } catch (error) {
+      await conn.rollback()
+      throw error
+    } finally {
+      conn.release()
+    }
+  },
+
   async getReviewMapByDemandIds(demandIds = []) {
     await ensureTable()
     const normalizedDemandIds = Array.from(
