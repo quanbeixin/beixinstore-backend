@@ -1393,13 +1393,8 @@ function getTodayPlannedHoursSql(dateExpr = 'CURDATE()') {
 }
 
 function getTodayActualHoursSql() {
-  return `COALESCE(et.today_actual_hours, CASE
-    WHEN l.log_date = CURDATE() THEN COALESCE(l.actual_hours, 0)
-    WHEN COALESCE(l.log_status, 'IN_PROGRESS') = 'DONE'
-      AND DATE(COALESCE(l.log_completed_at, l.updated_at)) = CURDATE()
-    THEN COALESCE(l.actual_hours, 0)
-    ELSE 0
-  END)`
+  // 今日实际口径仅统计“今日日明细”投入，避免把历史累计工时映射到今天。
+  return 'COALESCE(et.today_actual_hours, 0)'
 }
 
 async function resolveOwnerScope(ownerUserId, { isSuperAdmin = false } = {}) {

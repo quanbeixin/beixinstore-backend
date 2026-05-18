@@ -145,6 +145,7 @@ function buildSignedGetObjectUrl({
   expireSeconds = 300,
   securityToken = '',
   responseContentDisposition = '',
+  responseCacheControl = '',
 }) {
   const normalizedAccessKeyId = normalizeText(accessKeyId, 128)
   const normalizedAccessKeySecret = normalizeText(accessKeySecret, 256)
@@ -153,6 +154,7 @@ function buildSignedGetObjectUrl({
   const normalizedObjectKey = String(objectKey || '').replace(/^\/+/, '')
   const normalizedSecurityToken = normalizeText(securityToken, 2048)
   const normalizedResponseContentDisposition = normalizeText(responseContentDisposition, 200)
+  const normalizedResponseCacheControl = normalizeText(responseCacheControl, 200)
   const expires = Math.floor(Date.now() / 1000) + Math.max(60, Number(expireSeconds) || 300)
 
   if (
@@ -168,6 +170,9 @@ function buildSignedGetObjectUrl({
   const responseOverrides = []
   if (normalizedResponseContentDisposition) {
     responseOverrides.push(['response-content-disposition', normalizedResponseContentDisposition])
+  }
+  if (normalizedResponseCacheControl) {
+    responseOverrides.push(['response-cache-control', normalizedResponseCacheControl])
   }
   const canonicalizedOverride = responseOverrides
     .sort((a, b) => a[0].localeCompare(b[0]))
@@ -189,6 +194,9 @@ function buildSignedGetObjectUrl({
   }
   if (normalizedResponseContentDisposition) {
     query.set('response-content-disposition', normalizedResponseContentDisposition)
+  }
+  if (normalizedResponseCacheControl) {
+    query.set('response-cache-control', normalizedResponseCacheControl)
   }
 
   return `https://${normalizedBucketName}.${normalizedEndpoint}/${encodeObjectKeyForPath(normalizedObjectKey)}?${query.toString()}`

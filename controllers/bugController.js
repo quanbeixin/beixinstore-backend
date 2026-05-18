@@ -38,7 +38,7 @@ const DEFAULT_ACTION_REQUIREMENTS = Object.freeze({
 
 const BUG_STATUS_CHANGE_WATCHER_RULE_CODE = 'sys_bug_status_change_watcher_default'
 const BUG_STATUS_CHANGE_WATCHER_BUSINESS_ROLE = 'bug_watcher'
-const BUG_ATTACHMENT_MAX_FILE_SIZE = 50 * 1024 * 1024
+const BUG_ATTACHMENT_MAX_FILE_SIZE = 5 * 1024 * 1024
 let bugStatusChangeWatcherRuleEnsured = false
 
 function toPositiveInt(value) {
@@ -110,7 +110,30 @@ function normalizeBooleanFlag(value) {
 
 function getBugAttachmentMaxFileSize(ossConfig = null) {
   const configuredMaxFileSize = Number(ossConfig?.maxFileSize || 0)
-  return Math.max(1024, configuredMaxFileSize, BUG_ATTACHMENT_MAX_FILE_SIZE)
+  if (Number.isFinite(configuredMaxFileSize) && configuredMaxFileSize > 0) {
+    return Math.max(1024, Math.min(configuredMaxFileSize, BUG_ATTACHMENT_MAX_FILE_SIZE))
+  }
+  return BUG_ATTACHMENT_MAX_FILE_SIZE
+}
+
+function normalizeFileSizeBytes(value) {
+  const size = Number(value)
+  if (!Number.isFinite(size) || size < 0) return 0
+  return Math.floor(size)
+}
+
+function buildFileSizeExceededMessage(maxFileSize) {
+  const limitMb = Math.ceil(Number(maxFileSize || 0) / 1024 / 1024) || 5
+  return `附件大小不能超过 ${limitMb}MB，请压缩后再上传`
+}
+
+function assertAttachmentFileSizeWithinLimit(fileSize, maxFileSize) {
+  const normalizedFileSize = normalizeFileSizeBytes(fileSize)
+  if (normalizedFileSize > 0 && normalizedFileSize > maxFileSize) {
+    const error = new Error(buildFileSizeExceededMessage(maxFileSize))
+    error.code = 'FILE_SIZE_EXCEEDED'
+    throw error
+  }
 }
 
 function isLocalHost(hostname = '') {
@@ -233,12 +256,12 @@ function normalizeWorkflowTransitionPayloadRows(items = []) {
 }
 
 function getBugAttachmentSignExpireSeconds() {
-  return Math.max(60, Number(process.env.BUG_ATTACHMENT_SIGN_EXPIRE_SECONDS || 1800))
+  return Math.max(60, Number(process.env.BUG_ATTACHMENT_SIGN_EXPIRE_SECONDS || 300))
 }
 
 function buildBugAttachmentAccessUrl(
   attachment,
-  { ossConfig = null, expireSeconds = 1800, contentDisposition = 'inline' } = {},
+  { ossConfig = null, expireSeconds = 300, contentDisposition = 'inline' } = {},
 ) {
   if (!attachment) return ''
   const storageProvider = normalizeCode(attachment.storage_provider)
@@ -255,6 +278,7 @@ function buildBugAttachmentAccessUrl(
       expireSeconds,
       securityToken: ossConfig.securityToken,
       responseContentDisposition: contentDisposition,
+      responseCacheControl: 'public,max-age=300',
     })
     if (signedUrl) return signedUrl
   }
@@ -327,12 +351,12 @@ function buildBugAttachmentPolicyPayload({
   }
 
   const maxFileSize = getBugAttachmentMaxFileSize(oss)
-  const normalizedFileSize = Number(fileSize || 0)
+  const normalizedFileSize = normalizeFileSizeBytes(fileSize)
   if (normalizedFileSize > 0 && normalizedFileSize > maxFileSize) {
     return {
       ok: false,
       status: 400,
-      message: `附件大小不能超过 ${Math.ceil(maxFileSize / 1024 / 1024)}MB`,
+      message: buildFileSizeExceededMessage(maxFileSize),
     }
   }
 
@@ -2059,6 +2083,7 @@ const createBugAttachment = async (req, res) => {
     if (!(await canManageBug(req, bug))) {
       return res.status(403).json({ success: false, message: '无权限维护该Bug附件' })
     }
+    assertAttachmentFileSizeWithinLimit(req.body.file_size, getBugAttachmentMaxFileSize(getOssConfigFromEnv()))
 
     const existingAttachment = await Bug.findAttachmentByObjectKey(bugId, objectKey)
     if (existingAttachment) {
@@ -2094,6 +2119,9 @@ const createBugAttachment = async (req, res) => {
     })
     return res.status(201).json({ success: true, message: '附件登记成功', data: responseData })
   } catch (err) {
+    if (err?.code === 'FILE_SIZE_EXCEEDED') {
+      return res.status(400).json({ success: false, message: err.message })
+    }
     console.error('登记Bug附件失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
@@ -2126,6 +2154,7 @@ const createBugCommentAttachment = async (req, res) => {
     if (!(await canManageBugComment(req, bug, commentLog))) {
       return res.status(403).json({ success: false, message: '无权限维护该评论附件' })
     }
+    assertAttachmentFileSizeWithinLimit(req.body.file_size, getBugAttachmentMaxFileSize(getOssConfigFromEnv()))
 
     const existingAttachment = await Bug.findCommentAttachmentByObjectKey(bugId, commentLogId, objectKey)
     if (existingAttachment) {
@@ -2162,6 +2191,9 @@ const createBugCommentAttachment = async (req, res) => {
     })
     return res.status(201).json({ success: true, message: '评论附件登记成功', data: responseData })
   } catch (err) {
+    if (err?.code === 'FILE_SIZE_EXCEEDED') {
+      return res.status(400).json({ success: false, message: err.message })
+    }
     console.error('登记Bug评论附件失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
