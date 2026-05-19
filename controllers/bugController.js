@@ -38,7 +38,7 @@ const DEFAULT_ACTION_REQUIREMENTS = Object.freeze({
 
 const BUG_STATUS_CHANGE_WATCHER_RULE_CODE = 'sys_bug_status_change_watcher_default'
 const BUG_STATUS_CHANGE_WATCHER_BUSINESS_ROLE = 'bug_watcher'
-const BUG_ATTACHMENT_MAX_FILE_SIZE = 5 * 1024 * 1024
+const BUG_ATTACHMENT_MAX_FILE_SIZE = 10 * 1024 * 1024
 let bugStatusChangeWatcherRuleEnsured = false
 
 function toPositiveInt(value) {
@@ -123,7 +123,7 @@ function normalizeFileSizeBytes(value) {
 }
 
 function buildFileSizeExceededMessage(maxFileSize) {
-  const limitMb = Math.ceil(Number(maxFileSize || 0) / 1024 / 1024) || 5
+  const limitMb = Math.ceil(Number(maxFileSize || 0) / 1024 / 1024) || 10
   return `附件大小不能超过 ${limitMb}MB，请压缩后再上传`
 }
 
