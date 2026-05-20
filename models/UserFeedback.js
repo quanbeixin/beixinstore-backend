@@ -12,6 +12,27 @@ const DEFAULT_PROMPT_CONFIG = Object.freeze({
   limitations: '回复必须基于知识库内容，用户需求请尽量简练。',
 })
 const IMPORTANT_EMAIL_STYLE_OPTIONS = new Set(['RED', 'STAR', 'RED_STAR'])
+const FEEDBACK_PRODUCT_FALLBACK = '未指定'
+const FEEDBACK_PRODUCT_ALIAS_MAP = Object.freeze({
+  a1: 'A1',
+  beyo: 'Beyo',
+  beatmo: 'Beatmo',
+  couplelens: 'Couplelens',
+  dradra: 'Dradra',
+  facefame: 'Facefame',
+  funpack: 'Funpack',
+  gloglo: 'gloglo',
+  heyo: 'Heyo',
+  makmak: 'makmak',
+  minimix: 'Minimix',
+  popdoll: 'POPDoll',
+  pixpop: 'Pixpop',
+  usgen: 'Usgen',
+  veeo: 'Veeo',
+  vimi: 'Vimi',
+  viyo: 'Viyo',
+  zikzik: 'Zikzik',
+})
 
 let ensureTablesPromise = null
 let tablesReady = false
@@ -117,6 +138,39 @@ function normalizeNullableJsonArray(value, maxItemLength = 100) {
 
 function normalizeEmailAddress(value) {
   return normalizeText(value, 255).toLowerCase()
+}
+
+function isEmailLike(value) {
+  const text = normalizeText(value, 255)
+  if (!text) return false
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)
+}
+
+function toCanonicalProductAlias(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+  return FEEDBACK_PRODUCT_ALIAS_MAP[normalized] || null
+}
+
+function normalizeFeedbackProduct(value) {
+  const text = normalizeText(value, 100)
+  if (!text) return FEEDBACK_PRODUCT_FALLBACK
+
+  if (!isEmailLike(text)) return text
+
+  const email = normalizeEmailAddress(text)
+  const domain = email.includes('@') ? email.split('@')[1] : ''
+  const domainName = domain.split('.')[0] || ''
+  const mappedByDomain = toCanonicalProductAlias(domainName)
+  if (mappedByDomain) return mappedByDomain
+
+  const localName = email.includes('@') ? email.split('@')[0] : ''
+  const mappedByLocal = toCanonicalProductAlias(localName)
+  if (mappedByLocal) return mappedByLocal
+
+  return FEEDBACK_PRODUCT_FALLBACK
 }
 
 function parseJsonArray(value) {
@@ -593,7 +647,7 @@ const UserFeedback = {
       date: normalizeDateTime(payload.date, normalizeDateTime(new Date().toISOString())),
       user_email: normalizeText(payload.user_email, 255) || 'anonymous@form.com',
       email_subject: normalizeNullableText(payload.email_subject, 255),
-      product: normalizeText(payload.product, 100) || '未指定',
+      product: normalizeFeedbackProduct(payload.product),
       channel: normalizeText(payload.channel, 100) || '其他',
       user_question: normalizeText(payload.user_question),
       user_question_cn: normalizeNullableText(payload.user_question_cn),
@@ -725,7 +779,7 @@ const UserFeedback = {
     }
     if (Object.prototype.hasOwnProperty.call(payload, 'product')) {
       updates.push('product = ?')
-      params.push(normalizeText(payload.product, 100))
+      params.push(normalizeFeedbackProduct(payload.product))
     }
     if (Object.prototype.hasOwnProperty.call(payload, 'channel')) {
       updates.push('channel = ?')
@@ -932,7 +986,7 @@ const UserFeedback = {
         normalizeDateTime(item?.date, normalizeDateTime(new Date().toISOString())),
         normalizeText(item?.user_email, 255) || 'anonymous@form.com',
         normalizeNullableText(item?.email_subject, 255),
-        normalizeText(item?.product, 100) || '未指定',
+        normalizeFeedbackProduct(item?.product),
         normalizeText(item?.channel, 100) || '其他',
         userQuestion,
         normalizeNullableText(item?.user_question_cn),
