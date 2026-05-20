@@ -1,4 +1,27 @@
 const pool = require('../utils/db')
+const ISSUE_TYPE_DICT_KEY = 'issue_type'
+
+const ITEM_TYPE_LOOKUP_SQL = `
+  SELECT
+    CAST(i.id AS SIGNED) AS id,
+    i.item_code AS type_key,
+    i.item_name AS name
+  FROM config_dict_items i
+  INNER JOIN config_dict_types t ON t.type_key = i.type_key
+  WHERE i.type_key = '${ISSUE_TYPE_DICT_KEY}' AND t.enabled = 1
+  UNION ALL
+  SELECT
+    w.id AS id,
+    w.type_key AS type_key,
+    w.name AS name
+  FROM work_item_types w
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM config_dict_items i2
+    INNER JOIN config_dict_types t2 ON t2.type_key = i2.type_key
+    WHERE i2.type_key = '${ISSUE_TYPE_DICT_KEY}' AND t2.enabled = 1
+  )
+`
 
 function toPositiveInt(value) {
   const num = Number(value)
@@ -105,7 +128,7 @@ const HumanGantt = {
          l.user_id,
          l.item_type_id,
          COALESCE(t.type_key, '') AS item_type_key,
-         COALESCE(t.name, CONCAT('类型#', l.item_type_id)) AS item_type_name,
+         COALESCE(t.name, '-') AS item_type_name,
          COALESCE(NULLIF(TRIM(l.description), ''), CONCAT(COALESCE(t.name, '事项'), '#', l.id)) AS item_title,
          COALESCE(l.log_status, 'IN_PROGRESS') AS log_status,
          l.demand_id,
@@ -117,7 +140,7 @@ const HumanGantt = {
          COALESCE(l.actual_hours, 0) AS actual_hours
        FROM work_logs l
        LEFT JOIN work_demands d ON d.id = l.demand_id
-       LEFT JOIN work_item_types t ON t.id = l.item_type_id
+       LEFT JOIN (${ITEM_TYPE_LOOKUP_SQL}) t ON t.id = l.item_type_id
        WHERE l.user_id IN (?)
          AND COALESCE(l.expected_start_date, l.log_date) <= ?
          AND COALESCE(l.expected_completion_date, l.expected_start_date, l.log_date) >= ?
