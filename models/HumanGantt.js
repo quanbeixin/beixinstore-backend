@@ -153,7 +153,7 @@ const HumanGantt = {
       user_id: Number(row.user_id),
       item_type_id: toPositiveInt(row.item_type_id),
       item_type_key: String(row.item_type_key || '').trim(),
-      item_type_name: String(row.item_type_name || '').trim(),
+      item_type_name: String(row.item_type_name || '').trim() || '-',
       item_title: String(row.item_title || '').trim(),
       log_status: String(row.log_status || '').trim().toUpperCase() || 'IN_PROGRESS',
       demand_id: row.demand_id === null || row.demand_id === undefined ? null : String(row.demand_id),
