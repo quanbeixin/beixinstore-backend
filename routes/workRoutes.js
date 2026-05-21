@@ -39,6 +39,7 @@ const {
   getMyDemandScoreSlot,
   submitMyDemandScoreSlot,
   generateDemandScoreTask,
+  deleteDemandScoreTask,
   listDemandScoreResults,
   getDemandScoreResultDetail,
   listDemandScoreTeamRanking,
@@ -252,6 +253,11 @@ router.post(
   '/demand-scores/demands/:demandId/generate',
   authMiddleware.requirePermission('demand.score.result.view'),
   generateDemandScoreTask,
+)
+router.delete(
+  '/demand-scores/demands/:demandId',
+  authMiddleware.requirePermission('demand.score.result.view'),
+  deleteDemandScoreTask,
 )
 router.get(
   '/demand-score-results/ranking',

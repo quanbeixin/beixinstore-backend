@@ -3,10 +3,8 @@ const User = require('../models/User')
 const Workflow = require('../models/Workflow')
 const ConfigDict = require('../models/ConfigDict')
 const NotificationEvent = require('../models/NotificationEvent')
-const DemandScoring = require('../models/DemandScoring')
 const FeishuUserBinding = require('../models/FeishuUserBinding')
 const pool = require('../utils/db')
-const { emitDemandScoreAssignNotifications } = require('../utils/demandScoreNotification')
 const { sendNotification, createFeishuDemandChat, addFeishuChatMembers } = require('../utils/notificationSender')
 const {
   normalizeTemplateGraph,
@@ -517,29 +515,11 @@ async function safeGetDemandWorkflowSnapshot(demandId) {
   }
 }
 
-async function ensureDemandScoringAfterWorkflowCompletion({ demandId, demandBefore, operatorUserId }) {
+async function ensureDemandScoringAfterWorkflowCompletion({ demandId }) {
   const normalizedDemandId = normalizeDemandId(demandId)
   if (!normalizedDemandId) return null
 
-  const updatedDemand = await Work.findDemandById(normalizedDemandId)
-  const previousStatus = String(demandBefore?.status || '').trim().toUpperCase()
-  const nextStatus = String(updatedDemand?.status || '').trim().toUpperCase()
-
-  if (previousStatus !== 'DONE' && nextStatus === 'DONE') {
-    try {
-      const result = await DemandScoring.ensureTaskForDemand(normalizedDemandId, { operatorUserId })
-      if (result?.created || result?.rebuilt) {
-        await emitDemandScoreAssignNotifications({
-          demandId: normalizedDemandId,
-          operatorUserId,
-        })
-      }
-    } catch (scoreErr) {
-      console.error('流程自动完成后生成评分任务失败:', scoreErr)
-    }
-  }
-
-  return updatedDemand
+  return Work.findDemandById(normalizedDemandId)
 }
 
 async function emitAutoCompletedNodeNotificationsFromSyncResults({ demandId, req, syncResults = [] }) {
@@ -2340,20 +2320,6 @@ const createDemand = async (req, res) => {
     await refreshDemandHourSummaryQuietly(finalDemandId)
     let created = await Work.findDemandById(finalDemandId)
 
-    if (normalizeStatus(status) === 'DONE') {
-      try {
-        const result = await DemandScoring.ensureTaskForDemand(finalDemandId, { operatorUserId: req.user.id })
-        if (result?.created || result?.rebuilt) {
-          await emitDemandScoreAssignNotifications({
-            demandId: finalDemandId,
-            operatorUserId: req.user.id,
-          })
-        }
-      } catch (scoreErr) {
-        console.error('需求创建后生成评分任务失败:', scoreErr)
-      }
-    }
-
     let autoGroupChatWarning = ''
     let autoGroupChatResult = null
     if (groupChatMode === 'auto') {
@@ -2869,20 +2835,6 @@ const updateDemand = async (req, res) => {
           to_status: nextStatus,
         },
       })
-    }
-
-    if (prevStatus !== 'DONE' && nextStatus === 'DONE') {
-      try {
-        const result = await DemandScoring.ensureTaskForDemand(demandId, { operatorUserId: req.user.id })
-        if (result?.created || result?.rebuilt) {
-          await emitDemandScoreAssignNotifications({
-            demandId,
-            operatorUserId: req.user.id,
-          })
-        }
-      } catch (scoreErr) {
-        console.error('需求完成后生成评分任务失败:', scoreErr)
-      }
     }
 
     return res.json({

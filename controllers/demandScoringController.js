@@ -126,6 +126,32 @@ const generateDemandScoreTask = async (req, res) => {
   }
 }
 
+const deleteDemandScoreTask = async (req, res) => {
+  if (!isSuperAdmin(req)) {
+    return res.status(403).json({ success: false, message: '仅超管可删除评分任务' })
+  }
+
+  const demandId = normalizeText(req.params.demandId, 64).toUpperCase()
+  if (!demandId) {
+    return res.status(400).json({ success: false, message: '需求 ID 无效' })
+  }
+
+  try {
+    const result = await DemandScoring.purgeTaskByDemand(demandId)
+    const messageText = result?.deleted
+      ? '评分任务已删除'
+      : '当前需求暂无评分任务'
+    return res.json({
+      success: true,
+      message: messageText,
+      data: result,
+    })
+  } catch (err) {
+    console.error('删除需求评分任务失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const listDemandScoreResults = async (req, res) => {
   if (!isSuperAdmin(req)) {
     return res.status(403).json({ success: false, message: '仅超管可查看评分结果' })
@@ -191,6 +217,7 @@ module.exports = {
   getMyDemandScoreSlot,
   submitMyDemandScoreSlot,
   generateDemandScoreTask,
+  deleteDemandScoreTask,
   listDemandScoreResults,
   getDemandScoreResultDetail,
   listDemandScoreTeamRanking,
