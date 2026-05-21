@@ -443,6 +443,13 @@ function sanitizeDemandViewConfig(config = {}) {
   ).slice(0, 100)
   const priorityOrder = normalizeText(source.priority_order, 8).toLowerCase()
   const activeTabKey = normalizeText(source.active_tab_key, 64)
+  const visibleColumns = Array.from(
+    new Set(
+      (Array.isArray(source.visible_columns) ? source.visible_columns : [])
+        .map((item) => normalizeText(item, 64))
+        .filter(Boolean),
+    ),
+  ).slice(0, 80)
 
   return {
     keyword: normalizeText(source.keyword, 100),
@@ -456,6 +463,7 @@ function sanitizeDemandViewConfig(config = {}) {
     scope_filter: normalizeDemandViewScopeFilter(source.scope_filter),
     priority_order: DEMAND_VIEW_ALLOWED_PRIORITY_ORDER_SET.has(priorityOrder) ? priorityOrder : '',
     compact_view: source.compact_view === true || source.compact_view === 1 || source.compact_view === '1',
+    visible_columns: visibleColumns,
   }
 }
 
@@ -2893,6 +2901,9 @@ const Work = {
         ci.current_phase_name,
         ci.current_node_planned_start_date,
         ci.current_node_planned_end_date,
+        phase_est.frontend_dev_stage_estimated_hours,
+        phase_est.backend_dev_stage_estimated_hours,
+        phase_est.test_notify_stage_estimated_hours,
         d.status,
         d.priority,
         d.description,
@@ -2969,6 +2980,152 @@ const Work = {
         WHERE demand_id IS NOT NULL
         GROUP BY demand_id
       ) ta ON ta.demand_id = d.id
+      LEFT JOIN (
+        SELECT
+          wl.demand_id,
+          ROUND(
+            CASE
+              WHEN SUM(
+                CASE
+                  WHEN
+                    (
+                      UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('FRONTEND_DEV', 'FE_DEV', 'DEV')
+                      OR UPPER(TRIM(COALESCE(wl.phase_key, ''))) = 'FRONTEND'
+                    )
+                    AND wl.actual_hours IS NOT NULL
+                  THEN 1
+                  ELSE 0
+                END
+              ) > 0
+              THEN SUM(
+                CASE
+                  WHEN
+                    (
+                      UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('FRONTEND_DEV', 'FE_DEV', 'DEV')
+                      OR UPPER(TRIM(COALESCE(wl.phase_key, ''))) = 'FRONTEND'
+                    )
+                    AND wl.actual_hours IS NOT NULL
+                  THEN COALESCE(wl.actual_hours, 0)
+                  ELSE 0
+                END
+              )
+              WHEN SUM(
+                CASE
+                  WHEN
+                    (
+                      UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('FRONTEND_DEV', 'FE_DEV', 'DEV')
+                      OR UPPER(TRIM(COALESCE(wl.phase_key, ''))) = 'FRONTEND'
+                    )
+                    AND wl.personal_estimate_hours IS NOT NULL
+                  THEN 1
+                  ELSE 0
+                END
+              ) > 0
+              THEN SUM(
+                CASE
+                  WHEN
+                    (
+                      UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('FRONTEND_DEV', 'FE_DEV', 'DEV')
+                      OR UPPER(TRIM(COALESCE(wl.phase_key, ''))) = 'FRONTEND'
+                    )
+                    AND wl.personal_estimate_hours IS NOT NULL
+                  THEN COALESCE(wl.personal_estimate_hours, 0)
+                  ELSE 0
+                END
+              )
+              ELSE NULL
+            END,
+            1
+          ) AS frontend_dev_stage_estimated_hours,
+          ROUND(
+            CASE
+              WHEN SUM(
+                CASE
+                  WHEN
+                    UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('BACKEND_DEV', 'BE_DEV', 'DEV_BACK', 'BACKEND')
+                    AND wl.actual_hours IS NOT NULL
+                  THEN 1
+                  ELSE 0
+                END
+              ) > 0
+              THEN SUM(
+                CASE
+                  WHEN
+                    UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('BACKEND_DEV', 'BE_DEV', 'DEV_BACK', 'BACKEND')
+                    AND wl.actual_hours IS NOT NULL
+                  THEN COALESCE(wl.actual_hours, 0)
+                  ELSE 0
+                END
+              )
+              WHEN SUM(
+                CASE
+                  WHEN
+                    UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('BACKEND_DEV', 'BE_DEV', 'DEV_BACK', 'BACKEND')
+                    AND wl.personal_estimate_hours IS NOT NULL
+                  THEN 1
+                  ELSE 0
+                END
+              ) > 0
+              THEN SUM(
+                CASE
+                  WHEN
+                    UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('BACKEND_DEV', 'BE_DEV', 'DEV_BACK', 'BACKEND')
+                    AND wl.personal_estimate_hours IS NOT NULL
+                  THEN COALESCE(wl.personal_estimate_hours, 0)
+                  ELSE 0
+                END
+              )
+              ELSE NULL
+            END,
+            1
+          ) AS backend_dev_stage_estimated_hours,
+          ROUND(
+            CASE
+              WHEN SUM(
+                CASE
+                  WHEN
+                    UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('TEST_NOTIFY', 'TEST_NOTIFICATION')
+                    AND wl.actual_hours IS NOT NULL
+                  THEN 1
+                  ELSE 0
+                END
+              ) > 0
+              THEN SUM(
+                CASE
+                  WHEN
+                    UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('TEST_NOTIFY', 'TEST_NOTIFICATION')
+                    AND wl.actual_hours IS NOT NULL
+                  THEN COALESCE(wl.actual_hours, 0)
+                  ELSE 0
+                END
+              )
+              WHEN SUM(
+                CASE
+                  WHEN
+                    UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('TEST_NOTIFY', 'TEST_NOTIFICATION')
+                    AND wl.personal_estimate_hours IS NOT NULL
+                  THEN 1
+                  ELSE 0
+                END
+              ) > 0
+              THEN SUM(
+                CASE
+                  WHEN
+                    UPPER(TRIM(COALESCE(wl.phase_key, ''))) IN ('TEST_NOTIFY', 'TEST_NOTIFICATION')
+                    AND wl.personal_estimate_hours IS NOT NULL
+                  THEN COALESCE(wl.personal_estimate_hours, 0)
+                  ELSE 0
+                END
+              )
+              ELSE NULL
+            END,
+            1
+          ) AS test_notify_stage_estimated_hours
+        FROM work_logs wl
+        WHERE wl.demand_id IS NOT NULL
+          AND COALESCE(wl.log_status, 'IN_PROGRESS') <> 'CANCELLED'
+        GROUP BY wl.demand_id
+      ) phase_est ON phase_est.demand_id = d.id
       LEFT JOIN (
         SELECT l1.demand_id, l1.remaining_hours
         FROM work_logs l1
