@@ -22,6 +22,34 @@ const CANCEL_INTENT_KEYWORDS = [
   '停止订阅',
   '关闭自动续费',
 ]
+const ACCOUNT_DELETE_INTENT_KEYWORDS = [
+  'delete my account',
+  'delete account',
+  'remove my account',
+  'close my account',
+  'account deletion',
+  'permanent delete account',
+  '删除账户',
+  '删除账号',
+  '注销账户',
+  '注销账号',
+]
+const DATA_DELETE_INTENT_KEYWORDS = [
+  'delete my data',
+  'delete all data',
+  'erase my data',
+  'permanent deletion',
+  'permanently delete',
+  'remove all photos',
+  'remove all videos',
+  '删除数据',
+  '永久删除',
+  '删除上传图',
+  '删除结果图',
+  '删除视频',
+  '删除帖子',
+  '删除滤镜',
+]
 
 function normalizeText(value, maxLength = 0) {
   const text = String(value || '').trim()
@@ -30,9 +58,27 @@ function normalizeText(value, maxLength = 0) {
   return text
 }
 
+function normalizeFeedbackBodyText(value) {
+  const text = normalizeText(value)
+  if (!text) return ''
+
+  const withoutTags = text
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&#160;/gi, ' ')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[\u200B-\u200D\uFEFF]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return normalizeText(withoutTags)
+}
+
 function buildFeedbackQuestionText(feedback, { labeled = false } = {}) {
   const subject = normalizeText(feedback?.email_subject)
-  const question = normalizeText(feedback?.user_question)
+  const question = normalizeFeedbackBodyText(feedback?.user_question)
 
   if (subject && question) {
     return labeled
@@ -96,6 +142,16 @@ function parseCategories(categoriesText) {
     .filter(Boolean)
 }
 
+function getDefaultCategory(categoryOptions = []) {
+  return (
+    findCategoryByKeywords(categoryOptions, ['未说明具体原因']) ||
+    findCategoryByKeywords(categoryOptions, ['未说明']) ||
+    findCategoryByKeywords(categoryOptions, ['咨询']) ||
+    categoryOptions[0] ||
+    '咨询'
+  )
+}
+
 function normalizeSentiment(value) {
   const normalized = String(value || '').trim().toLowerCase()
   if (normalized === 'positive') return 'Positive'
@@ -106,10 +162,24 @@ function normalizeSentiment(value) {
 function sanitizeCategory(inputCategory, categoryOptions) {
   const normalized = normalizeText(inputCategory, 100)
   if (!normalized) {
-    return categoryOptions[0] || '咨询'
+    return getDefaultCategory(categoryOptions)
   }
 
   const lower = normalized.toLowerCase()
+  if (hasIntentKeyword(lower, ACCOUNT_DELETE_INTENT_KEYWORDS)) {
+    return (
+      findCategoryByKeywords(categoryOptions, ['删除账户', '删除账号']) ||
+      findCategoryByKeywords(categoryOptions, ['删除']) ||
+      normalized
+    )
+  }
+  if (hasIntentKeyword(lower, DATA_DELETE_INTENT_KEYWORDS)) {
+    return (
+      findCategoryByKeywords(categoryOptions, ['删除数据', '删除上传图', '删除结果图', '删除视频', '删除帖子', '删除滤镜']) ||
+      findCategoryByKeywords(categoryOptions, ['删除']) ||
+      normalized
+    )
+  }
   if (hasIntentKeyword(lower, REFUND_INTENT_KEYWORDS)) {
     return getRefundCategory(categoryOptions) || normalized
   }
@@ -134,7 +204,7 @@ function sanitizeCategory(inputCategory, categoryOptions) {
   if (fuzzy) return fuzzy
 
   if (normalized.length > 28 && /(优先|以下|选择|分类|新增|请)/.test(normalized)) {
-    return categoryOptions[0] || '咨询'
+    return getDefaultCategory(categoryOptions)
   }
 
   return normalized
@@ -192,6 +262,12 @@ function summarizeRequest(text) {
   if (!cleaned) return ''
 
   const lower = cleaned.toLowerCase()
+  if (/(delete (my )?account|remove (my )?account|close (my )?account|account deletion|删除账户|删除账号|注销账户|注销账号)/.test(lower)) {
+    return '删除账户'
+  }
+  if (/(delete (all )?(my )?(data|photos|videos)|permanent deletion|permanently delete|删除数据|永久删除)/.test(lower)) {
+    return '删除数据'
+  }
   if (/(refund|refunding|reimbursement|money back|chargeback|cancel subscription|subscription cancel|取消订阅|申请退款|要求退款|退款)/.test(lower)) {
     return '用户希望退款或取消订阅'
   }
@@ -348,6 +424,38 @@ async function translateToEnglish(text) {
   }
 }
 
+function fallbackChineseQuestion(sourceText) {
+  const source = normalizeText(sourceText)
+  if (!source) return ''
+
+  const lower = source.toLowerCase()
+  if (hasIntentKeyword(lower, CANCEL_INTENT_KEYWORDS)) {
+    return '取消我的订阅'
+  }
+  if (hasIntentKeyword(lower, ACCOUNT_DELETE_INTENT_KEYWORDS)) {
+    return '请删除我的账户'
+  }
+  if (hasIntentKeyword(lower, DATA_DELETE_INTENT_KEYWORDS)) {
+    return '请删除我的数据'
+  }
+  if (hasIntentKeyword(lower, REFUND_INTENT_KEYWORDS)) {
+    return '我想申请退款'
+  }
+
+  const exactFallbackMap = new Map([
+    ['cancel my subscription', '取消我的订阅'],
+    ['unsubscribe', '取消订阅'],
+    ['delete my account', '请删除我的账户'],
+    ['delete account', '请删除账户'],
+    ['delete my data', '请删除我的数据'],
+    ['delete all data', '请删除所有数据'],
+    ['refund', '我想申请退款'],
+    ['i want a refund', '我想申请退款'],
+  ])
+
+  return exactFallbackMap.get(lower) || ''
+}
+
 async function ensureChineseQuestion(sourceText) {
   const source = normalizeText(sourceText)
   if (!source) return ''
@@ -355,6 +463,11 @@ async function ensureChineseQuestion(sourceText) {
   if (!needsChineseTranslation(source, '')) return source
 
   const translated = await translateToChinese(source)
+  if (!needsChineseTranslation(source, translated)) return translated
+
+  const fallbackTranslated = fallbackChineseQuestion(source)
+  if (fallbackTranslated) return fallbackTranslated
+
   if (translated) return translated
   return source
 }
@@ -393,12 +506,19 @@ function buildHeuristicAnalysis(feedback, config) {
   const cancelKeywords = CANCEL_INTENT_KEYWORDS
 
   const matchedCategories = []
+  const deleteAccountCategory = findCategoryByKeywords(categories, ['删除账户', '删除账号'])
+  const deleteDataCategory = findCategoryByKeywords(categories, ['删除数据', '删除上传图', '删除结果图', '删除视频', '删除帖子', '删除滤镜'])
   const refundCategory = getRefundCategory(categories)
   const cancelCategory = getCancelCategory(categories)
   const bugCategory = categories.find((item) => item.includes('Bug')) || 'Bug'
   const complaintCategory = findCategoryByKeywords(categories, ['投诉', '申诉', '封禁']) || '投诉'
   const featureCategory = findCategoryByKeywords(categories, ['功能', '需求']) || '功能需求'
 
+  if (hasIntentKeyword(lower, ACCOUNT_DELETE_INTENT_KEYWORDS)) {
+    matchedCategories.push(deleteAccountCategory || deleteDataCategory || getDefaultCategory(categories))
+  } else if (hasIntentKeyword(lower, DATA_DELETE_INTENT_KEYWORDS)) {
+    matchedCategories.push(deleteDataCategory || deleteAccountCategory || getDefaultCategory(categories))
+  }
   if (hasIntentKeyword(lower, refundKeywords)) {
     matchedCategories.push(refundCategory)
   }
@@ -416,7 +536,7 @@ function buildHeuristicAnalysis(feedback, config) {
   }
 
   const aiAllCategories = normalizeCategoryList(matchedCategories)
-  const aiPrimaryCategory = aiAllCategories[0] || categories[0] || '咨询'
+  const aiPrimaryCategory = aiAllCategories[0] || getDefaultCategory(categories)
   const aiSecondaryCategories = aiAllCategories.slice(1)
 
   let sentiment = 'Neutral'
@@ -471,6 +591,28 @@ function applyIntentCategoryOverrides({
   let primary = aiPrimaryCategory
   const secondary = normalizeCategoryList(aiSecondaryCategories)
 
+  if (hasIntentKeyword(sourceText, ACCOUNT_DELETE_INTENT_KEYWORDS)) {
+    const deleteCategory =
+      findCategoryByKeywords(categoryOptions, ['删除账户', '删除账号']) ||
+      findCategoryByKeywords(categoryOptions, ['删除'])
+    if (deleteCategory) {
+      if (primary && primary !== deleteCategory) {
+        secondary.unshift(primary)
+      }
+      primary = deleteCategory
+    }
+  } else if (hasIntentKeyword(sourceText, DATA_DELETE_INTENT_KEYWORDS)) {
+    const deleteDataCategory =
+      findCategoryByKeywords(categoryOptions, ['删除数据', '删除上传图', '删除结果图', '删除视频', '删除帖子', '删除滤镜']) ||
+      findCategoryByKeywords(categoryOptions, ['删除'])
+    if (deleteDataCategory) {
+      if (primary && primary !== deleteDataCategory) {
+        secondary.unshift(primary)
+      }
+      primary = deleteDataCategory
+    }
+  }
+
   if (hasIntentKeyword(sourceText, REFUND_INTENT_KEYWORDS)) {
     const refundCategory = getRefundCategory(categoryOptions)
     if (refundCategory) {
@@ -523,6 +665,14 @@ async function callFeedbackAi(payload = {}) {
   const preferredApiKey = normalizeText(process.env.FEEDBACK_AI_API_KEY, 256) || undefined
   const preferredBaseUrl = normalizeText(process.env.FEEDBACK_AI_BASE_URL, 255) || undefined
   const preferredModel = normalizeText(process.env.FEEDBACK_AI_MODEL, 64) || undefined
+  const preferredWireApi = normalizeText(process.env.FEEDBACK_AI_WIRE_API, 64) || undefined
+
+  const resolveFeedbackWireApi = (baseUrl, explicitWireApi) => {
+    if (explicitWireApi) return explicitWireApi
+    const resolvedBaseUrl = normalizeText(baseUrl, 255).toLowerCase()
+    if (resolvedBaseUrl.includes('api.deepseek.com')) return 'chat_completions'
+    return undefined
+  }
 
   try {
     return await callChatCompletion({
@@ -530,6 +680,7 @@ async function callFeedbackAi(payload = {}) {
       apiKey: preferredApiKey,
       baseUrl: preferredBaseUrl,
       model: preferredModel,
+      wireApi: resolveFeedbackWireApi(preferredBaseUrl, preferredWireApi),
     })
   } catch (error) {
     const fallbackApiKey =
@@ -544,6 +695,10 @@ async function callFeedbackAi(payload = {}) {
       undefined
     const fallbackModel =
       normalizeText(process.env.AGENT_AI_DEFAULT_MODEL, 64) || preferredModel || undefined
+    const fallbackWireApi =
+      normalizeText(process.env.AGENT_AI_WIRE_API, 64) ||
+      resolveFeedbackWireApi(fallbackBaseUrl, preferredWireApi) ||
+      undefined
     const hasDifferentFallback = Boolean(fallbackApiKey) && fallbackApiKey !== preferredApiKey
 
     if (!hasDifferentFallback || !shouldRetryWithFallbackModel(error)) {
@@ -556,6 +711,7 @@ async function callFeedbackAi(payload = {}) {
       apiKey: fallbackApiKey,
       baseUrl: fallbackBaseUrl,
       model: fallbackModel,
+      wireApi: fallbackWireApi,
     })
   }
 }
@@ -565,7 +721,7 @@ async function analyzeFeedback(feedback) {
   const categoryOptions = parseCategories(config?.categories)
   const heuristic = buildHeuristicAnalysis(feedback, config)
   const feedbackQuestionText = buildFeedbackQuestionText(feedback)
-  const feedbackQuestionSourceText = normalizeText(feedback?.user_question) || feedbackQuestionText
+  const feedbackQuestionSourceText = normalizeFeedbackBodyText(feedback?.user_question) || feedbackQuestionText
 
   if (!hasAiCapability()) {
     heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionSourceText)
