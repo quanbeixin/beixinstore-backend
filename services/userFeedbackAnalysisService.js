@@ -257,6 +257,103 @@ function extractJsonObject(rawText) {
   return null
 }
 
+function decodeEscapedJsonString(value) {
+  const text = String(value || '')
+  if (!text) return ''
+  try {
+    return JSON.parse(`"${text}"`)
+  } catch {
+    return text
+  }
+}
+
+function extractLooseJsonLikeObject(rawText) {
+  const source = String(rawText || '').trim()
+  if (!source) return null
+
+  const stringField = (fieldName) => {
+    const pattern = new RegExp(`"${fieldName}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'i')
+    const match = source.match(pattern)
+    if (!match?.[1]) return ''
+    return normalizeText(decodeEscapedJsonString(match[1]))
+  }
+
+  const boolField = (fieldName) => {
+    const pattern = new RegExp(`"${fieldName}"\\s*:\\s*(true|false)`, 'i')
+    const match = source.match(pattern)
+    if (!match?.[1]) return null
+    return String(match[1]).toLowerCase() === 'true'
+  }
+
+  const stringArrayField = (fieldName) => {
+    const pattern = new RegExp(`"${fieldName}"\\s*:\\s*\\[([\\s\\S]*?)\\]`, 'i')
+    const match = source.match(pattern)
+    if (!match?.[1]) return []
+
+    const rawItems = match[1]
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+
+    return rawItems
+      .map((item) => item.replace(/^"/, '').replace(/"$/, ''))
+      .map((item) => normalizeText(decodeEscapedJsonString(item), 100))
+      .filter(Boolean)
+  }
+
+  const aiPrimaryCategory =
+    stringField('ai_primary_category') || stringField('primary_category') || stringField('ai_category')
+  const aiReply = stringField('ai_reply')
+  const aiReplyEn = stringField('ai_reply_en')
+  const userRequest = stringField('user_request')
+  const aiSentiment = stringField('ai_sentiment')
+  const secondaryCategories =
+    stringArrayField('ai_secondary_categories').length > 0
+      ? stringArrayField('ai_secondary_categories')
+      : stringArrayField('secondary_categories')
+  const isNewRequest = boolField('is_new_request')
+
+  if (!aiPrimaryCategory && !aiReply && !userRequest) {
+    return null
+  }
+
+  return {
+    ai_primary_category: aiPrimaryCategory,
+    ai_secondary_categories: secondaryCategories,
+    ai_sentiment: aiSentiment,
+    ai_reply: aiReply,
+    ai_reply_en: aiReplyEn,
+    user_request: userRequest,
+    is_new_request: isNewRequest,
+  }
+}
+
+async function recoverAnalysisFromNonJsonResponse({
+  rawContent = '',
+  feedback = null,
+  categoryOptions = [],
+}) {
+  const modelOutput = normalizeText(rawContent, 6000)
+  const feedbackText = buildFeedbackQuestionText(feedback, { labeled: true }) || ''
+  if (!modelOutput || !feedbackText) return null
+
+  const categoryHint = normalizeCategoryList(categoryOptions).join('、')
+  try {
+    const response = await callFeedbackAi({
+      systemPrompt:
+        '你是 JSON 结构化提取器。请根据用户反馈与候选分析内容，输出一个严格可解析的 JSON 对象，不要输出解释、不要输出 Markdown、不要输出分析过程。',
+      userPrompt: `请输出 JSON（字段必须完整）：\n{\n  "ai_primary_category": "主分类",\n  "ai_secondary_categories": ["次分类1", "次分类2"],\n  "ai_sentiment": "Positive | Neutral | Negative",\n  "ai_reply": "中文回复",\n  "ai_reply_en": "英文回复",\n  "user_request": "用户需求摘要",\n  "is_new_request": true\n}\n\n分类候选：${categoryHint || '咨询、功能需求、Bug、投诉'}\n\n用户反馈：\n${feedbackText}\n\n候选分析内容：\n${modelOutput}`,
+      temperature: 0,
+      maxTokens: 800,
+      responseFormat: 'json_object',
+    })
+
+    return extractJsonObject(response?.content) || extractLooseJsonLikeObject(response?.content)
+  } catch {
+    return null
+  }
+}
+
 function summarizeRequest(text) {
   const cleaned = normalizeText(text)
   if (!cleaned) return ''
@@ -319,6 +416,55 @@ function getCancelCategory(categoryOptions) {
     findCategoryByKeywords(categoryOptions, ['取消订阅']) ||
     '取消订阅'
   )
+}
+
+function normalizeCategoryCodeForMatch(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/[—–－-]/g, '-')
+    .toLowerCase()
+}
+
+function isRefundCategory(categoryName = '') {
+  const normalized = normalizeCategoryCodeForMatch(categoryName)
+  return normalized.includes('要求退款') || normalized.includes('退款')
+}
+
+function isCancelCategory(categoryName = '') {
+  const normalized = normalizeCategoryCodeForMatch(categoryName)
+  return normalized.includes('取消订阅')
+}
+
+function buildPolicyReplyByCategories({
+  primaryCategory = '',
+  secondaryCategories = [],
+  categoryOptions = [],
+}) {
+  const refundCategory = getRefundCategory(categoryOptions)
+  const cancelCategory = getCancelCategory(categoryOptions)
+  const categories = [primaryCategory]
+    .concat(Array.isArray(secondaryCategories) ? secondaryCategories : [])
+    .filter(Boolean)
+
+  const hasRefund = categories.some((item) => isRefundCategory(item))
+  const hasCancel = categories.some((item) => isCancelCategory(item))
+
+  if (!hasRefund && !hasCancel) return ''
+
+  const replyParts = []
+  if (hasRefund && refundCategory) {
+    replyParts.push(
+      '您好，非常抱歉，当前暂不支持退款。本应用会员服务是“基于订阅的”，只有在您积极同意订阅条款后，系统才会定期向您收费。但您可立即通过谷歌商店关闭订阅，避免后续扣款。感谢您的理解与支持！',
+    )
+  }
+  if (hasCancel && cancelCategory) {
+    replyParts.push(
+      '您可以通过谷歌商店管理并停止订阅，如未找到停止订阅选项请提供您的注册邮箱，发送给我们协助解决。请注意：取消后，当前订阅周期仍有效，到期后不再自动扣款。已付费的会员权益可持续使用至订阅结束日。',
+    )
+  }
+
+  return replyParts.join('\n')
 }
 
 function looksLikeEnglish(text) {
@@ -651,6 +797,11 @@ function clearConfigCache() {
   configCache = null
 }
 
+function isFeedbackAiDebugEnabled() {
+  const value = String(process.env.FEEDBACK_AI_DEBUG || '').trim().toLowerCase()
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on'
+}
+
 function shouldRetryWithFallbackModel(error) {
   const message = String(error?.message || '').toLowerCase()
   return (
@@ -739,17 +890,34 @@ async function analyzeFeedback(feedback) {
       maxTokens: Number.isInteger(Number(process.env.FEEDBACK_AI_MAX_TOKENS))
         ? Number(process.env.FEEDBACK_AI_MAX_TOKENS)
         : 800,
+      responseFormat: 'json_object',
     })
 
-    const parsed = extractJsonObject(response?.content)
+    let parsed = extractJsonObject(response?.content)
     if (!parsed) {
-      console.warn('反馈 AI 返回内容无法解析为 JSON，回退到规则分析:', {
-        feedbackId: feedback?.id || null,
-        preview: normalizeText(response?.content, 400),
-      })
-      heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionSourceText)
-      heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
-      return heuristic
+      parsed = extractLooseJsonLikeObject(response?.content)
+      if (!parsed) {
+        parsed = await recoverAnalysisFromNonJsonResponse({
+          rawContent: response?.content,
+          feedback,
+          categoryOptions,
+        })
+      }
+      if (!parsed) {
+        console.warn('反馈 AI 返回内容无法解析为 JSON，回退到规则分析:', {
+          feedbackId: feedback?.id || null,
+          preview: normalizeText(response?.content, 400),
+        })
+        heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionSourceText)
+        heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
+        return heuristic
+      }
+      if (isFeedbackAiDebugEnabled()) {
+        console.warn('反馈 AI 返回内容非标准 JSON，已按宽松模式提取字段:', {
+          feedbackId: feedback?.id || null,
+          preview: normalizeText(response?.content, 280),
+        })
+      }
     }
 
     const userQuestionCn = await ensureChineseQuestion(feedbackQuestionSourceText)
@@ -767,7 +935,6 @@ async function analyzeFeedback(feedback) {
       { exclude: [aiPrimaryCategory] },
     )
     const aiReply = normalizeText(parsed.ai_reply) || heuristic.ai_reply
-    const aiReplyEn = await ensureEnglishReply(aiReply, parsed.ai_reply_en)
     const userRequest = summarizeRequest(parsed.user_request || feedbackQuestionText)
     const categoryOverride = applyIntentCategoryOverrides({
       feedback,
@@ -776,6 +943,13 @@ async function analyzeFeedback(feedback) {
       aiSecondaryCategories,
       categoryOptions,
     })
+    const policyReply = buildPolicyReplyByCategories({
+      primaryCategory: categoryOverride.aiPrimaryCategory,
+      secondaryCategories: categoryOverride.aiSecondaryCategories,
+      categoryOptions,
+    })
+    const normalizedAiReply = policyReply || aiReply
+    const normalizedAiReplyEn = await ensureEnglishReply(normalizedAiReply, parsed.ai_reply_en)
 
     return {
       ai_category: categoryOverride.aiPrimaryCategory,
@@ -783,8 +957,8 @@ async function analyzeFeedback(feedback) {
       ai_secondary_categories: categoryOverride.aiSecondaryCategories,
       ai_all_categories: categoryOverride.aiAllCategories,
       ai_sentiment: normalizeSentiment(parsed.ai_sentiment),
-      ai_reply: aiReply,
-      ai_reply_en: aiReplyEn,
+      ai_reply: normalizedAiReply,
+      ai_reply_en: normalizedAiReplyEn,
       user_request: userRequest,
       is_new_request: normalizeBool(parsed.is_new_request, false),
       user_question_cn: userQuestionCn,
@@ -792,6 +966,14 @@ async function analyzeFeedback(feedback) {
   } catch (error) {
     console.warn('反馈 AI 分析失败，回退到规则分析:', error?.message || error)
     heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionSourceText)
+    const fallbackPolicyReply = buildPolicyReplyByCategories({
+      primaryCategory: heuristic.ai_primary_category,
+      secondaryCategories: heuristic.ai_secondary_categories,
+      categoryOptions,
+    })
+    if (fallbackPolicyReply) {
+      heuristic.ai_reply = fallbackPolicyReply
+    }
     heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
     return heuristic
   }

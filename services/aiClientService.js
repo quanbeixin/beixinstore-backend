@@ -156,6 +156,23 @@ function resolveDisableResponseStorage(preferredDisableStorage) {
   return normalizeBoolean(process.env.AGENT_AI_DISABLE_RESPONSE_STORAGE, false)
 }
 
+function resolveResponseFormat(preferredResponseFormat = null) {
+  if (!preferredResponseFormat) return null
+
+  if (typeof preferredResponseFormat === 'string') {
+    const normalized = normalizeText(preferredResponseFormat).toLowerCase()
+    if (normalized === 'json_object') return { type: 'json_object' }
+    return null
+  }
+
+  if (typeof preferredResponseFormat === 'object') {
+    const type = normalizeText(preferredResponseFormat.type).toLowerCase()
+    if (type === 'json_object') return { type: 'json_object' }
+  }
+
+  return null
+}
+
 function normalizeModelForProvider(model = '', baseUrl = '') {
   const requestedModel = normalizeText(model)
   const resolvedBaseUrl = normalizeText(baseUrl).toLowerCase()
@@ -182,6 +199,7 @@ async function callChatCompletion({
   baseUrl,
   model,
   wireApi,
+  responseFormat,
   reasoningEffort,
   disableResponseStorage,
   systemPrompt,
@@ -196,6 +214,7 @@ async function callChatCompletion({
   const resolvedBaseUrl = resolveBaseUrl(baseUrl)
   const resolvedModel = normalizeModelForProvider(model, resolvedBaseUrl)
   const resolvedWireApi = resolveWireApi(wireApi)
+  const resolvedResponseFormat = resolveResponseFormat(responseFormat)
   const resolvedReasoningEffort = resolveReasoningEffort(reasoningEffort)
   const resolvedDisableResponseStorage = resolveDisableResponseStorage(disableResponseStorage)
 
@@ -254,6 +273,7 @@ async function callChatCompletion({
             ],
             temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7,
             max_tokens: Number.isInteger(Number(maxTokens)) ? Number(maxTokens) : 2000,
+            ...(resolvedResponseFormat ? { response_format: resolvedResponseFormat } : {}),
           }
 
     const response = await fetch(`${resolvedBaseUrl}${endpointPath}`, {
