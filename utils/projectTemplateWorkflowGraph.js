@@ -252,6 +252,14 @@ function filterTemplateGraphByParticipantRoles(templateGraph, participantRoles =
         continue
       }
 
+      const currentNode = allNodes.find((item) => item?.node_key === currentKey)
+      // Only allow bridge-through for structural/system nodes (e.g. parallel split/join).
+      // Business task nodes removed by role filtering should break the path instead of
+      // being transparently bypassed, otherwise graph becomes over-connected and noisy.
+      if (!isSystemNodeType(currentNode?.node_type)) {
+        continue
+      }
+
       queue.push(...(outgoingMap.get(currentKey) || []))
     }
   })
@@ -266,6 +274,10 @@ function filterTemplateGraphByParticipantRoles(templateGraph, participantRoles =
         if (!currentKey || visited.has(currentKey)) continue
         visited.add(currentKey)
         if (keptKeySet.has(currentKey)) return false
+
+        const currentNode = allNodes.find((item) => item?.node_key === currentKey)
+        if (!isSystemNodeType(currentNode?.node_type)) continue
+
         queue.push(...(incomingMap.get(currentKey) || []))
       }
       return true
