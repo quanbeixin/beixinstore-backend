@@ -7,7 +7,7 @@ module.exports = {
       exec_mode: 'cluster',
       env: {
         NODE_ENV: 'production',
-        PORT: 3000
+        PORT: 8080
       },
       error_file: './logs/error.log',
       out_file: './logs/out.log',
