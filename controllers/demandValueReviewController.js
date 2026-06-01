@@ -18,6 +18,13 @@ function normalizeDemandId(value) {
   return normalizeText(value, 64).toUpperCase()
 }
 
+function resolveOptionalReviewDate(payload = {}) {
+  if (!payload || typeof payload !== 'object') return undefined
+  if (!Object.prototype.hasOwnProperty.call(payload, 'review_date')) return undefined
+  const normalized = normalizeDate(payload.review_date)
+  return normalized || null
+}
+
 function isAdmin(req) {
   if (req.userAccess?.is_super_admin) return true
   const roleKeys = Array.isArray(req.userAccess?.role_keys) ? req.userAccess.role_keys : []
@@ -99,6 +106,8 @@ const listDemandValueReviews = async (req, res) => {
       ownerUserId: req.query.owner_user_id,
       startDate: normalizeDate(req.query.start_date),
       endDate: normalizeDate(req.query.end_date),
+      reviewStartDate: normalizeDate(req.query.review_start_date),
+      reviewEndDate: normalizeDate(req.query.review_end_date),
       sortBy: req.query.sort_by,
       sortOrder: req.query.sort_order,
       page: req.query.page,
@@ -143,6 +152,7 @@ const updateDemandValueReviewDraft = async (req, res) => {
         review_value_summary: req.body.review_value_summary,
         review_benefit_result: req.body.review_benefit_result,
         review_improvement_notes: req.body.review_improvement_notes,
+        review_date: resolveOptionalReviewDate(req.body),
       },
       req.user?.id,
     )
@@ -173,6 +183,7 @@ const submitDemandValueReview = async (req, res) => {
         review_value_summary: req.body.review_value_summary,
         review_benefit_result: req.body.review_benefit_result,
         review_improvement_notes: req.body.review_improvement_notes,
+        review_date: resolveOptionalReviewDate(req.body),
       },
       req.user?.id,
     )
