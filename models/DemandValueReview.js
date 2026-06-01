@@ -47,6 +47,11 @@ function normalizeDemandId(value) {
   return normalizeText(value, 64).toUpperCase()
 }
 
+function normalizeDate(value) {
+  const text = normalizeText(value, 10)
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
+}
+
 function normalizeReviewStatus(value, fallback = REVIEW_STATUS.PENDING) {
   const status = normalizeText(value, 32).toUpperCase()
   return Object.values(REVIEW_STATUS).includes(status) ? status : fallback
@@ -89,6 +94,7 @@ function mapReviewRow(row = {}) {
     created_at: formatDateTime(row.created_at),
     updated_at: formatDateTime(row.updated_at),
     submitted_at: formatDateTime(row.submitted_at),
+    review_date: row.review_date || null,
     demand_name: row.demand_name || '',
     demand_owner_user_id: row.demand_owner_user_id ? Number(row.demand_owner_user_id) : null,
     demand_owner_name: row.demand_owner_name || '',
@@ -187,6 +193,7 @@ async function ensureTable() {
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       submitted_at DATETIME DEFAULT NULL,
+      review_date DATE DEFAULT NULL,
       PRIMARY KEY (id),
       UNIQUE KEY uk_demand_value_review_demand (demand_id),
       KEY idx_demand_value_review_status (status),
@@ -241,6 +248,16 @@ async function ensureTable() {
       KEY idx_demand_value_review_participant_scores_participant_id (participant_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   )
+
+  const [reviewDateColumnRows] = await pool.query(
+    `SHOW COLUMNS FROM demand_value_reviews LIKE 'review_date'`,
+  )
+  if (!Array.isArray(reviewDateColumnRows) || reviewDateColumnRows.length === 0) {
+    await pool.query(
+      `ALTER TABLE demand_value_reviews
+       ADD COLUMN review_date DATE DEFAULT NULL AFTER submitted_at`,
+    )
+  }
 
   tableReady = true
 }
@@ -586,6 +603,8 @@ const DemandValueReview = {
     ownerUserId = null,
     startDate = '',
     endDate = '',
+    reviewStartDate = '',
+    reviewEndDate = '',
     sortBy = '',
     sortOrder = '',
     page = 1,
@@ -603,6 +622,8 @@ const DemandValueReview = {
     const normalizedOwnerUserId = toPositiveInt(ownerUserId)
     const normalizedStartDate = /^\d{4}-\d{2}-\d{2}$/.test(String(startDate || '').trim()) ? String(startDate).trim() : ''
     const normalizedEndDate = /^\d{4}-\d{2}-\d{2}$/.test(String(endDate || '').trim()) ? String(endDate).trim() : ''
+    const normalizedReviewStartDate = /^\d{4}-\d{2}-\d{2}$/.test(String(reviewStartDate || '').trim()) ? String(reviewStartDate).trim() : ''
+    const normalizedReviewEndDate = /^\d{4}-\d{2}-\d{2}$/.test(String(reviewEndDate || '').trim()) ? String(reviewEndDate).trim() : ''
 
     if (normalizedKeyword) {
       conditions.push('(r.demand_id LIKE ? OR d.name LIKE ?)')
@@ -623,6 +644,14 @@ const DemandValueReview = {
     if (normalizedEndDate) {
       conditions.push('DATE(r.created_at) <= ?')
       params.push(normalizedEndDate)
+    }
+    if (normalizedReviewStartDate) {
+      conditions.push('r.review_date >= ?')
+      params.push(normalizedReviewStartDate)
+    }
+    if (normalizedReviewEndDate) {
+      conditions.push('r.review_date <= ?')
+      params.push(normalizedReviewEndDate)
     }
 
     const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
@@ -1024,6 +1053,10 @@ const DemandValueReview = {
       payload.review_improvement_notes === undefined
         ? existing.review_improvement_notes
         : normalizeText(payload.review_improvement_notes, 10000)
+    const reviewDate =
+      payload.review_date === undefined
+        ? existing.review_date
+        : normalizeDate(payload.review_date) || null
 
     const conn = await pool.getConnection()
     try {
@@ -1036,6 +1069,7 @@ const DemandValueReview = {
            review_value_summary = ?,
            review_benefit_result = ?,
            review_improvement_notes = ?,
+           review_date = ?,
            updated_by = ?,
            updated_at = NOW()
          WHERE id = ?`,
@@ -1045,6 +1079,7 @@ const DemandValueReview = {
           reviewValueSummary || null,
           reviewBenefitResult || null,
           reviewImprovementNotes || null,
+          reviewDate,
           normalizedOperatorId,
           normalizedReviewId,
         ],
@@ -1093,6 +1128,10 @@ const DemandValueReview = {
     const reviewValueSummary = normalizeText(payload.review_value_summary, 10000)
     const reviewBenefitResult = normalizeText(payload.review_benefit_result, 10000)
     const reviewImprovementNotes = normalizeText(payload.review_improvement_notes, 10000)
+    const reviewDate =
+      payload.review_date === undefined
+        ? existing.review_date
+        : normalizeDate(payload.review_date) || null
 
     if (overallScore === null || !reviewValueSummary || !reviewBenefitResult || !reviewImprovementNotes) {
       const error = new Error('请完整填写价值评分与复盘记录后再提交')
@@ -1111,6 +1150,7 @@ const DemandValueReview = {
            review_value_summary = ?,
            review_benefit_result = ?,
            review_improvement_notes = ?,
+           review_date = ?,
            skip_reason = NULL,
            submitted_at = NOW(),
            updated_by = ?,
@@ -1122,6 +1162,7 @@ const DemandValueReview = {
           reviewValueSummary,
           reviewBenefitResult,
           reviewImprovementNotes,
+          reviewDate,
           normalizedOperatorId,
           normalizedReviewId,
         ],
