@@ -1713,9 +1713,12 @@ const DemandScoring = {
     }
   },
 
-  async listResultDemands({ keyword = '', startDate = '', endDate = '', page = 1, pageSize = 20 } = {}) {
+  async listResultDemands({ keyword = '', startDate = '', endDate = '', page = 1, pageSize = 20, departmentIds = [] } = {}) {
     const normalizedPage = toPositiveInt(page) || 1
     const normalizedPageSize = Math.min(toPositiveInt(pageSize) || 20, 100)
+    const normalizedDepartmentIds = Array.isArray(departmentIds)
+      ? departmentIds.map((item) => toPositiveInt(item)).filter(Boolean)
+      : []
     const where = [
       `COALESCE(d.status, '') <> 'CANCELLED'`,
       'DATE(d.expected_release_date) >= ?',
@@ -1734,6 +1737,18 @@ const DemandScoring = {
     if (/^\d{4}-\d{2}-\d{2}$/.test(String(endDate || ''))) {
       where.push('DATE(d.expected_release_date) <= ?')
       params.push(endDate)
+    }
+    if (normalizedDepartmentIds.length > 0) {
+      where.push(
+        `EXISTS (
+          SELECT 1
+          FROM demand_score_subjects sub_scope
+          INNER JOIN users u_scope ON u_scope.id = sub_scope.evaluatee_user_id
+          WHERE sub_scope.task_id = t.id
+            AND u_scope.department_id IN (?)
+        )`,
+      )
+      params.push(normalizedDepartmentIds)
     }
     const whereSql = where.join(' AND ')
 
@@ -1763,21 +1778,28 @@ const DemandScoring = {
          ON d.id COLLATE utf8mb4_unicode_ci = t.demand_id
        LEFT JOIN (
          SELECT
-           task_id,
+           s.task_id,
            COUNT(*) AS pending_slot_count,
            GROUP_CONCAT(
-             DISTINCT COALESCE(NULLIF(evaluator_name, ''), CONCAT('用户', evaluator_user_id))
-             ORDER BY evaluator_user_id ASC
+             DISTINCT COALESCE(NULLIF(s.evaluator_name, ''), CONCAT('用户', s.evaluator_user_id))
+             ORDER BY s.evaluator_user_id ASC
              SEPARATOR '、'
            ) AS pending_evaluator_names
-         FROM demand_score_slots
-         WHERE status <> 'SUBMITTED'
-         GROUP BY task_id
+         FROM demand_score_slots s
+         ${normalizedDepartmentIds.length > 0 ? 'INNER JOIN users u_pending ON u_pending.id = s.evaluatee_user_id' : ''}
+         WHERE s.status <> 'SUBMITTED'
+           ${normalizedDepartmentIds.length > 0 ? 'AND u_pending.department_id IN (?)' : ''}
+         GROUP BY s.task_id
        ) pending ON pending.task_id = t.id
        WHERE ${whereSql}
        ORDER BY COALESCE(d.completed_at, t.created_at) DESC, t.id DESC
        LIMIT ? OFFSET ?`,
-      [...params, normalizedPageSize, (normalizedPage - 1) * normalizedPageSize],
+      [
+        ...(normalizedDepartmentIds.length > 0 ? [normalizedDepartmentIds] : []),
+        ...params,
+        normalizedPageSize,
+        (normalizedPage - 1) * normalizedPageSize,
+      ],
     )
     const taskIds = rows.map((row) => Number(row?.id || 0)).filter((id) => Number.isInteger(id) && id > 0)
     const subjectMapByTaskId = new Map()
@@ -1797,8 +1819,9 @@ const DemandScoring = {
              missing_role_keys_json
            FROM demand_score_subjects
            WHERE task_id IN (?)
+             ${normalizedDepartmentIds.length > 0 ? 'AND evaluatee_user_id IN (SELECT id FROM users WHERE department_id IN (?))' : ''}
            ORDER BY id ASC`,
-          [taskIds],
+          normalizedDepartmentIds.length > 0 ? [taskIds, normalizedDepartmentIds] : [taskIds],
         ),
         pool.query(
           `SELECT
@@ -1819,8 +1842,9 @@ const DemandScoring = {
            FROM demand_score_slots s
            LEFT JOIN demand_score_records r ON r.slot_id = s.id
            WHERE s.task_id IN (?)
+             ${normalizedDepartmentIds.length > 0 ? 'AND s.evaluatee_user_id IN (SELECT id FROM users WHERE department_id IN (?))' : ''}
            ORDER BY s.subject_id ASC, s.id ASC`,
-          [taskIds],
+          normalizedDepartmentIds.length > 0 ? [taskIds, normalizedDepartmentIds] : [taskIds],
         ),
       ])
       const slotMapBySubjectId = new Map()
@@ -1855,9 +1879,12 @@ const DemandScoring = {
     }
   },
 
-  async getDemandResult(taskId) {
+  async getDemandResult(taskId, { departmentIds = [] } = {}) {
     const normalizedTaskId = toPositiveInt(taskId)
     if (!normalizedTaskId) return null
+    const normalizedDepartmentIds = Array.isArray(departmentIds)
+      ? departmentIds.map((item) => toPositiveInt(item)).filter(Boolean)
+      : []
     const [taskRows] = await pool.query(
       `SELECT
          t.*,
@@ -1889,9 +1916,11 @@ const DemandScoring = {
          DATE_FORMAT(result_calculated_at, '%Y-%m-%d %H:%i:%s') AS result_calculated_at
        FROM demand_score_subjects
        WHERE task_id = ?
+         ${normalizedDepartmentIds.length > 0 ? 'AND evaluatee_user_id IN (SELECT id FROM users WHERE department_id IN (?))' : ''}
        ORDER BY final_score DESC, id ASC`,
-      [normalizedTaskId],
+      normalizedDepartmentIds.length > 0 ? [normalizedTaskId, normalizedDepartmentIds] : [normalizedTaskId],
     )
+    if (normalizedDepartmentIds.length > 0 && subjects.length === 0) return null
 
     const [slotRows] = await pool.query(
       `SELECT
@@ -1911,8 +1940,9 @@ const DemandScoring = {
        FROM demand_score_slots s
        LEFT JOIN demand_score_records r ON r.slot_id = s.id
        WHERE s.task_id = ?
+         ${normalizedDepartmentIds.length > 0 ? 'AND s.evaluatee_user_id IN (SELECT id FROM users WHERE department_id IN (?))' : ''}
        ORDER BY s.subject_id ASC, s.id ASC`,
-      [normalizedTaskId],
+      normalizedDepartmentIds.length > 0 ? [normalizedTaskId, normalizedDepartmentIds] : [normalizedTaskId],
     )
 
     const slotMapBySubjectId = new Map()
@@ -1936,9 +1966,12 @@ const DemandScoring = {
     }
   },
 
-  async listTeamRanking({ startDate = '', endDate = '', departmentId = null } = {}) {
+  async listTeamRanking({ startDate = '', endDate = '', departmentId = null, departmentIds = [] } = {}) {
     const where = ['t.result_ready = 1', `COALESCE(d.status, '') <> 'CANCELLED'`, 'DATE(d.expected_release_date) >= ?']
     const params = [SCORING_COMPLETED_CUTOFF_DATE]
+    const normalizedDepartmentIds = Array.isArray(departmentIds)
+      ? departmentIds.map((item) => toPositiveInt(item)).filter(Boolean)
+      : []
     if (/^\d{4}-\d{2}-\d{2}$/.test(String(startDate || ''))) {
       where.push('DATE(d.expected_release_date) >= ?')
       params.push(startDate)
@@ -1951,6 +1984,9 @@ const DemandScoring = {
     if (normalizedDepartmentId) {
       where.push('u.department_id = ?')
       params.push(normalizedDepartmentId)
+    } else if (normalizedDepartmentIds.length > 0) {
+      where.push('u.department_id IN (?)')
+      params.push(normalizedDepartmentIds)
     }
     const [detailRows] = await pool.query(
       `SELECT

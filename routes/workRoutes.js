@@ -2,6 +2,14 @@ const express = require('express')
 const router = express.Router()
 
 const authMiddleware = require('../middleware/auth')
+
+function allowDemandScoreResultViewer(req, res, next) {
+  if (req.userAccess?.is_super_admin || req.userAccess?.is_department_manager) {
+    return next()
+  }
+  return res.status(403).json({ success: false, message: '仅超管或部门负责人可查看评分结果' })
+}
+
 const {
   listBugs,
   getBugDetail,
@@ -261,11 +269,11 @@ router.delete(
 )
 router.get(
   '/demand-score-results/ranking',
-  authMiddleware.requirePermission('demand.score.result.view'),
+  allowDemandScoreResultViewer,
   listDemandScoreTeamRanking,
 )
-router.get('/demand-score-results/:taskId', authMiddleware.requirePermission('demand.score.result.view'), getDemandScoreResultDetail)
-router.get('/demand-score-results', authMiddleware.requirePermission('demand.score.result.view'), listDemandScoreResults)
+router.get('/demand-score-results/:taskId', allowDemandScoreResultViewer, getDemandScoreResultDetail)
+router.get('/demand-score-results', allowDemandScoreResultViewer, listDemandScoreResults)
 
 router.post(
   '/demand-value-reviews/demands/:demandId/init',

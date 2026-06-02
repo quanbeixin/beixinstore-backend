@@ -19,6 +19,32 @@ function isSuperAdmin(req) {
   return Boolean(req.userAccess?.is_super_admin)
 }
 
+function normalizeManagedDepartmentIds(req) {
+  return Array.isArray(req.userAccess?.managed_department_ids)
+    ? req.userAccess.managed_department_ids
+        .map((item) => Number(item))
+        .filter((item) => Number.isInteger(item) && item > 0)
+    : []
+}
+
+function canViewDemandScoreResults(req) {
+  return isSuperAdmin(req) || normalizeManagedDepartmentIds(req).length > 0
+}
+
+function buildDemandScoreResultScope(req) {
+  if (isSuperAdmin(req)) {
+    return {
+      isSuperAdmin: true,
+      departmentIds: [],
+    }
+  }
+
+  return {
+    isSuperAdmin: false,
+    departmentIds: normalizeManagedDepartmentIds(req),
+  }
+}
+
 const listMyDemandScoreSlots = async (req, res) => {
   try {
     const data = await DemandScoring.listMySlots(req.user?.id, {
@@ -153,8 +179,8 @@ const deleteDemandScoreTask = async (req, res) => {
 }
 
 const listDemandScoreResults = async (req, res) => {
-  if (!isSuperAdmin(req)) {
-    return res.status(403).json({ success: false, message: '仅超管可查看评分结果' })
+  if (!canViewDemandScoreResults(req)) {
+    return res.status(403).json({ success: false, message: '仅超管或部门负责人可查看评分结果' })
   }
 
   try {
@@ -164,6 +190,7 @@ const listDemandScoreResults = async (req, res) => {
       endDate: normalizeDate(req.query.end_date),
       page: req.query.page,
       pageSize: req.query.pageSize,
+      departmentIds: buildDemandScoreResultScope(req).departmentIds,
     })
     return res.json({ success: true, data })
   } catch (err) {
@@ -173,8 +200,8 @@ const listDemandScoreResults = async (req, res) => {
 }
 
 const getDemandScoreResultDetail = async (req, res) => {
-  if (!isSuperAdmin(req)) {
-    return res.status(403).json({ success: false, message: '仅超管可查看评分结果' })
+  if (!canViewDemandScoreResults(req)) {
+    return res.status(403).json({ success: false, message: '仅超管或部门负责人可查看评分结果' })
   }
 
   const taskId = toPositiveInt(req.params.taskId)
@@ -183,7 +210,9 @@ const getDemandScoreResultDetail = async (req, res) => {
   }
 
   try {
-    const data = await DemandScoring.getDemandResult(taskId)
+    const data = await DemandScoring.getDemandResult(taskId, {
+      departmentIds: buildDemandScoreResultScope(req).departmentIds,
+    })
     if (!data) {
       return res.status(404).json({ success: false, message: '评分结果不存在或尚未生成' })
     }
@@ -195,15 +224,25 @@ const getDemandScoreResultDetail = async (req, res) => {
 }
 
 const listDemandScoreTeamRanking = async (req, res) => {
-  if (!isSuperAdmin(req)) {
-    return res.status(403).json({ success: false, message: '仅超管可查看评分排行' })
+  if (!canViewDemandScoreResults(req)) {
+    return res.status(403).json({ success: false, message: '仅超管或部门负责人可查看评分排行' })
   }
 
   try {
+    const scope = buildDemandScoreResultScope(req)
+    const requestedDepartmentId = toPositiveInt(req.query.department_id)
+    if (
+      requestedDepartmentId &&
+      !scope.isSuperAdmin &&
+      !scope.departmentIds.includes(Number(requestedDepartmentId))
+    ) {
+      return res.status(403).json({ success: false, message: '仅可查看本人负责部门的数据' })
+    }
     const data = await DemandScoring.listTeamRanking({
       startDate: normalizeDate(req.query.start_date),
       endDate: normalizeDate(req.query.end_date),
-      departmentId: toPositiveInt(req.query.department_id),
+      departmentId: requestedDepartmentId,
+      departmentIds: scope.departmentIds,
     })
     return res.json({ success: true, data })
   } catch (err) {
