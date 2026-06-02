@@ -1632,8 +1632,8 @@ const DemandScoring = {
     }
 
     const comment = normalizeText(payload.comment, 2000)
-    if ((score < 70 || score > 90) && !comment) {
-      const err = new Error('评分低于 70 分、或高于 90 分时，必须填写评价说明')
+    if ((score < 80 || score > 89) && !comment) {
+      const err = new Error('除 80-89 分外，其他分数均需填写评价说明')
       err.code = 'COMMENT_REQUIRED'
       throw err
     }
