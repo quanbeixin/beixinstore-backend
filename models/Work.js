@@ -10028,6 +10028,15 @@ const Work = {
         work_item_list: [],
         trend: [],
         phase_distribution: [],
+        demand_bug_rate: {
+          demand_count: 0,
+          demand_actual_hours: 0,
+          bug_count: 0,
+          bug_rate_per_hour: 0,
+          bug_rate_per_100_hours: 0,
+          status_distribution: [],
+          demand_rows: [],
+        },
       }
     }
 
@@ -10433,6 +10442,173 @@ const Work = {
       }))
       .sort((left, right) => Number(right.actual_hours || 0) - Number(left.actual_hours || 0))
 
+    const [demandPeriodEntryRows] = await pool.query(
+      `SELECT
+         l.id AS log_id,
+         l.demand_id,
+         COALESCE(d.name, '无需求') AS demand_name,
+         ROUND(COALESCE(SUM(e.actual_hours), 0), 1) AS actual_hours
+       FROM work_log_daily_entries e
+       INNER JOIN (
+         SELECT log_id, entry_date, MAX(id) AS latest_id
+         FROM work_log_daily_entries
+         GROUP BY log_id, entry_date
+       ) le ON le.latest_id = e.id
+       INNER JOIN work_logs l ON l.id = e.log_id
+       LEFT JOIN work_demands d ON d.id = l.demand_id
+       WHERE ${entryWhereSql}
+         AND l.demand_id IS NOT NULL
+         AND TRIM(l.demand_id) <> ''
+       GROUP BY l.id, l.demand_id, d.name`,
+      entryParams,
+    )
+
+    const demandHourMap = new Map()
+    const demandEntryLogIds = new Set()
+    const addDemandBugRateHours = ({ demandId, demandName, actualHours }) => {
+      if (!demandId || actualHours <= 0) return
+      if (!demandHourMap.has(demandId)) {
+        demandHourMap.set(demandId, {
+          demand_id: demandId,
+          demand_name: demandName || `需求#${demandId}`,
+          actual_hours: 0,
+          bug_count: 0,
+          bugs: [],
+        })
+      }
+      const current = demandHourMap.get(demandId)
+      current.actual_hours = toDecimal1(Number(current.actual_hours || 0) + actualHours)
+      if (!current.demand_name && demandName) {
+        current.demand_name = demandName
+      }
+    }
+    ;(Array.isArray(demandPeriodEntryRows) ? demandPeriodEntryRows : []).forEach((row) => {
+      const logId = toPositiveInt(row?.log_id)
+      if (logId) demandEntryLogIds.add(logId)
+      addDemandBugRateHours({
+        demandId: String(row?.demand_id || '').trim(),
+        demandName: row?.demand_name || '',
+        actualHours: toDecimal1(row?.actual_hours),
+      })
+    })
+    workItemList.forEach((item) => {
+      const logId = toPositiveInt(item?.log_id)
+      if (logId && demandEntryLogIds.has(logId)) return
+      addDemandBugRateHours({
+        demandId: String(item?.demand_id || '').trim(),
+        demandName: item?.demand_name || '',
+        actualHours: toDecimal1(item?.actual_hours),
+      })
+    })
+
+    const demandBugRate = {
+      demand_count: demandHourMap.size,
+      demand_actual_hours: toDecimal1(
+        Array.from(demandHourMap.values()).reduce((sum, item) => sum + Number(item.actual_hours || 0), 0),
+      ),
+      bug_count: 0,
+      bug_rate_per_hour: 0,
+      bug_rate_per_100_hours: 0,
+      status_distribution: [],
+      demand_rows: [],
+    }
+
+    if (demandHourMap.size > 0) {
+      const demandIds = Array.from(demandHourMap.keys())
+      const demandPlaceholders = demandIds.map(() => '?').join(', ')
+      const [bugRows] = await pool.query(
+        `SELECT DISTINCT
+           b.id,
+           b.bug_no,
+           b.title,
+           b.demand_id,
+           b.status_code,
+           COALESCE(statusDict.item_name, b.status_code, '未设置') AS status_name,
+           statusDict.color AS status_color,
+           DATE_FORMAT(b.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+           DATE_FORMAT(b.closed_at, '%Y-%m-%d %H:%i:%s') AS closed_at
+         FROM bugs b
+         LEFT JOIN bug_assignees ba ON ba.bug_id = b.id
+         LEFT JOIN config_dict_items statusDict
+           ON statusDict.type_key = 'bug_status'
+          AND statusDict.item_code = b.status_code
+         WHERE b.deleted_at IS NULL
+           AND b.demand_id IN (${demandPlaceholders})
+           AND (b.assignee_id = ? OR ba.user_id = ?)
+         ORDER BY created_at DESC, id DESC`,
+        [...demandIds, normalizedUserId, normalizedUserId],
+      )
+      const bugMap = new Map()
+      ;(Array.isArray(bugRows) ? bugRows : []).forEach((bug) => {
+        const bugId = toPositiveInt(bug?.id)
+        const demandId = String(bug?.demand_id || '').trim()
+        if (!bugId || !demandHourMap.has(demandId) || bugMap.has(bugId)) return
+        const normalizedBug = {
+          id: bugId,
+          bug_no: bug?.bug_no || `BUG#${bugId}`,
+          title: bug?.title || '-',
+          status_code: bug?.status_code || '',
+          status_name: bug?.status_name || bug?.status_code || '未设置',
+          status_color: bug?.status_color || '',
+          created_at: bug?.created_at || null,
+          closed_at: bug?.closed_at || null,
+        }
+        bugMap.set(bugId, normalizedBug)
+        const demandRow = demandHourMap.get(demandId)
+        demandRow.bug_count += 1
+        demandRow.bugs.push(normalizedBug)
+      })
+
+      const statusMap = new Map()
+      Array.from(bugMap.values()).forEach((bug) => {
+        const statusKey = String(bug.status_code || '__NO_STATUS__')
+        if (!statusMap.has(statusKey)) {
+          statusMap.set(statusKey, {
+            status_code: bug.status_code || '',
+            status_name: bug.status_name || '未设置',
+            color: bug.status_color || '',
+            bug_count: 0,
+          })
+        }
+        statusMap.get(statusKey).bug_count += 1
+      })
+
+      demandBugRate.bug_count = bugMap.size
+      demandBugRate.bug_rate_per_hour =
+        demandBugRate.demand_actual_hours > 0
+          ? toDecimal4(demandBugRate.bug_count / demandBugRate.demand_actual_hours)
+          : 0
+      demandBugRate.bug_rate_per_100_hours =
+        demandBugRate.demand_actual_hours > 0
+          ? toDecimal2((demandBugRate.bug_count / demandBugRate.demand_actual_hours) * 100)
+          : 0
+      demandBugRate.status_distribution = Array.from(statusMap.values())
+        .map((item) => ({
+          ...item,
+          bug_count: Number(item.bug_count || 0),
+        }))
+        .sort((left, right) => Number(right.bug_count || 0) - Number(left.bug_count || 0))
+    }
+
+    demandBugRate.demand_rows = Array.from(demandHourMap.values())
+      .map((item) => ({
+        demand_id: item.demand_id,
+        demand_name: item.demand_name || `需求#${item.demand_id}`,
+        actual_hours: toDecimal1(item.actual_hours),
+        bug_count: Number(item.bug_count || 0),
+        bug_rate_per_100_hours:
+          Number(item.actual_hours || 0) > 0
+            ? toDecimal2((Number(item.bug_count || 0) / Number(item.actual_hours || 0)) * 100)
+            : 0,
+        bugs: Array.isArray(item.bugs) ? item.bugs : [],
+      }))
+      .sort((left, right) => {
+        if (Number(right.bug_count || 0) !== Number(left.bug_count || 0)) {
+          return Number(right.bug_count || 0) - Number(left.bug_count || 0)
+        }
+        return Number(right.actual_hours || 0) - Number(left.actual_hours || 0)
+      })
+
     const summaryTaskDifficultyCoefficient = calcActualWeightedCoefficient(
       workItemList,
       'task_difficulty_coefficient',
@@ -10587,6 +10763,7 @@ const Work = {
       work_item_list: workItemList,
       trend,
       phase_distribution: phaseDistribution,
+      demand_bug_rate: demandBugRate,
     }
   },
 

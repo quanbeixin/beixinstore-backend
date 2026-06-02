@@ -388,6 +388,7 @@ function mapSlotRow(row = {}) {
     ),
     actual_hours_total: Number(row.actual_hours_total || 0),
     actual_worklog_count: Number(row.actual_worklog_count || 0),
+    bug_count: Number(row.bug_count || 0),
     score_record: row.record_id
       ? {
           id: Number(row.record_id || 0),
@@ -521,10 +522,11 @@ async function buildParticipationReferenceMap(slotRows = []) {
       node_key_set: new Set(),
       actual_hours_total: 0,
       actual_worklog_count: 0,
+      bug_count: 0,
     })
   })
 
-  const [demandRows, nodeRows, taskRows, worklogRows, worklogPhaseRows] = await Promise.all([
+  const [demandRows, nodeRows, taskRows, worklogRows, worklogPhaseRows, bugRows] = await Promise.all([
     pool.query(
       `SELECT id, participant_role_user_map_json
        FROM work_demands
@@ -591,6 +593,27 @@ async function buildParticipationReferenceMap(slotRows = []) {
        GROUP BY wl.demand_id, wl.user_id, wl.phase_key, pdi.item_name`,
       [demandIds, evaluateeUserIds],
     ),
+    pool.query(
+      `SELECT
+         b.demand_id,
+         handler.user_id,
+         COUNT(DISTINCT b.id) AS bug_count
+       FROM bugs b
+       INNER JOIN (
+         SELECT id AS bug_id, assignee_id AS user_id
+         FROM bugs
+         WHERE assignee_id IS NOT NULL
+         UNION ALL
+         SELECT bug_id, user_id
+         FROM bug_assignees
+         WHERE user_id IS NOT NULL
+       ) handler ON handler.bug_id = b.id
+       WHERE b.deleted_at IS NULL
+         AND b.demand_id IN (?)
+         AND handler.user_id IN (?)
+       GROUP BY b.demand_id, handler.user_id`,
+      [demandIds, evaluateeUserIds],
+    ),
   ])
 
   ;(demandRows[0] || []).forEach((row) => {
@@ -654,6 +677,13 @@ async function buildParticipationReferenceMap(slotRows = []) {
     })
   })
 
+  ;(bugRows[0] || []).forEach((row) => {
+    const pairKey = buildPairKey(row?.demand_id, row?.user_id)
+    const target = referenceMap.get(pairKey)
+    if (!target) return
+    target.bug_count = Number(row?.bug_count || 0)
+  })
+
   const finalMap = new Map()
   referenceMap.forEach((value, key) => {
     const sortedRoleKeys = sortParticipantRoleKeys(Array.from(value.role_keys))
@@ -669,6 +699,7 @@ async function buildParticipationReferenceMap(slotRows = []) {
       participation_node_names: sortedNodeNames,
       actual_hours_total: Number(value.actual_hours_total || 0),
       actual_worklog_count: Number(value.actual_worklog_count || 0),
+      bug_count: Number(value.bug_count || 0),
     })
   })
 
@@ -685,6 +716,7 @@ async function attachParticipationReference(slotRows = []) {
       participation_node_names: [],
       actual_hours_total: 0,
       actual_worklog_count: 0,
+      bug_count: 0,
     }
     return {
       ...row,
@@ -693,6 +725,7 @@ async function attachParticipationReference(slotRows = []) {
       participation_node_names: reference.participation_node_names,
       actual_hours_total: Number(reference.actual_hours_total || 0),
       actual_worklog_count: Number(reference.actual_worklog_count || 0),
+      bug_count: Number(reference.bug_count || 0),
     }
   })
 }
