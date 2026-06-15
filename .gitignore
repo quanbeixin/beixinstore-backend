@@ -3,3 +3,4 @@ node_modules/
 sql/
 .omx/
 logs/
+scripts/export-db-with-mysql2.js

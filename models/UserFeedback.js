@@ -235,10 +235,9 @@ function buildFilterClauses(filters = {}) {
         OR product LIKE ? ESCAPE '\\\\'
         OR ai_category LIKE ? ESCAPE '\\\\'
         OR ai_primary_category LIKE ? ESCAPE '\\\\'
-        OR CAST(ai_secondary_categories AS CHAR) LIKE ? ESCAPE '\\\\'
       )`,
     )
-    params.push(like, like, like, like, like, like, like, like, like, like)
+    params.push(like, like, like, like, like, like, like, like, like)
   }
 
   const product = normalizeText(filters.product, 100)
@@ -263,10 +262,9 @@ function buildFilterClauses(filters = {}) {
     clauses.push(`(
       ai_category = ?
       OR ai_primary_category = ?
-      OR JSON_SEARCH(ai_secondary_categories, 'one', ?) IS NOT NULL
       OR JSON_SEARCH(ai_all_categories, 'one', ?) IS NOT NULL
     )`)
-    params.push(aiCategory, aiCategory, aiCategory, aiCategory)
+    params.push(aiCategory, aiCategory, aiCategory)
   }
 
   const dateStart = normalizeDateTime(filters.dateStart)

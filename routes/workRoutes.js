@@ -46,6 +46,7 @@ const {
   listMyDemandScoreSlots,
   getMyDemandScoreSlot,
   submitMyDemandScoreSlot,
+  declineMyDemandScoreSlot,
   generateDemandScoreTask,
   deleteDemandScoreTask,
   listDemandScoreResults,
@@ -257,6 +258,7 @@ router.put('/efficiency-factor-settings', updateEfficiencyFactorSettings)
 router.get('/demand-scores/my', authMiddleware.requirePermission('demand.score.view'), listMyDemandScoreSlots)
 router.get('/demand-scores/slots/:slotId', authMiddleware.requirePermission('demand.score.view'), getMyDemandScoreSlot)
 router.post('/demand-scores/slots/:slotId', authMiddleware.requirePermission('demand.score.view'), submitMyDemandScoreSlot)
+router.post('/demand-scores/slots/:slotId/decline', authMiddleware.requirePermission('demand.score.view'), declineMyDemandScoreSlot)
 router.post(
   '/demand-scores/demands/:demandId/generate',
   authMiddleware.requirePermission('demand.score.result.view'),

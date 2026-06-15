@@ -3,6 +3,7 @@ const {
   analyzeSingleFeedback,
   analyzeUnprocessedFeedback,
   clearConfigCache,
+  translateFeedbackReplyToEnglish,
 } = require('../services/userFeedbackAnalysisService')
 
 function parseBoolean(value) {
@@ -154,6 +155,29 @@ async function updateFeedbackStatus(req, res) {
   } catch (error) {
     console.error('更新反馈状态失败:', error)
     return res.status(500).json({ success: false, message: '更新反馈状态失败' })
+  }
+}
+
+async function translateReplyToEnglish(req, res) {
+  try {
+    const text = String(req.body?.text || '').trim()
+    if (!text) {
+      return res.status(400).json({ success: false, message: '缺少需要翻译的中文内容' })
+    }
+
+    const translated = await translateFeedbackReplyToEnglish(text)
+    if (!translated) {
+      return res.status(500).json({ success: false, message: '翻译失败，请稍后重试' })
+    }
+
+    return res.json({
+      success: true,
+      message: '翻译成功',
+      data: { text: translated },
+    })
+  } catch (error) {
+    console.error('反馈回复翻译失败:', error)
+    return res.status(500).json({ success: false, message: '翻译失败，请稍后重试' })
   }
 }
 
@@ -312,6 +336,7 @@ module.exports = {
   batchImport,
   analyzeUnprocessed,
   analyzeSingle,
+  translateReplyToEnglish,
   getPromptConfig,
   updatePromptConfig,
   getImportantEmailConfig,

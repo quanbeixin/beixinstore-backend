@@ -73,6 +73,16 @@ function stripHtmlToPlainText(value) {
     .replace(/&#39;/gi, "'")
 }
 
+function escapeHtml(text) {
+  if (text === null || text === undefined) return ''
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 function hasMeaningfulBugDescription(value) {
   const plainText = normalizeText(stripHtmlToPlainText(value), 20000)
   if (plainText) return true
@@ -895,16 +905,6 @@ const getBugDetail = async (req, res) => {
             expected_result: '期望结果',
             actual_result: '实际结果',
             reproduce_steps: '复现步骤',
-          }
-
-          function escapeHtml(text) {
-            if (text === null || text === undefined) return ''
-            return String(text)
-              .replace(/&/g, '&amp;')
-              .replace(/</g, '&lt;')
-              .replace(/>/g, '&gt;')
-              .replace(/"/g, '&quot;')
-              .replace(/'/g, '&#39;')
           }
 
           const diffs = []

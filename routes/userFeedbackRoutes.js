@@ -12,6 +12,7 @@ const {
   batchImport,
   analyzeUnprocessed,
   analyzeSingle,
+  translateReplyToEnglish,
 } = require('../controllers/userFeedbackController')
 
 const router = express.Router()
@@ -28,16 +29,17 @@ router.use((req, res, next) => {
 })
 
 router.get('/', authMiddleware.requirePermission('feedback.view'), getAllFeedback)
-router.get('/:id', authMiddleware.requirePermission('feedback.view'), getFeedbackById)
 router.post('/', authMiddleware.requirePermission('feedback.manage'), createFeedback)
-router.put('/:id', authMiddleware.requirePermission('feedback.manage'), updateFeedback)
-router.delete('/:id', authMiddleware.requirePermission('feedback.manage'), deleteFeedback)
-
-router.patch('/:id/status', authMiddleware.requirePermission('feedback.manage'), updateFeedbackStatus)
 router.post('/batch/status', authMiddleware.requirePermission('feedback.manage'), batchUpdateStatus)
 router.post('/batch/import', authMiddleware.requirePermission('feedback.manage'), batchImport)
 
+router.post('/translate/en', authMiddleware.requirePermission('feedback.manage'), translateReplyToEnglish)
 router.post('/analyze/unprocessed', authMiddleware.requirePermission('feedback.ai.analyze'), analyzeUnprocessed)
+
+router.get('/:id', authMiddleware.requirePermission('feedback.view'), getFeedbackById)
+router.put('/:id', authMiddleware.requirePermission('feedback.manage'), updateFeedback)
+router.delete('/:id', authMiddleware.requirePermission('feedback.manage'), deleteFeedback)
+router.patch('/:id/status', authMiddleware.requirePermission('feedback.manage'), updateFeedbackStatus)
 router.post('/:id/analyze', authMiddleware.requirePermission('feedback.ai.analyze'), analyzeSingle)
 
 module.exports = router

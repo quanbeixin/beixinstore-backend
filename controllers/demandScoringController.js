@@ -102,6 +102,30 @@ const submitMyDemandScoreSlot = async (req, res) => {
   }
 }
 
+const declineMyDemandScoreSlot = async (req, res) => {
+  const slotId = toPositiveInt(req.params.slotId)
+  if (!slotId) {
+    return res.status(400).json({ success: false, message: '评分任务 ID 无效' })
+  }
+
+  try {
+    const slot = await DemandScoring.declineSlot(slotId, req.user?.id, {
+      reason: req.body.reason,
+      decline_reason: req.body.decline_reason,
+    })
+    return res.json({ success: true, message: '已拒绝评分', data: slot })
+  } catch (err) {
+    if (['DECLINE_REASON_REQUIRED', 'SLOT_NOT_FOUND'].includes(err?.code)) {
+      return res.status(err.code === 'SLOT_NOT_FOUND' ? 404 : 400).json({
+        success: false,
+        message: err.message,
+      })
+    }
+    console.error('拒绝需求评分失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 const generateDemandScoreTask = async (req, res) => {
   if (!isSuperAdmin(req)) {
     return res.status(403).json({ success: false, message: '仅超管可手动生成评分任务' })
@@ -255,6 +279,7 @@ module.exports = {
   listMyDemandScoreSlots,
   getMyDemandScoreSlot,
   submitMyDemandScoreSlot,
+  declineMyDemandScoreSlot,
   generateDemandScoreTask,
   deleteDemandScoreTask,
   listDemandScoreResults,

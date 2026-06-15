@@ -15,6 +15,7 @@ const SUBJECT_STATUS = Object.freeze({
 const SLOT_STATUS = Object.freeze({
   PENDING: 'PENDING',
   SUBMITTED: 'SUBMITTED',
+  DECLINED: 'DECLINED',
 })
 
 const SLOT_TYPES = Object.freeze({
@@ -285,6 +286,14 @@ function isSubmittedSlot(slot = {}) {
   return String(slot?.status || '').trim().toUpperCase() === SLOT_STATUS.SUBMITTED && Number.isFinite(Number(slot?.score_value))
 }
 
+function isDeclinedSlot(slot = {}) {
+  return String(slot?.status || '').trim().toUpperCase() === SLOT_STATUS.DECLINED
+}
+
+function isResolvedSlot(slot = {}) {
+  return isSubmittedSlot(slot) || isDeclinedSlot(slot)
+}
+
 function calculateRoleScoreSummary(slotRows = []) {
   const roleSlotMap = new Map()
   ;(Array.isArray(slotRows) ? slotRows : []).forEach((slot) => {
@@ -301,20 +310,28 @@ function calculateRoleScoreSummary(slotRows = []) {
   let expectedWeight = 0
   let weightedTotal = 0
   let hasAnySubmittedScore = false
+  let hasAnyResolvedSlot = false
 
   Object.values(ROLE_KEYS).forEach((roleKey) => {
     const roleSlots = roleSlotMap.get(roleKey) || []
     if (roleSlots.length === 0) return
 
-    const roleWeight = Number(roleSlots[0]?.base_weight || 0)
+    if (roleSlots.some(isResolvedSlot)) {
+      hasAnyResolvedSlot = true
+    }
+
+    const activeRoleSlots = roleSlots.filter((slot) => !isDeclinedSlot(slot))
+    if (activeRoleSlots.length === 0) return
+
+    const roleWeight = Number(activeRoleSlots[0]?.base_weight || 0)
     if (roleWeight > 0) {
       roleWeights[roleKey] = roleWeight
       expectedWeight += roleWeight
     }
 
     if (roleKey === ROLE_KEYS.COLLABORATOR) {
-      const submittedSlots = roleSlots.filter(isSubmittedSlot)
-      if (submittedSlots.length === roleSlots.length && roleSlots.length > 0) {
+      const submittedSlots = activeRoleSlots.filter(isSubmittedSlot)
+      if (submittedSlots.length === activeRoleSlots.length && activeRoleSlots.length > 0) {
         const averageScore =
           submittedSlots.reduce((acc, slot) => acc + Number(slot.score_value || 0), 0) / submittedSlots.length
         const normalizedScore = roundScore(averageScore)
@@ -329,7 +346,7 @@ function calculateRoleScoreSummary(slotRows = []) {
       return
     }
 
-    const slot = roleSlots[0]
+    const slot = activeRoleSlots[0]
     if (isSubmittedSlot(slot)) {
       const normalizedScore = roundScore(slot.score_value)
       roleScores[roleKey] = normalizedScore
@@ -348,6 +365,8 @@ function calculateRoleScoreSummary(slotRows = []) {
   const status =
     finalScore !== null
       ? SUBJECT_STATUS.COMPLETED
+      : hasAnyResolvedSlot && missingRoleKeys.length === 0
+        ? SUBJECT_STATUS.COMPLETED
       : hasAnySubmittedScore
         ? SUBJECT_STATUS.PARTIAL
         : SUBJECT_STATUS.PENDING
@@ -398,6 +417,8 @@ function mapSlotRow(row = {}) {
           updated_at: row.record_updated_at || null,
         }
       : null,
+    decline_reason: row.skipped_reason || '',
+    declined_at: row.declined_at || null,
   }
 }
 
@@ -1233,16 +1254,18 @@ async function recalculateTask(taskId, { conn = pool } = {}) {
   const [[summary]] = await conn.query(
     `SELECT
        COUNT(*) AS slot_count,
-       SUM(CASE WHEN status = 'SUBMITTED' THEN 1 ELSE 0 END) AS submitted_count
+       SUM(CASE WHEN status = 'SUBMITTED' THEN 1 ELSE 0 END) AS submitted_count,
+       SUM(CASE WHEN status IN ('SUBMITTED', 'DECLINED') THEN 1 ELSE 0 END) AS resolved_count
      FROM demand_score_slots
      WHERE task_id = ?`,
     [normalizedTaskId],
   )
   const slotCount = Number(summary?.slot_count || 0)
   const submittedCount = Number(summary?.submitted_count || 0)
+  const resolvedCount = Number(summary?.resolved_count || 0)
   const subjectCount = Number(subjectRows?.length || 0)
   const hasScorableSubjects = subjectCount > 0 && slotCount > 0
-  const allSlotsSubmitted = hasScorableSubjects && submittedCount >= slotCount
+  const allSlotsResolved = hasScorableSubjects && resolvedCount >= slotCount
   const [[partialSummary]] = await conn.query(
     `SELECT COUNT(*) AS partial_subject_count
      FROM demand_score_subjects
@@ -1250,12 +1273,12 @@ async function recalculateTask(taskId, { conn = pool } = {}) {
        AND status = ?`,
     [normalizedTaskId, SUBJECT_STATUS.PARTIAL],
   )
-  const status = allSlotsSubmitted
+  const status = allSlotsResolved
     ? TASK_STATUS.COMPLETED
-    : submittedCount > 0
+    : resolvedCount > 0 || submittedCount > 0
       ? TASK_STATUS.SCORING
       : TASK_STATUS.PENDING
-  const resultReady = allSlotsSubmitted ? 1 : 0
+  const resultReady = allSlotsResolved ? 1 : 0
   const partialMissing = Number(partialSummary?.partial_subject_count || 0) > 0 ? 1 : 0
 
   await conn.query(
@@ -1302,6 +1325,8 @@ function buildSlotResultRow(row = {}) {
     comment: row?.record_comment || '',
     submitted_at: row?.record_submitted_at || null,
     updated_at: row?.record_updated_at || null,
+    decline_reason: row?.skipped_reason || '',
+    declined_at: row?.declined_at || null,
   }
 }
 
@@ -1487,7 +1512,7 @@ const DemandScoring = {
     const normalizedDemandId = normalizeDemandId(demandId)
     const where = ['s.evaluator_user_id = ?']
     const params = [evaluatorUserId]
-    if (statusText && ['PENDING', 'SUBMITTED'].includes(statusText)) {
+    if (statusText && Object.values(SLOT_STATUS).includes(statusText)) {
       where.push('s.status = ?')
       params.push(statusText)
     }
@@ -1528,6 +1553,7 @@ const DemandScoring = {
          DATE_FORMAT(r.submitted_at, '%Y-%m-%d %H:%i:%s') AS record_submitted_at,
          DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at,
          DATE_FORMAT(s.submitted_at, '%Y-%m-%d %H:%i:%s') AS submitted_at,
+         DATE_FORMAT(s.declined_at, '%Y-%m-%d %H:%i:%s') AS declined_at,
          DATE_FORMAT(t.deadline_at, '%Y-%m-%d %H:%i:%s') AS deadline_at
        FROM demand_score_slots s
        INNER JOIN demand_score_tasks t ON t.id = s.task_id
@@ -1629,6 +1655,7 @@ const DemandScoring = {
          DATE_FORMAT(r.submitted_at, '%Y-%m-%d %H:%i:%s') AS record_submitted_at,
          DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at,
          DATE_FORMAT(s.submitted_at, '%Y-%m-%d %H:%i:%s') AS submitted_at,
+         DATE_FORMAT(s.declined_at, '%Y-%m-%d %H:%i:%s') AS declined_at,
          DATE_FORMAT(t.deadline_at, '%Y-%m-%d %H:%i:%s') AS deadline_at
        FROM demand_score_slots s
        INNER JOIN demand_score_tasks t ON t.id = s.task_id
@@ -1729,9 +1756,69 @@ const DemandScoring = {
       await conn.query(
         `UPDATE demand_score_slots
          SET status = 'SUBMITTED',
-             submitted_at = COALESCE(submitted_at, CURRENT_TIMESTAMP)
+             submitted_at = COALESCE(submitted_at, CURRENT_TIMESTAMP),
+             skipped_reason = NULL,
+             declined_at = NULL
          WHERE id = ?`,
         [slot.id],
+      )
+
+      await recalculateSubject(slot.subject_id, { conn })
+      await recalculateTask(slot.task_id, { conn })
+      await conn.commit()
+      return this.getSlotForEvaluator(slot.id, evaluatorUserId)
+    } catch (err) {
+      await conn.rollback()
+      throw err
+    } finally {
+      conn.release()
+    }
+  },
+
+  async declineSlot(slotId, userId, payload = {}) {
+    const normalizedSlotId = toPositiveInt(slotId)
+    const evaluatorUserId = toPositiveInt(userId)
+    if (!normalizedSlotId || !evaluatorUserId) {
+      const err = new Error('评分槽不存在')
+      err.code = 'SLOT_NOT_FOUND'
+      throw err
+    }
+
+    const reason = normalizeText(payload.reason || payload.decline_reason, 255)
+    if (!reason) {
+      const err = new Error('请填写拒绝评分理由')
+      err.code = 'DECLINE_REASON_REQUIRED'
+      throw err
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const [slotRows] = await conn.query(
+        `SELECT *
+         FROM demand_score_slots
+         WHERE id = ?
+           AND evaluator_user_id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [normalizedSlotId, evaluatorUserId],
+      )
+      const slot = slotRows[0]
+      if (!slot) {
+        const err = new Error('评分槽不存在或无权限')
+        err.code = 'SLOT_NOT_FOUND'
+        throw err
+      }
+
+      await conn.query('DELETE FROM demand_score_records WHERE slot_id = ?', [slot.id])
+      await conn.query(
+        `UPDATE demand_score_slots
+         SET status = 'DECLINED',
+             skipped_reason = ?,
+             declined_at = CURRENT_TIMESTAMP,
+             submitted_at = NULL
+         WHERE id = ?`,
+        [reason, slot.id],
       )
 
       await recalculateSubject(slot.subject_id, { conn })
@@ -1820,7 +1907,7 @@ const DemandScoring = {
            ) AS pending_evaluator_names
          FROM demand_score_slots s
          ${normalizedDepartmentIds.length > 0 ? 'INNER JOIN users u_pending ON u_pending.id = s.evaluatee_user_id' : ''}
-         WHERE s.status <> 'SUBMITTED'
+         WHERE s.status = 'PENDING'
            ${normalizedDepartmentIds.length > 0 ? 'AND u_pending.department_id IN (?)' : ''}
          GROUP BY s.task_id
        ) pending ON pending.task_id = t.id
@@ -1871,7 +1958,8 @@ const DemandScoring = {
              r.weighted_score AS record_weighted_score,
              r.comment AS record_comment,
              DATE_FORMAT(r.submitted_at, '%Y-%m-%d %H:%i:%s') AS record_submitted_at,
-             DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at
+             DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at,
+             DATE_FORMAT(s.declined_at, '%Y-%m-%d %H:%i:%s') AS declined_at
            FROM demand_score_slots s
            LEFT JOIN demand_score_records r ON r.slot_id = s.id
            WHERE s.task_id IN (?)
@@ -1969,7 +2057,8 @@ const DemandScoring = {
         r.weighted_score AS record_weighted_score,
         r.comment AS record_comment,
         DATE_FORMAT(r.submitted_at, '%Y-%m-%d %H:%i:%s') AS record_submitted_at,
-        DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at
+        DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at,
+        DATE_FORMAT(s.declined_at, '%Y-%m-%d %H:%i:%s') AS declined_at
        FROM demand_score_slots s
        LEFT JOIN demand_score_records r ON r.slot_id = s.id
        WHERE s.task_id = ?
@@ -2069,7 +2158,8 @@ const DemandScoring = {
              r.weighted_score AS record_weighted_score,
              r.comment AS record_comment,
              DATE_FORMAT(r.submitted_at, '%Y-%m-%d %H:%i:%s') AS record_submitted_at,
-             DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at
+             DATE_FORMAT(r.updated_at, '%Y-%m-%d %H:%i:%s') AS record_updated_at,
+             DATE_FORMAT(s.declined_at, '%Y-%m-%d %H:%i:%s') AS declined_at
            FROM demand_score_slots s
            LEFT JOIN demand_score_records r ON r.slot_id = s.id
            WHERE s.subject_id IN (?)

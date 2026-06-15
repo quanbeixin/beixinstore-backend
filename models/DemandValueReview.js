@@ -85,6 +85,7 @@ function mapReviewRow(row = {}) {
     demand_id: row.demand_id || '',
     status: normalizeReviewStatus(row.status),
     overall_score: row.overall_score === null || row.overall_score === undefined ? null : Number(row.overall_score),
+    related_okr: row.related_okr || '',
     review_value_summary: row.review_value_summary || '',
     review_benefit_result: row.review_benefit_result || '',
     review_improvement_notes: row.review_improvement_notes || '',
@@ -184,6 +185,7 @@ async function ensureTable() {
       demand_id VARCHAR(64) NOT NULL,
       status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
       overall_score INT DEFAULT NULL,
+      related_okr TEXT DEFAULT NULL,
       review_value_summary TEXT DEFAULT NULL,
       review_benefit_result TEXT DEFAULT NULL,
       review_improvement_notes TEXT DEFAULT NULL,
@@ -256,6 +258,16 @@ async function ensureTable() {
     await pool.query(
       `ALTER TABLE demand_value_reviews
        ADD COLUMN review_date DATE DEFAULT NULL AFTER submitted_at`,
+    )
+  }
+
+  const [relatedOkrColumnRows] = await pool.query(
+    `SHOW COLUMNS FROM demand_value_reviews LIKE 'related_okr'`,
+  )
+  if (!Array.isArray(relatedOkrColumnRows) || relatedOkrColumnRows.length === 0) {
+    await pool.query(
+      `ALTER TABLE demand_value_reviews
+       ADD COLUMN related_okr TEXT DEFAULT NULL AFTER overall_score`,
     )
   }
 
@@ -1045,6 +1057,10 @@ const DemandValueReview = {
       payload.review_value_summary === undefined
         ? existing.review_value_summary
         : normalizeText(payload.review_value_summary, 10000)
+    const relatedOkr =
+      payload.related_okr === undefined
+        ? existing.related_okr
+        : normalizeText(payload.related_okr, 10000)
     const reviewBenefitResult =
       payload.review_benefit_result === undefined
         ? existing.review_benefit_result
@@ -1066,6 +1082,7 @@ const DemandValueReview = {
          SET
            status = ?,
            overall_score = ?,
+           related_okr = ?,
            review_value_summary = ?,
            review_benefit_result = ?,
            review_improvement_notes = ?,
@@ -1076,6 +1093,7 @@ const DemandValueReview = {
         [
           nextStatus,
           overallScore,
+          relatedOkr || null,
           reviewValueSummary || null,
           reviewBenefitResult || null,
           reviewImprovementNotes || null,
@@ -1125,6 +1143,7 @@ const DemandValueReview = {
     }
 
     const overallScore = toScore(payload.overall_score)
+    const relatedOkr = normalizeText(payload.related_okr, 10000)
     const reviewValueSummary = normalizeText(payload.review_value_summary, 10000)
     const reviewBenefitResult = normalizeText(payload.review_benefit_result, 10000)
     const reviewImprovementNotes = normalizeText(payload.review_improvement_notes, 10000)
@@ -1147,6 +1166,7 @@ const DemandValueReview = {
          SET
            status = ?,
            overall_score = ?,
+           related_okr = ?,
            review_value_summary = ?,
            review_benefit_result = ?,
            review_improvement_notes = ?,
@@ -1159,6 +1179,7 @@ const DemandValueReview = {
         [
           REVIEW_STATUS.COMPLETED,
           overallScore,
+          relatedOkr || null,
           reviewValueSummary,
           reviewBenefitResult,
           reviewImprovementNotes,

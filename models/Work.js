@@ -3142,14 +3142,16 @@ const Work = {
 
     let rows = []
     try {
-      ;[rows] = await pool.query(listSql, [...params, pageSize, offset])
+      const [queryRows] = await pool.query(listSql, [...params, pageSize, offset])
+      rows = queryRows
     } catch (err) {
       if (!isMissingSpecificColumnError(err, ['d.business_value_expectation', 'business_value_expectation'])) throw err
       const fallbackListSql = listSql.replace(
         'd.business_value_expectation,',
         'NULL AS business_value_expectation,',
       )
-      ;[rows] = await pool.query(fallbackListSql, [...params, pageSize, offset])
+      const [fallbackRows] = await pool.query(fallbackListSql, [...params, pageSize, offset])
+      rows = fallbackRows
     }
     const [
       [[{ total }]],
@@ -3295,14 +3297,16 @@ const Work = {
        WHERE d.id = ?`
     let rows = []
     try {
-      ;[rows] = await pool.query(demandDetailSql, [id])
+      const [queryRows] = await pool.query(demandDetailSql, [id])
+      rows = queryRows
     } catch (err) {
       if (!isMissingSpecificColumnError(err, ['d.business_value_expectation', 'business_value_expectation'])) throw err
       const fallbackDemandDetailSql = demandDetailSql.replace(
         'd.business_value_expectation,',
         'NULL AS business_value_expectation,',
       )
-      ;[rows] = await pool.query(fallbackDemandDetailSql, [id])
+      const [fallbackRows] = await pool.query(fallbackDemandDetailSql, [id])
+      rows = fallbackRows
     }
     const todayDate = getBeijingTodayDateString()
     const row = rows[0] || null
@@ -3546,7 +3550,8 @@ const Work = {
       ]
       let result
       try {
-        ;[result] = await conn.query(updateSql, updateParams)
+        const [queryResult] = await conn.query(updateSql, updateParams)
+        result = queryResult
       } catch (err) {
         if (!isMissingSpecificColumnError(err, ['business_value_expectation'])) throw err
         const fallbackUpdateSql = `UPDATE work_demands

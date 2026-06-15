@@ -149,6 +149,7 @@ const updateDemandValueReviewDraft = async (req, res) => {
       reviewId,
       {
         overall_score: req.body.overall_score,
+        related_okr: req.body.related_okr,
         review_value_summary: req.body.review_value_summary,
         review_benefit_result: req.body.review_benefit_result,
         review_improvement_notes: req.body.review_improvement_notes,
@@ -180,6 +181,7 @@ const submitDemandValueReview = async (req, res) => {
       reviewId,
       {
         overall_score: req.body.overall_score,
+        related_okr: req.body.related_okr,
         review_value_summary: req.body.review_value_summary,
         review_benefit_result: req.body.review_benefit_result,
         review_improvement_notes: req.body.review_improvement_notes,

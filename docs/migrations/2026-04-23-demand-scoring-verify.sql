@@ -24,6 +24,13 @@ FROM menu_visibility_rules
 WHERE menu_key IN ('/demand-scores', '/demand-score-results')
 ORDER BY menu_key;
 
+SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = 'demand_score_slots'
+  AND COLUMN_NAME IN ('skipped_reason', 'declined_at')
+ORDER BY COLUMN_NAME;
+
 SELECT item_code, item_name, sort_order, enabled, extra_json
 FROM config_dict_items
 WHERE type_key = 'demand_participant_role'

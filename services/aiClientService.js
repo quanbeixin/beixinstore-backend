@@ -181,14 +181,19 @@ function normalizeModelForProvider(model = '', baseUrl = '') {
 
   if (resolvedBaseUrl.includes('api.deepseek.com')) {
     const lowerModel = fallbackModel.toLowerCase()
-    if (!lowerModel) return 'deepseek-v4-flash'
-    if (lowerModel === 'deepseek-v4-pro' || lowerModel === 'deepseek-v4-flash') {
+    if (!lowerModel) return 'deepseek-chat'
+    if (
+      lowerModel === 'deepseek-chat' ||
+      lowerModel === 'deepseek-reasoner' ||
+      lowerModel === 'deepseek-v4-pro' ||
+      lowerModel === 'deepseek-v4-flash'
+    ) {
       return fallbackModel
     }
     if (lowerModel.startsWith('deepseek')) {
-      return 'deepseek-v4-flash'
+      return 'deepseek-chat'
     }
-    return 'deepseek-v4-flash'
+    return 'deepseek-chat'
   }
 
   return fallbackModel || 'gpt-4o-mini'
@@ -299,6 +304,13 @@ async function callChatCompletion({
         payload?.error?.message ||
         payload?.message ||
         `AI 调用失败，HTTP ${response.status}`
+      console.warn('AI 调用失败:', {
+        baseUrl: resolvedBaseUrl,
+        model: resolvedModel,
+        wireApi: resolvedWireApi,
+        status: response.status,
+        message,
+      })
       throw new Error(message)
     }
 

@@ -342,7 +342,7 @@ async function recoverAnalysisFromNonJsonResponse({
     const response = await callFeedbackAi({
       systemPrompt:
         '你是 JSON 结构化提取器。请根据用户反馈与候选分析内容，输出一个严格可解析的 JSON 对象，不要输出解释、不要输出 Markdown、不要输出分析过程。',
-      userPrompt: `请输出 JSON（字段必须完整）：\n{\n  "ai_primary_category": "主分类",\n  "ai_secondary_categories": ["次分类1", "次分类2"],\n  "ai_sentiment": "Positive | Neutral | Negative",\n  "ai_reply": "中文回复",\n  "ai_reply_en": "英文回复",\n  "user_request": "用户需求摘要",\n  "is_new_request": true\n}\n\n分类候选：${categoryHint || '咨询、功能需求、Bug、投诉'}\n\n用户反馈：\n${feedbackText}\n\n候选分析内容：\n${modelOutput}`,
+      userPrompt: `请输出 JSON（字段必须完整）：\n{\n  "ai_primary_category": "主分类",\n  "ai_secondary_categories": [],\n  "ai_sentiment": "Positive | Neutral | Negative",\n  "ai_reply": "中文回复",\n  "ai_reply_en": "英文回复",\n  "user_request": "用户需求摘要",\n  "is_new_request": true\n}\n\n要求：ai_primary_category 只能保留 1 个最能代表用户问题的主分类；ai_secondary_categories 固定返回 []。\n\n分类候选：${categoryHint || '咨询、功能需求、Bug、投诉'}\n\n用户反馈：\n${feedbackText}\n\n候选分析内容：\n${modelOutput}`,
       temperature: 0,
       maxTokens: 800,
       responseFormat: 'json_object',
@@ -634,6 +634,17 @@ async function ensureEnglishReply(sourceText, analyzedEnText) {
   return 'Thanks for your feedback. We will review it and get back to you soon.'
 }
 
+async function translateFeedbackReplyToEnglish(text) {
+  const source = normalizeText(text)
+  if (!source) return ''
+
+  const translated = await translateToEnglish(source)
+  if (looksLikeEnglish(translated)) return translated
+  if (looksLikeEnglish(source) && !isMostlyChinese(source)) return source
+
+  return ''
+}
+
 function buildHeuristicAnalysis(feedback, config) {
   const question = buildFeedbackQuestionText(feedback)
   const lower = question.toLowerCase()
@@ -683,7 +694,6 @@ function buildHeuristicAnalysis(feedback, config) {
 
   const aiAllCategories = normalizeCategoryList(matchedCategories)
   const aiPrimaryCategory = aiAllCategories[0] || getDefaultCategory(categories)
-  const aiSecondaryCategories = aiAllCategories.slice(1)
 
   let sentiment = 'Neutral'
   if (negativeKeywords.some((kw) => lower.includes(kw))) {
@@ -697,8 +707,8 @@ function buildHeuristicAnalysis(feedback, config) {
   return {
     ai_category: aiPrimaryCategory,
     ai_primary_category: aiPrimaryCategory,
-    ai_secondary_categories: aiSecondaryCategories,
-    ai_all_categories: [aiPrimaryCategory].concat(aiSecondaryCategories).filter(Boolean),
+    ai_secondary_categories: [],
+    ai_all_categories: [aiPrimaryCategory].filter(Boolean),
     ai_sentiment: sentiment,
     ai_reply: `我们已经收到你的反馈：${summary || '你的问题'}。非常抱歉给你带来不便，我们会尽快排查并同步进展。`,
     ai_reply_en: 'Thanks for your feedback. We are sorry for the inconvenience and will investigate this issue as soon as possible.',
@@ -712,21 +722,13 @@ function buildPrompt(feedback, config) {
   const categoryHint = parseCategories(config?.categories).join('、')
   const userFeedbackText = buildFeedbackQuestionText(feedback, { labeled: true })
 
-  return `# 知识库\n${config.knowledgeBase || ''}\n\n# 限制条件\n${config.limitations || ''}\n\n# 分类候选\n${categoryHint || '咨询、功能需求、Bug、投诉'}\n\n# 用户反馈\n${userFeedbackText || ''}\n\n# 输出格式\n请只返回 JSON（不要额外说明），字段如下：\n{\n  "ai_primary_category": "主分类",\n  "ai_secondary_categories": ["次分类1", "次分类2"],\n  "ai_sentiment": "Positive | Neutral | Negative",\n  "ai_reply": "中文回复",\n  "ai_reply_en": "英文回复",\n  "user_request": "用户需求摘要",\n  "is_new_request": true\n}\n\n要求：\n1. ai_primary_category 必填。\n2. ai_secondary_categories 没有时返回 []。\n3. ai_secondary_categories 中不得重复 ai_primary_category。\n4. user_request 只保留用户诉求摘要，不要返回用户原文翻译。`
-}
-
-function sanitizeCategoryList(input, categoryOptions, { exclude = [] } = {}) {
-  const excluded = new Set(normalizeCategoryList(exclude))
-  return normalizeCategoryList(input)
-    .map((item) => sanitizeCategory(item, categoryOptions))
-    .filter((item) => item && !excluded.has(item))
+  return `# 知识库\n${config.knowledgeBase || ''}\n\n# 限制条件\n${config.limitations || ''}\n\n# 分类候选\n${categoryHint || '咨询、功能需求、Bug、投诉'}\n\n# 用户反馈\n${userFeedbackText || ''}\n\n# 输出格式\n请只返回 JSON（不要额外说明），字段如下：\n{\n  "ai_primary_category": "主分类",\n  "ai_secondary_categories": [],\n  "ai_sentiment": "Positive | Neutral | Negative",\n  "ai_reply": "中文回复",\n  "ai_reply_en": "英文回复",\n  "user_request": "用户需求摘要",\n  "is_new_request": true\n}\n\n要求：\n1. ai_primary_category 必填，并且只能保留 1 个最能代表用户问题的主分类。\n2. 判断主分类时可以综合知识库、限制条件、分类候选和用户原文，但不要输出次分类。\n3. ai_secondary_categories 固定返回 []，用于兼容旧字段。\n4. user_request 只保留用户诉求摘要，不要返回用户原文翻译。`
 }
 
 function applyIntentCategoryOverrides({
   feedback,
   userRequest,
   aiPrimaryCategory,
-  aiSecondaryCategories,
   categoryOptions,
 }) {
   const sourceText = [
@@ -735,16 +737,12 @@ function applyIntentCategoryOverrides({
   ].filter(Boolean).join('\n').toLowerCase()
 
   let primary = aiPrimaryCategory
-  const secondary = normalizeCategoryList(aiSecondaryCategories)
 
   if (hasIntentKeyword(sourceText, ACCOUNT_DELETE_INTENT_KEYWORDS)) {
     const deleteCategory =
       findCategoryByKeywords(categoryOptions, ['删除账户', '删除账号']) ||
       findCategoryByKeywords(categoryOptions, ['删除'])
     if (deleteCategory) {
-      if (primary && primary !== deleteCategory) {
-        secondary.unshift(primary)
-      }
       primary = deleteCategory
     }
   } else if (hasIntentKeyword(sourceText, DATA_DELETE_INTENT_KEYWORDS)) {
@@ -752,9 +750,6 @@ function applyIntentCategoryOverrides({
       findCategoryByKeywords(categoryOptions, ['删除数据', '删除上传图', '删除结果图', '删除视频', '删除帖子', '删除滤镜']) ||
       findCategoryByKeywords(categoryOptions, ['删除'])
     if (deleteDataCategory) {
-      if (primary && primary !== deleteDataCategory) {
-        secondary.unshift(primary)
-      }
       primary = deleteDataCategory
     }
   }
@@ -762,28 +757,21 @@ function applyIntentCategoryOverrides({
   if (hasIntentKeyword(sourceText, REFUND_INTENT_KEYWORDS)) {
     const refundCategory = getRefundCategory(categoryOptions)
     if (refundCategory) {
-      if (primary && primary !== refundCategory) {
-        secondary.unshift(primary)
-      }
       primary = refundCategory
     }
   }
 
-  if (hasIntentKeyword(sourceText, CANCEL_INTENT_KEYWORDS)) {
+  if (!hasIntentKeyword(sourceText, REFUND_INTENT_KEYWORDS) && hasIntentKeyword(sourceText, CANCEL_INTENT_KEYWORDS)) {
     const cancelCategory = getCancelCategory(categoryOptions)
-    if (cancelCategory && cancelCategory !== primary) {
-      secondary.push(cancelCategory)
+    if (cancelCategory) {
+      primary = cancelCategory
     }
   }
 
-  const normalizedSecondary = sanitizeCategoryList(secondary, categoryOptions, {
-    exclude: [primary],
-  })
-
   return {
     aiPrimaryCategory: primary,
-    aiSecondaryCategories: normalizedSecondary,
-    aiAllCategories: [primary].concat(normalizedSecondary).filter(Boolean),
+    aiSecondaryCategories: [],
+    aiAllCategories: [primary].filter(Boolean),
   }
 }
 
@@ -872,10 +860,10 @@ async function analyzeFeedback(feedback) {
   const categoryOptions = parseCategories(config?.categories)
   const heuristic = buildHeuristicAnalysis(feedback, config)
   const feedbackQuestionText = buildFeedbackQuestionText(feedback)
-  const feedbackQuestionSourceText = normalizeFeedbackBodyText(feedback?.user_question) || feedbackQuestionText
+  const feedbackQuestionTranslationSourceText = buildFeedbackQuestionText(feedback, { labeled: true }) || feedbackQuestionText
 
   if (!hasAiCapability()) {
-    heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionSourceText)
+    heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionTranslationSourceText)
     heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
     return heuristic
   }
@@ -908,7 +896,7 @@ async function analyzeFeedback(feedback) {
           feedbackId: feedback?.id || null,
           preview: normalizeText(response?.content, 400),
         })
-        heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionSourceText)
+        heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionTranslationSourceText)
         heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
         return heuristic
       }
@@ -920,20 +908,12 @@ async function analyzeFeedback(feedback) {
       }
     }
 
-    const userQuestionCn = await ensureChineseQuestion(feedbackQuestionSourceText)
+    const userQuestionCn = await ensureChineseQuestion(feedbackQuestionTranslationSourceText)
     const aiPrimaryCategory = sanitizeCategory(
       parsed.ai_primary_category || parsed.primary_category || parsed.ai_category,
       categoryOptions,
     )
-    const secondarySource =
-      parsed.ai_secondary_categories ||
-      parsed.secondary_categories ||
-      normalizeCategoryList(parsed.ai_all_categories).filter((item) => item !== aiPrimaryCategory)
-    const aiSecondaryCategories = sanitizeCategoryList(
-      secondarySource,
-      categoryOptions,
-      { exclude: [aiPrimaryCategory] },
-    )
+    const aiSecondaryCategories = []
     const aiReply = normalizeText(parsed.ai_reply) || heuristic.ai_reply
     const userRequest = summarizeRequest(parsed.user_request || feedbackQuestionText)
     const categoryOverride = applyIntentCategoryOverrides({
@@ -965,7 +945,7 @@ async function analyzeFeedback(feedback) {
     }
   } catch (error) {
     console.warn('反馈 AI 分析失败，回退到规则分析:', error?.message || error)
-    heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionSourceText)
+    heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionTranslationSourceText)
     const fallbackPolicyReply = buildPolicyReplyByCategories({
       primaryCategory: heuristic.ai_primary_category,
       secondaryCategories: heuristic.ai_secondary_categories,
@@ -1045,5 +1025,6 @@ async function analyzeUnprocessedFeedback(limit = 10, options = {}) {
 module.exports = {
   analyzeSingleFeedback,
   analyzeUnprocessedFeedback,
+  translateFeedbackReplyToEnglish,
   clearConfigCache,
 }
