@@ -1,4 +1,5 @@
 const MatrixPackage = require('../models/MatrixPackage')
+const MatrixPackageSideNote = require('../models/MatrixPackageSideNote')
 
 function handleError(res, error, fallbackMessage) {
   const statusCode = Number(error?.statusCode || 500)
@@ -17,6 +18,18 @@ async function listMatrixPackages(req, res) {
     return res.json({ success: true, data })
   } catch (error) {
     return handleError(res, error, '获取矩阵包列表失败')
+  }
+}
+
+async function getMatrixPackage(req, res) {
+  try {
+    const data = await MatrixPackage.getById(req.params.id)
+    if (!data) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    return res.json({ success: true, data })
+  } catch (error) {
+    return handleError(res, error, '获取矩阵包详情失败')
   }
 }
 
@@ -53,9 +66,49 @@ async function deleteMatrixPackage(req, res) {
   }
 }
 
+async function listMatrixPackageSideNotes(req, res) {
+  try {
+    const data = await MatrixPackageSideNote.listByPackageId(req.params.id)
+    if (!data) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    return res.json({ success: true, data })
+  } catch (error) {
+    return handleError(res, error, '获取矩阵包补充信息失败')
+  }
+}
+
+async function saveMatrixPackageSideNotes(req, res) {
+  try {
+    const data = await MatrixPackageSideNote.saveBatch(req.params.id, req.body?.notes || [], req.user?.id)
+    if (!data) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    return res.json({ success: true, message: '补充信息已保存', data })
+  } catch (error) {
+    return handleError(res, error, '保存矩阵包补充信息失败')
+  }
+}
+
+async function confirmMatrixPackageSideNote(req, res) {
+  try {
+    const data = await MatrixPackageSideNote.confirm(req.params.id, req.params.noteType, req.user?.id)
+    if (!data) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    return res.json({ success: true, message: '补充信息已确认', data })
+  } catch (error) {
+    return handleError(res, error, '确认矩阵包补充信息失败')
+  }
+}
+
 module.exports = {
   listMatrixPackages,
+  getMatrixPackage,
   createMatrixPackage,
   updateMatrixPackage,
   deleteMatrixPackage,
+  listMatrixPackageSideNotes,
+  saveMatrixPackageSideNotes,
+  confirmMatrixPackageSideNote,
 }
