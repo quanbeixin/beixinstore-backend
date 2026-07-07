@@ -352,6 +352,48 @@ const updateUser = async (req, res) => {
   }
 }
 
+const resetUserPassword = async (req, res) => {
+  const { id } = req.params
+  const password = String(req.body.password || '')
+  const confirmPassword = String(req.body.confirm_password || req.body.confirmPassword || '')
+
+  if (!password || !confirmPassword) {
+    return res.status(400).json({ success: false, message: '新密码和确认密码不能为空' })
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ success: false, message: '密码长度至少 6 个字符' })
+  }
+  if (password !== confirmPassword) {
+    return res.status(400).json({ success: false, message: '两次输入的密码不一致' })
+  }
+
+  try {
+    const existingUser = await User.findById(id)
+    if (!existingUser) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10)
+    await User.updatePasswordById(id, hashedPassword)
+
+    await writeUserChangeLog({
+      actionType: UserChangeLog.ACTION_TYPES.RESET_PASSWORD,
+      source: 'ADMIN',
+      operatorUserId: req.user?.id || null,
+      operatorName: req.user?.username || '',
+      targetUserId: existingUser.id,
+      beforeSnapshot: existingUser,
+      afterSnapshot: existingUser,
+      changeSummary: '管理员重置用户密码',
+    })
+
+    return res.json({ success: true, message: '密码已重置' })
+  } catch (err) {
+    console.error('重置用户密码失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
 // 通过 POST 删除用户（POST /api/users/:id/delete）
 const deleteUser = async (req, res) => {
   const { id } = req.params
@@ -387,4 +429,12 @@ const deleteUser = async (req, res) => {
   }
 }
 
-module.exports = { getUsers, listUserChangeLogs, getUserById, createUser, updateUser, deleteUser }
+module.exports = {
+  getUsers,
+  listUserChangeLogs,
+  getUserById,
+  createUser,
+  updateUser,
+  resetUserPassword,
+  deleteUser,
+}

@@ -4,6 +4,7 @@ const User = require('./User')
 const ACTION_TYPES = {
   CREATE: 'CREATE',
   UPDATE: 'UPDATE',
+  RESET_PASSWORD: 'RESET_PASSWORD',
   DELETE: 'DELETE',
   VIEW: 'VIEW',
   REGISTER: 'REGISTER',
@@ -12,6 +13,7 @@ const ACTION_TYPES = {
 const ACTION_LABELS = {
   [ACTION_TYPES.CREATE]: '新增用户',
   [ACTION_TYPES.UPDATE]: '编辑用户',
+  [ACTION_TYPES.RESET_PASSWORD]: '重置密码',
   [ACTION_TYPES.DELETE]: '删除用户',
   [ACTION_TYPES.VIEW]: '查看详情',
   [ACTION_TYPES.REGISTER]: '新用户注册',
@@ -108,6 +110,9 @@ function buildChangeSummary(actionType, beforeSnapshot, afterSnapshot) {
   }
   if (actionType === ACTION_TYPES.DELETE) {
     return '管理员删除用户'
+  }
+  if (actionType === ACTION_TYPES.RESET_PASSWORD) {
+    return '管理员重置用户密码'
   }
   if (actionType === ACTION_TYPES.VIEW) {
     return '查看用户详情'
