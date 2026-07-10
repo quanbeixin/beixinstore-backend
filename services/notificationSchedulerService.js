@@ -1,6 +1,7 @@
 const pool = require('../utils/db')
 const NotificationEvent = require('../models/NotificationEvent')
 const Work = require('../models/Work')
+const MatrixPackageNotificationService = require('./matrixPackageNotificationService')
 const { getChinaBusinessDayInfo } = require('../utils/chinaBusinessCalendar')
 
 const SCHEDULE_EVENT_TYPES = new Set(['schedule_hourly', 'schedule_daily', 'schedule_weekly', 'schedule_monthly'])
@@ -498,10 +499,11 @@ async function runTick() {
     await ensureTriggerCursorTable()
     await cleanupExpiredCursor()
     const rules = await listEnabledRulesForScheduler()
-    if (rules.length === 0) return
-
-    await dispatchScheduleRules(rules)
-    await dispatchDeadlineRules(rules)
+    if (rules.length > 0) {
+      await dispatchScheduleRules(rules)
+      await dispatchDeadlineRules(rules)
+    }
+    await MatrixPackageNotificationService.dispatchScheduledNotifications()
   } catch (error) {
     console.error('通知调度执行失败:', error)
   } finally {

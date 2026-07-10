@@ -1,6 +1,7 @@
 const pool = require('../utils/db')
 
 const STATUS_DICT_KEY = 'developer_account_status'
+const COMPANY_DICT_KEY = 'developer_company_subject'
 
 function toPositiveInt(value) {
   const numeric = Number.parseInt(value, 10)
@@ -56,6 +57,20 @@ async function validateDictCode(typeKey, itemCode) {
   return rows.length > 0
 }
 
+async function validateDictName(typeKey, itemName) {
+  const normalized = normalizeText(itemName, 120)
+  if (!normalized) return false
+
+  const [rows] = await pool.query(
+    `SELECT id
+     FROM config_dict_items
+     WHERE type_key = ? AND item_name = ? AND enabled = 1
+     LIMIT 1`,
+    [typeKey, normalized],
+  )
+  return rows.length > 0
+}
+
 function buildWhere(filters = {}) {
   const clauses = ['da.deleted_at IS NULL']
   const params = []
@@ -94,6 +109,7 @@ function buildWhere(filters = {}) {
 
 const DeveloperAccount = {
   STATUS_DICT_KEY,
+  COMPANY_DICT_KEY,
 
   async list(filters = {}) {
     const page = Math.max(toPositiveInt(filters.page) || 1, 1)
@@ -338,6 +354,12 @@ const DeveloperAccount = {
       const err = new Error('company_name_required')
       err.statusCode = 400
       err.message = '公司主体不能为空'
+      throw err
+    }
+    if (!(await validateDictName(COMPANY_DICT_KEY, companyName))) {
+      const err = new Error('company_name_invalid')
+      err.statusCode = 400
+      err.message = '公司主体不合法，请先在系统字典中维护'
       throw err
     }
 

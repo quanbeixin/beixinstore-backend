@@ -5,6 +5,9 @@ const STATUS_DICT_KEY = 'matrix_package_status'
 const HEALTH_DICT_KEY = 'matrix_package_health'
 const PRODUCTION_STAGE_DICT_KEY = 'matrix_package_production_stage'
 const PRODUCTION_STATUS_CODES = ['IN_DEVELOPMENT', 'COLD_STANDBY']
+const COMPLETION_SIDE_NOTE_TYPES = ['DELIVERY', 'REQUIREMENT', 'DESIGN', 'OPERATION', 'FRONTEND', 'BACKEND', 'DEVOPS']
+const COMPLETION_SIDE_NOTE_TOTAL = COMPLETION_SIDE_NOTE_TYPES.length
+const COMPLETION_SIDE_NOTE_TYPE_SQL = COMPLETION_SIDE_NOTE_TYPES.map(() => '?').join(', ')
 
 function toPositiveInt(value) {
   const numeric = Number.parseInt(value, 10)
@@ -49,13 +52,16 @@ function normalizeChecklist(value) {
 
 function mapRow(row) {
   if (!row) return null
+  const sideNoteConfirmedCount = Number(row.side_note_confirmed_count || 0)
   return {
     id: Number(row.id),
     developer_account_id: row.developer_account_id ? Number(row.developer_account_id) : null,
     developer_account_name: row.developer_account_name || '',
     developer_company_name: row.developer_company_name || '',
     package_name: row.package_name || '',
+    app_id: row.app_id || '',
     new_package_version: row.new_package_version || '',
+    domain_info: row.domain_info || '',
     platform: row.platform || '',
     owner_user_id: row.owner_user_id ? Number(row.owner_user_id) : null,
     owner_name: row.owner_display_name || row.owner_name || '',
@@ -71,6 +77,9 @@ function mapRow(row) {
     expected_cold_ready_date: row.expected_cold_ready_date || null,
     latest_progress: row.latest_progress || '',
     production_checklist: normalizeChecklist(row.production_checklist),
+    side_note_confirmed_count: sideNoteConfirmedCount,
+    side_note_total: COMPLETION_SIDE_NOTE_TOTAL,
+    side_note_completion_percent: Math.round((sideNoteConfirmedCount / COMPLETION_SIDE_NOTE_TOTAL) * 100),
     created_by: row.created_by ? Number(row.created_by) : null,
     updated_by: row.updated_by ? Number(row.updated_by) : null,
     created_at: row.created_at || null,
@@ -98,9 +107,9 @@ function buildWhere(filters = {}) {
 
   const keyword = normalizeText(filters.keyword, 100)
   if (keyword) {
-    clauses.push('(mp.package_name LIKE ? OR mp.new_package_version LIKE ? OR mp.platform LIKE ? OR mp.owner_name LIKE ? OR ownerUser.real_name LIKE ? OR ownerUser.username LIKE ? OR da.account_name LIKE ? OR da.company_name LIKE ?)')
+    clauses.push('(mp.package_name LIKE ? OR mp.app_id LIKE ? OR mp.new_package_version LIKE ? OR mp.domain_info LIKE ? OR mp.platform LIKE ? OR mp.owner_name LIKE ? OR ownerUser.real_name LIKE ? OR ownerUser.username LIKE ? OR da.account_name LIKE ? OR da.company_name LIKE ?)')
     const like = `%${keyword}%`
-    params.push(like, like, like, like, like, like, like, like)
+    params.push(like, like, like, like, like, like, like, like, like, like)
   }
 
   const statusCode = normalizeOptionalCode(filters.status_code)
@@ -217,7 +226,9 @@ const MatrixPackage = {
          da.account_name AS developer_account_name,
          da.company_name AS developer_company_name,
          mp.package_name,
+         mp.app_id,
          mp.new_package_version,
+         mp.domain_info,
          mp.platform,
          mp.owner_user_id,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
@@ -234,6 +245,7 @@ const MatrixPackage = {
          DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d') AS expected_cold_ready_date,
          mp.latest_progress,
          mp.production_checklist,
+         COALESCE(sideNoteStats.side_note_confirmed_count, 0) AS side_note_confirmed_count,
          mp.created_by,
          mp.updated_by,
          DATE_FORMAT(mp.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
@@ -244,6 +256,20 @@ const MatrixPackage = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN (
+         SELECT
+           package_id,
+           SUM(CASE
+             WHEN COALESCE(TRIM(content), '') <> ''
+              AND COALESCE(content, '') = COALESCE(confirmed_content, '')
+             THEN 1
+             ELSE 0
+           END) AS side_note_confirmed_count
+         FROM matrix_package_side_notes
+         WHERE note_type IN (${COMPLETION_SIDE_NOTE_TYPE_SQL})
+         GROUP BY package_id
+       ) sideNoteStats
+         ON sideNoteStats.package_id = mp.id
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = ?
         AND statusDict.item_code = mp.status_code
@@ -265,7 +291,15 @@ const MatrixPackage = {
          mp.updated_at DESC,
          mp.id DESC
       LIMIT ? OFFSET ?`,
-      [STATUS_DICT_KEY, HEALTH_DICT_KEY, PRODUCTION_STAGE_DICT_KEY, ...params, pageSize, offset],
+      [
+        ...COMPLETION_SIDE_NOTE_TYPES,
+        STATUS_DICT_KEY,
+        HEALTH_DICT_KEY,
+        PRODUCTION_STAGE_DICT_KEY,
+        ...params,
+        pageSize,
+        offset,
+      ],
     )
 
     return {
@@ -293,7 +327,9 @@ const MatrixPackage = {
          da.account_name AS developer_account_name,
          da.company_name AS developer_company_name,
          mp.package_name,
+         mp.app_id,
          mp.new_package_version,
+         mp.domain_info,
          mp.platform,
          mp.owner_user_id,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
@@ -310,6 +346,7 @@ const MatrixPackage = {
          DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d') AS expected_cold_ready_date,
          mp.latest_progress,
          mp.production_checklist,
+         COALESCE(sideNoteStats.side_note_confirmed_count, 0) AS side_note_confirmed_count,
          mp.created_by,
          mp.updated_by,
          DATE_FORMAT(mp.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
@@ -320,6 +357,20 @@ const MatrixPackage = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN (
+         SELECT
+           package_id,
+           SUM(CASE
+             WHEN COALESCE(TRIM(content), '') <> ''
+              AND COALESCE(content, '') = COALESCE(confirmed_content, '')
+             THEN 1
+             ELSE 0
+           END) AS side_note_confirmed_count
+         FROM matrix_package_side_notes
+         WHERE note_type IN (${COMPLETION_SIDE_NOTE_TYPE_SQL})
+         GROUP BY package_id
+       ) sideNoteStats
+         ON sideNoteStats.package_id = mp.id
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = ?
         AND statusDict.item_code = mp.status_code
@@ -331,7 +382,13 @@ const MatrixPackage = {
         AND productionStageDict.item_code = mp.production_stage_code
        WHERE mp.id = ? AND mp.deleted_at IS NULL
        LIMIT 1`,
-      [STATUS_DICT_KEY, HEALTH_DICT_KEY, PRODUCTION_STAGE_DICT_KEY, packageId],
+      [
+        ...COMPLETION_SIDE_NOTE_TYPES,
+        STATUS_DICT_KEY,
+        HEALTH_DICT_KEY,
+        PRODUCTION_STAGE_DICT_KEY,
+        packageId,
+      ],
     )
     return mapRow(rows[0])
   },
@@ -340,12 +397,14 @@ const MatrixPackage = {
     const normalized = await this.normalizePayload(payload)
     const [result] = await pool.query(
       `INSERT INTO matrix_packages
-       (developer_account_id, package_name, new_package_version, platform, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, latest_progress, production_checklist, created_by, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, latest_progress, production_checklist, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         normalized.developer_account_id,
         normalized.package_name,
+        normalized.app_id,
         normalized.new_package_version,
+        normalized.domain_info,
         normalized.platform,
         normalized.owner_user_id,
         normalized.owner_name,
@@ -373,7 +432,9 @@ const MatrixPackage = {
     await pool.query(
       `UPDATE matrix_packages
        SET package_name = ?,
+           app_id = ?,
            new_package_version = ?,
+           domain_info = ?,
            developer_account_id = ?,
            platform = ?,
            owner_user_id = ?,
@@ -388,7 +449,9 @@ const MatrixPackage = {
        WHERE id = ? AND deleted_at IS NULL`,
       [
         normalized.package_name,
+        normalized.app_id,
         normalized.new_package_version,
+        normalized.domain_info,
         normalized.developer_account_id,
         normalized.platform,
         normalized.owner_user_id,
@@ -512,6 +575,27 @@ const MatrixPackage = {
       ? normalizeText(payload.new_package_version, 50)
       : normalizeText(existing.new_package_version, 50)
 
+    const hasAppId = Object.prototype.hasOwnProperty.call(payload, 'app_id')
+    const appId = hasAppId
+      ? normalizeText(payload.app_id, 80)
+      : normalizeText(existing.app_id, 80)
+
+    const hasDomainInfo = Object.prototype.hasOwnProperty.call(payload, 'domain_info')
+    const domainInfo = hasDomainInfo
+      ? normalizeText(payload.domain_info, 255)
+      : normalizeText(existing.domain_info, 255)
+    if (!existing.id && !domainInfo) {
+      const err = new Error('domain_info_required')
+      err.statusCode = 400
+      err.message = '新增矩阵包时必须填写域名信息'
+      throw err
+    }
+
+    const hasPlatform = Object.prototype.hasOwnProperty.call(payload, 'platform')
+    const platform = hasPlatform
+      ? normalizeText(payload.platform, 40)
+      : normalizeText(existing.platform, 40)
+
     const hasOwnerUser = Object.prototype.hasOwnProperty.call(payload, 'owner_user_id')
     const ownerUser = hasOwnerUser
       ? await this.getUserDisplayName(payload.owner_user_id)
@@ -523,8 +607,10 @@ const MatrixPackage = {
     return {
       developer_account_id: developerAccountId || null,
       package_name: packageName,
+      app_id: appId || null,
       new_package_version: newPackageVersion || null,
-      platform: normalizeText(payload.platform, 40),
+      domain_info: domainInfo || null,
+      platform: platform || null,
       owner_user_id: ownerUser.id,
       owner_name: normalizeText(ownerUser.displayName, 80),
       status_code: statusCode,

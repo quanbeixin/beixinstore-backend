@@ -93,6 +93,55 @@ INSERT INTO `config_dict_types` (`type_key`, `type_name`, `description`, `enable
 SELECT 'developer_account_status', '开发者账号状态', '矩阵包专项使用的开发者账号状态枚举。', 1, 1
 WHERE NOT EXISTS (SELECT 1 FROM `config_dict_types` WHERE `type_key` = 'developer_account_status');
 
+INSERT INTO `config_dict_types` (`type_key`, `type_name`, `description`, `enabled`, `is_builtin`)
+SELECT 'developer_company_subject', '开发者公司主体', '矩阵包专项使用的开发者账号公司主体。', 1, 1
+WHERE NOT EXISTS (SELECT 1 FROM `config_dict_types` WHERE `type_key` = 'developer_company_subject');
+
+INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`)
+SELECT 'developer_company_subject', 'HK1_JISHI', '即设香港 - HK1 - Jishi', 10, 1, 'blue', '矩阵包专项开发者公司主体'
+WHERE NOT EXISTS (
+  SELECT 1 FROM `config_dict_items` WHERE `type_key` = 'developer_company_subject' AND `item_code` = 'HK1_JISHI'
+);
+
+INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`)
+SELECT 'developer_company_subject', 'HK1_HORIZON', '即设香港 - HK1 - Horizon', 20, 1, 'blue', '矩阵包专项开发者公司主体'
+WHERE NOT EXISTS (
+  SELECT 1 FROM `config_dict_items` WHERE `type_key` = 'developer_company_subject' AND `item_code` = 'HK1_HORIZON'
+);
+
+INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`)
+SELECT 'developer_company_subject', 'SG1_FUTURE', '新加坡主体1 - SG1 - FUTURE', 30, 1, 'cyan', '矩阵包专项开发者公司主体'
+WHERE NOT EXISTS (
+  SELECT 1 FROM `config_dict_items` WHERE `type_key` = 'developer_company_subject' AND `item_code` = 'SG1_FUTURE'
+);
+
+INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`)
+SELECT 'developer_company_subject', 'SG1_AIGC', '新加坡主体1 - SG1 - AIGC', 40, 1, 'cyan', '矩阵包专项开发者公司主体'
+WHERE NOT EXISTS (
+  SELECT 1 FROM `config_dict_items` WHERE `type_key` = 'developer_company_subject' AND `item_code` = 'SG1_AIGC'
+);
+
+INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`)
+SELECT
+  'developer_company_subject',
+  CONCAT('COMPANY_', MIN(da.id)),
+  da.company_name,
+  100 + MIN(da.id),
+  1,
+  'blue',
+  '由历史开发者账号公司主体自动补充'
+FROM `developer_accounts` da
+WHERE da.deleted_at IS NULL
+  AND da.company_name IS NOT NULL
+  AND TRIM(da.company_name) <> ''
+  AND NOT EXISTS (
+    SELECT 1
+    FROM `config_dict_items` existing
+    WHERE existing.type_key = 'developer_company_subject'
+      AND existing.item_name = da.company_name
+  )
+GROUP BY da.company_name;
+
 INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`)
 SELECT 'developer_account_status', 'NORMAL', '正常', 10, 1, 'green', '可正常上包、维护、关联矩阵包'
 WHERE NOT EXISTS (

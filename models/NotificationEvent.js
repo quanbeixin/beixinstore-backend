@@ -118,6 +118,12 @@ function buildDemandDetailUrlFromEventData(eventData = {}) {
   return buildPortalUrl(`/work-demands/${encodeURIComponent(demandId)}`)
 }
 
+function buildMatrixPackageProductionDetailUrlFromEventData(eventData = {}) {
+  const packageId = toNullableInt(eventData?.package_id)
+  if (!packageId) return ''
+  return buildPortalUrl(`/matrix-package-special/cold-standby-production/${encodeURIComponent(String(packageId))}`)
+}
+
 function buildWorklogPageUrlFromEventData(eventData = {}) {
   const query = {}
   const demandId = normalizeDemandId(eventData?.demand_id)
@@ -159,6 +165,13 @@ function buildActionMetaByEventType(eventType, eventData = {}) {
     'node_complete',
   ])
 
+  const viewMatrixPackageDetailEvents = new Set([
+    'matrix_package_status_change',
+    'matrix_package_upcoming_deadline',
+    'matrix_package_overdue_deadline',
+    'matrix_package_side_info_deadline',
+  ])
+
   if (goFillReportEvents.has(normalizedEventType)) {
     const url =
       normalizedEventType === 'demand_score_assign'
@@ -171,6 +184,11 @@ function buildActionMetaByEventType(eventType, eventData = {}) {
   if (viewDemandDetailEvents.has(normalizedEventType)) {
     const url = buildDemandDetailUrlFromEventData(eventData)
     return url ? { detail_url: url, detail_action_text: '查看详情' } : null
+  }
+
+  if (viewMatrixPackageDetailEvents.has(normalizedEventType)) {
+    const url = buildMatrixPackageProductionDetailUrlFromEventData(eventData)
+    return url ? { detail_url: url, detail_action_text: '生产详情' } : null
   }
 
   return null
@@ -1085,8 +1103,20 @@ const NotificationEvent = {
       let errorCode = null
       let errorMessage = null
 
-      const renderedTitle = renderTemplateText(rule.message_title || rule.rule_name || '系统通知', data)
-      const renderedContent = renderTemplateText(rule.message_content || `事件 ${normalizedEventType} 已触发`, data)
+      const templateData = {
+        ...data,
+        rule_name: rule.rule_name || '',
+      }
+      const renderedTitle = renderTemplateText(rule.message_title || rule.rule_name || '系统通知', templateData)
+      let renderedContent = renderTemplateText(rule.message_content || `事件 ${normalizedEventType} 已触发`, templateData)
+      const normalizedRuleName = normalizeText(rule.rule_name, 255)
+      if (
+        normalizedRuleName &&
+        normalizedEventType.startsWith('matrix_package_') &&
+        !String(renderedContent || '').includes(normalizedRuleName)
+      ) {
+        renderedContent = `**${normalizedRuleName}**\n${String(renderedContent || '').trim()}`
+      }
       const derivedActionMeta = buildActionMetaByEventType(normalizedEventType, data) || {}
       const metadataDetailUrl =
         normalizeText(data?.detail_url, 2000) ||
