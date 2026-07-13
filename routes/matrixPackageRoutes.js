@@ -3,6 +3,7 @@ const authMiddleware = require('../middleware/auth')
 const {
   createMatrixPackage,
   confirmMatrixPackageSideNote,
+  completeMatrixPackageProduction,
   deleteMatrixPackage,
   getMatrixPackage,
   remindMatrixPackageProductionNode,
@@ -23,6 +24,7 @@ router.use(authMiddleware)
 router.get('/', authMiddleware.requirePermission('demand.view'), listMatrixPackages)
 router.get('/:id', authMiddleware.requirePermission('demand.view'), getMatrixPackage)
 router.get('/:id/production-nodes', authMiddleware.requirePermission('demand.view'), listMatrixPackageProductionNodes)
+router.post('/:id/complete-production', authMiddleware.requirePermission('demand.manage'), completeMatrixPackageProduction)
 router.put('/:id/production-nodes/:nodeCode', authMiddleware.requirePermission('demand.manage'), updateMatrixPackageProductionNode)
 router.post('/:id/production-nodes/:nodeCode/remind', authMiddleware.requirePermission('demand.manage'), remindMatrixPackageProductionNode)
 router.get('/:id/side-notes', authMiddleware.requirePermission('demand.view'), listMatrixPackageSideNotes)

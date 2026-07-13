@@ -1,4 +1,5 @@
 const MatrixPackage = require('../models/MatrixPackage')
+const AppVersionRelease = require('../models/AppVersionRelease')
 const MatrixPackageProductionNode = require('../models/MatrixPackageProductionNode')
 const MatrixPackageSideNote = require('../models/MatrixPackageSideNote')
 const MatrixPackageNotificationService = require('../services/matrixPackageNotificationService')
@@ -383,6 +384,50 @@ async function updateMatrixPackage(req, res) {
   }
 }
 
+async function completeMatrixPackageProduction(req, res) {
+  try {
+    const beforePackage = await MatrixPackage.getById(req.params.id)
+    if (!beforePackage) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+
+    const packagePayload = {
+      package_name: beforePackage.package_name,
+      app_id: beforePackage.app_id || '',
+      new_package_version: beforePackage.new_package_version || '',
+      domain_info: beforePackage.domain_info || '',
+      developer_account_id: beforePackage.developer_account_id || null,
+      platform: beforePackage.platform || '',
+      owner_user_id: beforePackage.owner_user_id || null,
+      status_code: 'COLD_STANDBY',
+      health_code: null,
+      production_stage_code: beforePackage.production_stage_code || null,
+      expected_cold_ready_date: beforePackage.expected_cold_ready_date || null,
+      latest_progress: beforePackage.latest_progress || '',
+      production_checklist: beforePackage.production_checklist || [],
+    }
+    const afterPackage = await MatrixPackage.update(req.params.id, packagePayload, req.user?.id)
+    await MatrixPackageNotificationService.triggerStatusChangeNotifications({
+      beforePackage,
+      afterPackage,
+      operatorUserId: req.user?.id || null,
+    })
+
+    const release = await AppVersionRelease.ensureFromMatrixPackage(req.params.id, req.user?.id)
+
+    return res.json({
+      success: true,
+      message: '生产已完成，APP发版记录已创建',
+      data: {
+        package: afterPackage,
+        release,
+      },
+    })
+  } catch (error) {
+    return handleError(res, error, '完成矩阵包生产失败')
+  }
+}
+
 async function deleteMatrixPackage(req, res) {
   try {
     const affected = await MatrixPackage.softDelete(req.params.id, req.user?.id)
@@ -586,6 +631,7 @@ module.exports = {
   getMatrixPackage,
   createMatrixPackage,
   updateMatrixPackage,
+  completeMatrixPackageProduction,
   deleteMatrixPackage,
   listMatrixPackageProductionNodes,
   remindMatrixPackageProductionNode,

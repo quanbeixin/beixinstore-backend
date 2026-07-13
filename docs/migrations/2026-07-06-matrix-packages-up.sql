@@ -63,9 +63,21 @@ WHERE NOT EXISTS (
 );
 
 INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`)
+SELECT 'matrix_package_status', 'PENDING_REVIEW_SUBMIT', '待送审', 15, 1, 'orange', '冷备包已准备好，等待提交商店审核'
+WHERE NOT EXISTS (
+  SELECT 1 FROM `config_dict_items` WHERE `type_key` = 'matrix_package_status' AND `item_code` = 'PENDING_REVIEW_SUBMIT'
+);
+
+INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`)
 SELECT 'matrix_package_status', 'IN_REVIEW', '审核中', 20, 1, 'gold', '已提交商店，等待 Meta/Google 审核结果'
 WHERE NOT EXISTS (
   SELECT 1 FROM `config_dict_items` WHERE `type_key` = 'matrix_package_status' AND `item_code` = 'IN_REVIEW'
+);
+
+INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`)
+SELECT 'matrix_package_status', 'REVIEW_REJECTED', '被拒审', 25, 1, 'red', '商店审核未通过，需要处理后重新提交'
+WHERE NOT EXISTS (
+  SELECT 1 FROM `config_dict_items` WHERE `type_key` = 'matrix_package_status' AND `item_code` = 'REVIEW_REJECTED'
 );
 
 INSERT INTO `config_dict_items` (`type_key`, `item_code`, `item_name`, `sort_order`, `enabled`, `color`, `remark`)

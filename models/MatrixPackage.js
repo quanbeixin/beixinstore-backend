@@ -32,7 +32,10 @@ function normalizeOptionalId(value) {
 function normalizeOptionalDate(value) {
   const text = String(value || '').trim()
   if (!text) return null
-  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text
+  if (/^\d{4}-\d{2}-\d{2}\s\d{2}:00:00$/.test(text)) return text
+  if (/^\d{4}-\d{2}-\d{2}\s\d{2}:00$/.test(text)) return `${text}:00`
+  return null
 }
 
 function normalizeChecklist(value) {
@@ -182,13 +185,15 @@ const MatrixPackage = {
       : `CASE mp.status_code
            WHEN 'DELIVERING' THEN 1
            WHEN 'IN_REVIEW' THEN 2
-           WHEN 'HOT_STANDBY' THEN 3
-           WHEN 'COLD_STANDBY' THEN 4
-           WHEN 'IN_DEVELOPMENT' THEN 5
-           WHEN 'PENDING_DEV' THEN 6
-           WHEN 'BANNED' THEN 7
-           WHEN 'ARCHIVED' THEN 8
-           ELSE 9
+           WHEN 'REVIEW_REJECTED' THEN 3
+           WHEN 'HOT_STANDBY' THEN 4
+           WHEN 'PENDING_REVIEW_SUBMIT' THEN 5
+           WHEN 'COLD_STANDBY' THEN 6
+           WHEN 'IN_DEVELOPMENT' THEN 7
+           WHEN 'PENDING_DEV' THEN 8
+           WHEN 'BANNED' THEN 9
+           WHEN 'ARCHIVED' THEN 10
+           ELSE 99
          END`
 
     const [countRows] = await pool.query(
@@ -206,7 +211,11 @@ const MatrixPackage = {
     const [summaryRows] = await pool.query(
       `SELECT
          COUNT(*) AS total,
+         SUM(CASE WHEN mp.status_code = 'PENDING_DEV' THEN 1 ELSE 0 END) AS pending_dev,
+         SUM(CASE WHEN mp.status_code = 'IN_DEVELOPMENT' THEN 1 ELSE 0 END) AS in_development,
          SUM(CASE WHEN mp.status_code = 'DELIVERING' THEN 1 ELSE 0 END) AS delivering,
+         SUM(CASE WHEN mp.status_code = 'IN_REVIEW' THEN 1 ELSE 0 END) AS in_review,
+         SUM(CASE WHEN mp.status_code = 'HOT_STANDBY' THEN 1 ELSE 0 END) AS hot_standby,
          SUM(CASE WHEN mp.status_code IN ('HOT_STANDBY', 'COLD_STANDBY') THEN 1 ELSE 0 END) AS standby,
          SUM(CASE WHEN mp.status_code = 'BANNED' OR mp.health_code = 'ABNORMAL' THEN 1 ELSE 0 END) AS abnormal
        FROM matrix_packages mp
@@ -309,7 +318,11 @@ const MatrixPackage = {
       total: Number(countRows[0]?.total || 0),
       summary: {
         total: Number(summaryRows[0]?.total || 0),
+        pending_dev: Number(summaryRows[0]?.pending_dev || 0),
+        in_development: Number(summaryRows[0]?.in_development || 0),
         delivering: Number(summaryRows[0]?.delivering || 0),
+        in_review: Number(summaryRows[0]?.in_review || 0),
+        hot_standby: Number(summaryRows[0]?.hot_standby || 0),
         standby: Number(summaryRows[0]?.standby || 0),
         abnormal: Number(summaryRows[0]?.abnormal || 0),
       },

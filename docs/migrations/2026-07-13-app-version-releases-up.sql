@@ -1,0 +1,33 @@
+SET NAMES utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `app_version_releases` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `matrix_package_id` BIGINT UNSIGNED NULL COMMENT '关联矩阵包ID',
+  `release_type` VARCHAR(50) NOT NULL DEFAULT 'FIRST_RELEASE' COMMENT '发版类型',
+  `release_status` VARCHAR(50) NOT NULL DEFAULT 'PENDING_PLAN' COMMENT '发版进度',
+  `urgency_code` VARCHAR(20) NOT NULL DEFAULT 'P1' COMMENT '紧急程度',
+  `app_version` VARCHAR(80) NULL COMMENT 'APP版本号',
+  `app_name` VARCHAR(160) NULL COMMENT 'APP名称',
+  `app_developer` VARCHAR(160) NULL COMMENT 'APP开发者',
+  `app_company_subject` VARCHAR(160) NULL COMMENT 'APP公司主体',
+  `app_console_url` VARCHAR(1000) NULL COMMENT 'APP后台地址',
+  `app_id` VARCHAR(120) NULL COMMENT '包ID/应用ID',
+  `domain_info` VARCHAR(255) NULL COMMENT '域名',
+  `expected_submit_at` DATETIME NULL COMMENT '送审预期',
+  `submitted_at` DATETIME NULL COMMENT '送审日期',
+  `listed_at` DATETIME NULL COMMENT '上架日期',
+  `owner_user_id` BIGINT UNSIGNED NULL COMMENT '发版负责人用户ID',
+  `owner_name` VARCHAR(80) NULL COMMENT '发版负责人展示名',
+  `remark` VARCHAR(1000) NULL COMMENT '备注',
+  `created_by` BIGINT UNSIGNED NULL,
+  `updated_by` BIGINT UNSIGNED NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` DATETIME NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_app_version_release_matrix_package` (`matrix_package_id`),
+  KEY `idx_app_version_release_status` (`release_status`),
+  KEY `idx_app_version_release_type` (`release_type`),
+  KEY `idx_app_version_release_submit` (`expected_submit_at`),
+  KEY `idx_app_version_release_listed` (`listed_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
