@@ -124,6 +124,10 @@ function buildMatrixPackageProductionDetailUrlFromEventData(eventData = {}) {
   return buildPortalUrl(`/matrix-package-special/cold-standby-production/${encodeURIComponent(String(packageId))}`)
 }
 
+function buildMatrixPackageSpecialUrl() {
+  return buildPortalUrl('/matrix-package-special')
+}
+
 function buildWorklogPageUrlFromEventData(eventData = {}) {
   const query = {}
   const demandId = normalizeDemandId(eventData?.demand_id)
@@ -172,6 +176,10 @@ function buildActionMetaByEventType(eventType, eventData = {}) {
     'matrix_package_side_info_deadline',
   ])
 
+  const viewMatrixPackageSpecialEvents = new Set([
+    'matrix_package_inventory_low',
+  ])
+
   if (goFillReportEvents.has(normalizedEventType)) {
     const url =
       normalizedEventType === 'demand_score_assign'
@@ -189,6 +197,11 @@ function buildActionMetaByEventType(eventType, eventData = {}) {
   if (viewMatrixPackageDetailEvents.has(normalizedEventType)) {
     const url = buildMatrixPackageProductionDetailUrlFromEventData(eventData)
     return url ? { detail_url: url, detail_action_text: '生产详情' } : null
+  }
+
+  if (viewMatrixPackageSpecialEvents.has(normalizedEventType)) {
+    const url = buildMatrixPackageSpecialUrl()
+    return url ? { detail_url: url, detail_action_text: '查看全景图' } : null
   }
 
   return null

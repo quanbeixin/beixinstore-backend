@@ -31,6 +31,12 @@ const SCENE_DEFINITIONS = Object.freeze([
     description: '按设定时间扫描，在统一截止时间前提醒未完成各侧信息 check 的对应负责人。',
     type: 'SIDE_DEADLINE',
   },
+  {
+    code: 'matrix_package_inventory_low',
+    name: '库存低水位提醒',
+    description: '当冷备包或热备包数量低于配置准线时，通知固定飞书群。',
+    type: 'INVENTORY_LOW',
+  },
 ])
 
 const SCENE_CODE_SET = new Set(SCENE_DEFINITIONS.map((item) => item.code))
@@ -131,6 +137,26 @@ function normalizeReminderConfig(input = {}) {
   }
 }
 
+function normalizeInventoryConfig(input = {}) {
+  const inventoryType = String(input.inventory_type || input.inventoryType || '')
+    .trim()
+    .toUpperCase() === 'HOT_STANDBY'
+    ? 'HOT_STANDBY'
+    : 'COLD_STANDBY'
+  const threshold = Math.max(1, Number.parseInt(input.threshold_count ?? input.thresholdCount, 10) || 1)
+  return {
+    inventory_type: inventoryType,
+    threshold_count: threshold,
+  }
+}
+
+function getInventoryTypeName(inventoryType) {
+  const normalized = String(inventoryType || '').trim().toUpperCase()
+  if (normalized === 'HOT_STANDBY') return '热备包'
+  if (normalized === 'COLD_STANDBY') return '冷备包'
+  return normalized || '-'
+}
+
 function buildRuleCode(sceneCode) {
   const scene = String(sceneCode || '')
     .trim()
@@ -152,7 +178,7 @@ function buildDefaultTemplate(sceneCode) {
         '当前状态：${to_status_name}',
         '负责人：${owner_name}',
         '开发者账号：${developer_account_name}',
-        '预计冷备完成时间：${expected_cold_ready_date}',
+        '${status_date_label}：${status_date}',
         '域名：${domain_info}',
         '包ID：${app_id}',
       ].join('\n'),
@@ -189,6 +215,20 @@ function buildDefaultTemplate(sceneCode) {
         '距离截止：${deadline_distance_text}',
         '域名：${domain_info}',
         '包ID：${app_id}',
+      ].join('\n'),
+    }
+  }
+
+  if (type === 'INVENTORY_LOW') {
+    return {
+      title: '矩阵包库存低水位提醒',
+      content: [
+        '**${rule_name}**',
+        '库存类型：${inventory_type_name}',
+        '当前数量：${current_count}',
+        '低库存准线：${threshold_count}',
+        '状态变化：${changed_package_name}（${from_status_name} -> ${to_status_name}）',
+        '请关注补充计划。',
       ].join('\n'),
     }
   }
@@ -259,6 +299,24 @@ function buildConditionConfig(payload = {}) {
     }
   }
 
+  if (sceneType === 'INVENTORY_LOW') {
+    const inventory = normalizeInventoryConfig(payload.inventory || payload)
+    return {
+      trigger_mode: 'event',
+      field_condition: {
+        logic: 'and',
+        items: [
+          { field: 'inventory_type', operator: 'eq', value: inventory.inventory_type },
+          { field: 'current_count', operator: 'lt', value: inventory.threshold_count },
+        ],
+      },
+      matrix_package: {
+        reminder_kind: 'inventory_low',
+        ...inventory,
+      },
+    }
+  }
+
   return {
     trigger_mode: 'schedule',
     schedule,
@@ -308,6 +366,12 @@ function parseManagedConditionConfig(sceneCode, conditionConfig) {
     }
   }
 
+  if (sceneType === 'INVENTORY_LOW') {
+    return {
+      inventory: normalizeInventoryConfig(cfg?.matrix_package || {}),
+    }
+  }
+
   return {
     schedule,
   }
@@ -338,6 +402,11 @@ function buildTriggerSummary(sceneCode, parsedCondition, statusNameMap = new Map
     const reminder = parsedCondition?.reminder || {}
     const unitText = reminder.offset_unit === 'day' ? '天' : '小时'
     return `每日 ${hh}:${mm} 扫描，提前 ${reminder.offset_value || 24}${unitText} 提醒未完成侧负责人`
+  }
+
+  if (sceneType === 'INVENTORY_LOW') {
+    const inventory = parsedCondition?.inventory || {}
+    return `${getInventoryTypeName(inventory.inventory_type)}数量 < ${inventory.threshold_count || 1} 时提醒`
   }
 
   return `每日 ${hh}:${mm} 扫描，命中逾期包提醒`
@@ -467,13 +536,37 @@ function mapManagedRule(row, receiverInfo, statusNameMap) {
     status_transitions: parsedCondition?.status_transitions || [],
     schedule: parsedCondition?.schedule || null,
     reminder: parsedCondition?.reminder || null,
+    inventory: parsedCondition?.inventory || null,
     is_enabled: Number(row.enabled) === 1 ? 1 : 0,
     created_at: row.created_at || null,
     updated_at: row.updated_at || null,
   }
 }
 
-function buildStatusChangeEventData(beforePackage, afterPackage) {
+async function getLatestListedAtByPackageId(packageId) {
+  const normalizedPackageId = toPositiveInt(packageId)
+  if (!normalizedPackageId) return ''
+  const [rows] = await pool.query(
+    `SELECT DATE_FORMAT(listed_at, '%Y-%m-%d %H:%i:%s') AS listed_at
+     FROM app_version_releases
+     WHERE matrix_package_id = ?
+       AND deleted_at IS NULL
+       AND listed_at IS NOT NULL
+     ORDER BY listed_at DESC, id DESC
+     LIMIT 1`,
+    [normalizedPackageId],
+  )
+  return rows?.[0]?.listed_at || ''
+}
+
+async function buildStatusChangeEventData(beforePackage, afterPackage) {
+  const toStatus = String(afterPackage?.status_code || '').trim().toUpperCase()
+  const listedAt = toStatus === 'HOT_STANDBY'
+    ? await getLatestListedAtByPackageId(afterPackage?.id)
+    : ''
+  const fallbackDate = String(afterPackage?.expected_cold_ready_date || '')
+  const statusDateLabel = toStatus === 'HOT_STANDBY' ? '审核通过日期' : '预计冷备完成时间'
+  const statusDate = toStatus === 'HOT_STANDBY' ? listedAt : fallbackDate
   return {
     package_id: Number(afterPackage?.id || 0) || null,
     package_name: String(afterPackage?.package_name || ''),
@@ -484,9 +577,12 @@ function buildStatusChangeEventData(beforePackage, afterPackage) {
     developer_account_id: Number(afterPackage?.developer_account_id || 0) || null,
     developer_account_name: String(afterPackage?.developer_account_name || ''),
     expected_cold_ready_date: String(afterPackage?.expected_cold_ready_date || ''),
+    review_passed_at: listedAt,
+    status_date_label: statusDateLabel,
+    status_date: statusDate,
     from_status: String(beforePackage?.status_code || '').trim().toUpperCase(),
     from_status_name: String(beforePackage?.status_name || beforePackage?.status_code || ''),
-    to_status: String(afterPackage?.status_code || '').trim().toUpperCase(),
+    to_status: toStatus,
     to_status_name: String(afterPackage?.status_name || afterPackage?.status_code || ''),
     status_name: String(afterPackage?.status_name || afterPackage?.status_code || ''),
   }
@@ -527,6 +623,106 @@ async function acquireTriggerCursor(ruleId, triggerKey, expireHours = 240) {
     [Number(ruleId), String(triggerKey), Math.max(1, toPositiveInt(expireHours, 240))],
   )
   return Number(result?.affectedRows || 0) > 0
+}
+
+async function countMatrixPackagesByStatus(statusCode, excludePackageId = null) {
+  const normalizedStatusCode = String(statusCode || '').trim().toUpperCase()
+  if (!normalizedStatusCode) return 0
+  const normalizedExcludePackageId = toPositiveInt(excludePackageId)
+  const params = [normalizedStatusCode]
+  let excludeSql = ''
+  if (normalizedExcludePackageId) {
+    excludeSql = ' AND id <> ?'
+    params.push(normalizedExcludePackageId)
+  }
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS total
+     FROM matrix_packages
+     WHERE deleted_at IS NULL
+       AND status_code = ?
+       ${excludeSql}`,
+    params,
+  )
+  return Number(rows?.[0]?.total || 0)
+}
+
+async function listEnabledInventoryLowRuleRows() {
+  const [rows] = await pool.query(
+    `SELECT
+       id,
+       rule_name,
+       trigger_condition_json,
+       enabled
+     FROM notification_rules
+     WHERE biz_domain = 'matrix_package'
+       AND event_type = 'matrix_package_inventory_low'
+       AND enabled = 1
+     ORDER BY id ASC`,
+  )
+  return rows || []
+}
+
+async function dispatchInventoryLowNotifications({ beforePackage, afterPackage, operatorUserId = null } = {}) {
+  const rules = await listEnabledInventoryLowRuleRows()
+  if (rules.length === 0) return
+
+  const beforeStatus = String(beforePackage?.status_code || '').trim().toUpperCase()
+  const afterStatus = String(afterPackage?.status_code || '').trim().toUpperCase()
+  if (!afterStatus || beforeStatus === afterStatus) return
+
+  const rulesByInventoryType = new Map()
+  for (const row of rules) {
+    const parsed = parseManagedConditionConfig('matrix_package_inventory_low', safeJsonParse(row.trigger_condition_json, null) || {})
+    const inventory = parsed.inventory || normalizeInventoryConfig({})
+    const list = rulesByInventoryType.get(inventory.inventory_type) || []
+    list.push({
+      id: Number(row.id),
+      rule_name: row.rule_name || '',
+      inventory_type: inventory.inventory_type,
+      threshold_count: inventory.threshold_count,
+    })
+    rulesByInventoryType.set(inventory.inventory_type, list)
+  }
+
+  for (const [inventoryType, inventoryRules] of rulesByInventoryType.entries()) {
+    if (inventoryRules.length === 0) continue
+    const changedPackageId = Number(afterPackage?.id || beforePackage?.id || 0) || null
+    const otherPackageCount = await countMatrixPackagesByStatus(inventoryType, changedPackageId)
+    const beforeMatched = beforeStatus === inventoryType ? 1 : 0
+    const afterMatched = afterStatus === inventoryType ? 1 : 0
+    if (beforeMatched === afterMatched) continue
+
+    const previousCount = otherPackageCount + beforeMatched
+    const currentCount = otherPackageCount + afterMatched
+    const inventoryTypeName = getInventoryTypeName(inventoryType)
+
+    for (const rule of inventoryRules) {
+      if (!(currentCount < rule.threshold_count)) continue
+
+      await NotificationEvent.processEvent({
+        eventType: 'matrix_package_inventory_low',
+        data: {
+          inventory_type: inventoryType,
+          inventory_type_name: inventoryTypeName,
+          current_count: currentCount,
+          previous_count: previousCount,
+          threshold_count: rule.threshold_count,
+          changed_package_id: changedPackageId,
+          changed_package_name: String(afterPackage?.package_name || beforePackage?.package_name || ''),
+          package_id: changedPackageId,
+          package_name: String(afterPackage?.package_name || beforePackage?.package_name || ''),
+          app_id: String(afterPackage?.app_id || beforePackage?.app_id || ''),
+          domain_info: String(afterPackage?.domain_info || beforePackage?.domain_info || ''),
+          from_status: beforeStatus,
+          from_status_name: String(beforePackage?.status_name || beforePackage?.status_code || ''),
+          to_status: afterStatus,
+          to_status_name: String(afterPackage?.status_name || afterPackage?.status_code || ''),
+        },
+        operatorUserId,
+        targetRuleIds: [rule.id],
+      })
+    }
+  }
 }
 
 async function listCandidateMatrixPackages() {
@@ -821,11 +1017,13 @@ const MatrixPackageNotificationService = {
     const afterStatus = String(afterPackage.status_code || '').trim().toUpperCase()
     if (!afterStatus || beforeStatus === afterStatus) return
 
+    const eventData = await buildStatusChangeEventData(beforePackage, afterPackage)
     await NotificationEvent.processEvent({
       eventType: 'matrix_package_status_change',
-      data: buildStatusChangeEventData(beforePackage, afterPackage),
+      data: eventData,
       operatorUserId,
     })
+    await dispatchInventoryLowNotifications({ beforePackage, afterPackage, operatorUserId })
   },
 
   async dispatchScheduledNotifications() {
