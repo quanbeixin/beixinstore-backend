@@ -10,8 +10,8 @@ const router = express.Router()
 
 router.use(authMiddleware)
 
-router.get('/', authMiddleware.requirePermission('demand.view'), listMatrixPackageReviewPlans)
-router.put('/:packageId', authMiddleware.requirePermission('demand.manage'), saveMatrixPackageReviewPlan)
-router.post('/:packageId/transition', authMiddleware.requirePermission('demand.manage'), transitionMatrixPackageReviewPlan)
+router.get('/', authMiddleware.requirePermission('matrix_package.view'), listMatrixPackageReviewPlans)
+router.put('/:packageId', authMiddleware.requirePermission('matrix_package.manage'), saveMatrixPackageReviewPlan)
+router.post('/:packageId/transition', authMiddleware.requirePermission('matrix_package.manage'), transitionMatrixPackageReviewPlan)
 
 module.exports = router

@@ -12,10 +12,10 @@ const router = express.Router()
 
 router.use(authMiddleware)
 
-router.get('/', authMiddleware.requirePermission('demand.view'), listDeveloperAccounts)
-router.get('/options', authMiddleware.requirePermission('demand.view'), listDeveloperAccountOptions)
-router.post('/', authMiddleware.requirePermission('demand.manage'), createDeveloperAccount)
-router.put('/:id', authMiddleware.requirePermission('demand.manage'), updateDeveloperAccount)
-router.delete('/:id', authMiddleware.requirePermission('demand.manage'), deleteDeveloperAccount)
+router.get('/', authMiddleware.requirePermission('matrix_package.view'), listDeveloperAccounts)
+router.get('/options', authMiddleware.requirePermission('matrix_package.view'), listDeveloperAccountOptions)
+router.post('/', authMiddleware.requirePermission('matrix_package.manage'), createDeveloperAccount)
+router.put('/:id', authMiddleware.requirePermission('matrix_package.manage'), updateDeveloperAccount)
+router.delete('/:id', authMiddleware.requirePermission('matrix_package.manage'), deleteDeveloperAccount)
 
 module.exports = router

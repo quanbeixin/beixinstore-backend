@@ -261,6 +261,8 @@ curl \
 
 | 字段 | description |
 |------|-------------|
+| `appVersion` | APP版本号 |
+| `appConsoleUrl` | APP后台地址 |
 | `prodSha1Fingerprint` | 生产环境sha1指纹 |
 | `prodSha256Fingerprint` | 生产环境sha256指纹 |
 | `testSha1Fingerprint` | 测试环境sha1指纹 |

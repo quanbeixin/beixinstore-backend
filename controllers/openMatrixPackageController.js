@@ -51,6 +51,8 @@ const FIELD_DEFINITIONS = {
     { name: 'productFiveImagesZipPackage', description: '商品5图的压缩包' },
   ],
   FRONTEND: [
+    { name: 'appVersion', description: 'APP版本号' },
+    { name: 'appConsoleUrl', description: 'APP后台地址' },
     { name: 'prodSha1Fingerprint', description: '生产环境sha1指纹' },
     { name: 'prodSha256Fingerprint', description: '生产环境sha256指纹' },
     { name: 'testSha1Fingerprint', description: '测试环境sha1指纹' },

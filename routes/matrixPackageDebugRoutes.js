@@ -6,6 +6,6 @@ const router = express.Router()
 
 router.use(authMiddleware)
 
-router.post('/request', authMiddleware.requirePermission('demand.manage'), proxyDebugRequest)
+router.post('/request', authMiddleware.requirePermission('matrix_package.manage'), proxyDebugRequest)
 
 module.exports = router

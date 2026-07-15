@@ -81,13 +81,13 @@
 - work: 需求、日志、工作台、流程、洞察、模板、归档
 - bug: 缺陷管理（挂在 work 路由域）
 - config/options: 字典与系统配置
-- matrix-packages: 矩阵包全景图，维护矩阵包基础信息、包状态与投放健康度
+- matrix-packages: 矩阵包专项，维护矩阵包基础信息、包状态、生产详情、送审排期、开发者账号与专项通知配置
 
 前端按页面与模块划分为:
 - 系统管理: 用户、部门、角色、权限、菜单、字典
 - 项目管理: 需求池、模板、流程、通知配置、归档
 - 工作台: 个人工作台、Owner 工作台、晨会看板
-- 专项入口: 矩阵包专项（一级菜单分组），下设矩阵包全景图；查看权限沿用 `demand.view`，手动维护权限沿用 `demand.manage`，包状态与健康度来自字典中心。
+- 专项入口: 矩阵包专项（一级菜单分组），下设矩阵包全景图、冷备包生产线、送审排期、开发者账号管理、接口调试台、通知配置；查看权限使用 `matrix_package.view`，维护权限使用 `matrix_package.manage`，通知配置使用 `matrix_package.notification.manage`。
 - 洞察分析: 部门/成员/需求效率看板
 - Bug 管理
 
@@ -100,6 +100,10 @@
 - `/api/rbac`
 - `/api/work`
 - `/api/matrix-packages`
+- `/api/matrix-package-review-plans`
+- `/api/developer-accounts`
+- `/api/matrix-package-debug`
+- `/api/matrix-package-notifications`
 
 接口风格:
 - REST 为主
@@ -163,6 +167,11 @@
 
 作用:
 - 在 RBAC 之外增加菜单级可见范围控制（角色/部门等）。
+
+矩阵包专项菜单同时受 RBAC 和菜单可见性控制:
+- RBAC 权限码控制页面访问与接口调用: `matrix_package.view` / `matrix_package.manage` / `matrix_package.notification.manage`
+- 菜单可见性规则控制具体菜单项对角色或部门是否展示
+- 一级分组由可见子菜单聚合生成，所有子菜单不可见时分组自动隐藏
 
 ### B.5 权限演进与兼容
 
