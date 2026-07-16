@@ -266,6 +266,10 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
     }),
     expected_cold_ready_date: field('统一截止时间', row.expected_cold_ready_date || null),
     owner_name: field('矩阵包负责人', row.owner_display_name || row.owner_name || ''),
+    linked_demand: field('关联项目管理需求', {
+      demand_id: field('需求ID', row.linked_demand_id || ''),
+      demand_name: field('需求名称', row.linked_demand_name || ''),
+    }),
     developer_account: field('开发者账号', {
       company_name: field('公司主体', row.developer_company_name || ''),
       company_english_name: field('主体英文名称', parseCompanyEnglishName(row.developer_company_extra_json)),
@@ -320,6 +324,8 @@ async function listOpenMatrixPackages(req, res) {
          healthDict.item_name AS health_name,
          DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d %H:%i:%s') AS expected_cold_ready_date,
          mp.owner_name,
+         mp.linked_demand_id,
+         linkedDemand.name AS linked_demand_name,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
          da.company_name AS developer_company_name,
          companyDict.extra_json AS developer_company_extra_json,
@@ -332,6 +338,8 @@ async function listOpenMatrixPackages(req, res) {
        FROM matrix_packages mp
        LEFT JOIN users ownerUser
          ON ownerUser.id = mp.owner_user_id
+       LEFT JOIN work_demands linkedDemand
+         ON linkedDemand.id = mp.linked_demand_id
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL

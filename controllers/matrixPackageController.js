@@ -3,6 +3,7 @@ const AppVersionRelease = require('../models/AppVersionRelease')
 const MatrixPackageProductionNode = require('../models/MatrixPackageProductionNode')
 const MatrixPackageSideNote = require('../models/MatrixPackageSideNote')
 const MatrixPackageNotificationService = require('../services/matrixPackageNotificationService')
+const MatrixPackageDemandService = require('../services/matrixPackageDemandService')
 const { sendNotification } = require('../utils/notificationSender')
 const {
   buildOssObjectKey,
@@ -358,7 +359,11 @@ async function getMatrixPackage(req, res) {
 
 async function createMatrixPackage(req, res) {
   try {
-    const data = await MatrixPackage.create(req.body || {}, req.user?.id)
+    let data = await MatrixPackage.create(req.body || {}, req.user?.id)
+    if (MatrixPackageDemandService.shouldEnsureDemand(data)) {
+      await MatrixPackageDemandService.ensureProductionDemand(data, req.user?.id || null)
+      data = await MatrixPackage.getById(data.id)
+    }
     return res.status(201).json({ success: true, message: '矩阵包已新增', data })
   } catch (error) {
     return handleError(res, error, '新增矩阵包失败')
@@ -372,12 +377,16 @@ async function updateMatrixPackage(req, res) {
       return res.status(404).json({ success: false, message: '矩阵包不存在' })
     }
 
-    const data = await MatrixPackage.update(req.params.id, req.body || {}, req.user?.id)
+    let data = await MatrixPackage.update(req.params.id, req.body || {}, req.user?.id)
     await MatrixPackageNotificationService.triggerStatusChangeNotifications({
       beforePackage,
       afterPackage: data,
       operatorUserId: req.user?.id || null,
     })
+    if (MatrixPackageDemandService.shouldEnsureDemand(data)) {
+      await MatrixPackageDemandService.ensureProductionDemand(data, req.user?.id || null)
+      data = await MatrixPackage.getById(data.id)
+    }
     return res.json({ success: true, message: '矩阵包已更新', data })
   } catch (error) {
     return handleError(res, error, '更新矩阵包失败')
@@ -406,12 +415,20 @@ async function completeMatrixPackageProduction(req, res) {
       latest_progress: beforePackage.latest_progress || '',
       production_checklist: beforePackage.production_checklist || [],
     }
-    const afterPackage = await MatrixPackage.update(req.params.id, packagePayload, req.user?.id)
+    let afterPackage = await MatrixPackage.update(req.params.id, packagePayload, req.user?.id)
     await MatrixPackageNotificationService.triggerStatusChangeNotifications({
       beforePackage,
       afterPackage,
       operatorUserId: req.user?.id || null,
     })
+    if (MatrixPackageDemandService.shouldEnsureDemand(afterPackage)) {
+      await MatrixPackageDemandService.ensureProductionDemand(afterPackage, req.user?.id || null)
+      afterPackage = await MatrixPackage.getById(afterPackage.id)
+    }
+    const demandWorkflowAdvance = await MatrixPackageDemandService.completeProductionStage(
+      afterPackage,
+      req.user?.id || null,
+    )
 
     const release = await AppVersionRelease.ensureFromMatrixPackage(req.params.id, req.user?.id)
 
@@ -421,6 +438,7 @@ async function completeMatrixPackageProduction(req, res) {
       data: {
         package: afterPackage,
         release,
+        demand_workflow_advance: demandWorkflowAdvance,
       },
     })
   } catch (error) {

@@ -80,6 +80,8 @@ function mapRow(row) {
     expected_cold_ready_date: row.expected_cold_ready_date || null,
     latest_progress: row.latest_progress || '',
     production_checklist: normalizeChecklist(row.production_checklist),
+    linked_demand_id: row.linked_demand_id || '',
+    linked_demand_name: row.linked_demand_name || '',
     side_note_confirmed_count: sideNoteConfirmedCount,
     side_note_total: COMPLETION_SIDE_NOTE_TOTAL,
     side_note_completion_percent: Math.round((sideNoteConfirmedCount / COMPLETION_SIDE_NOTE_TOTAL) * 100),
@@ -254,6 +256,8 @@ const MatrixPackage = {
          DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d') AS expected_cold_ready_date,
          mp.latest_progress,
          mp.production_checklist,
+         mp.linked_demand_id,
+         linkedDemand.name AS linked_demand_name,
          COALESCE(sideNoteStats.side_note_confirmed_count, 0) AS side_note_confirmed_count,
          mp.created_by,
          mp.updated_by,
@@ -265,6 +269,8 @@ const MatrixPackage = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN work_demands linkedDemand
+         ON linkedDemand.id = mp.linked_demand_id
        LEFT JOIN (
          SELECT
            package_id,
@@ -359,6 +365,8 @@ const MatrixPackage = {
          DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d') AS expected_cold_ready_date,
          mp.latest_progress,
          mp.production_checklist,
+         mp.linked_demand_id,
+         linkedDemand.name AS linked_demand_name,
          COALESCE(sideNoteStats.side_note_confirmed_count, 0) AS side_note_confirmed_count,
          mp.created_by,
          mp.updated_by,
@@ -370,6 +378,8 @@ const MatrixPackage = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN work_demands linkedDemand
+         ON linkedDemand.id = mp.linked_demand_id
        LEFT JOIN (
          SELECT
            package_id,

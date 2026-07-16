@@ -8,6 +8,7 @@
 
 - 矩阵包基础信息
 - 开发者账号信息
+- 关联项目管理需求信息
 - 各侧补充信息
 - 前置准备节点信息
 - 图片、zip、json 等附件的文件元信息与临时访问 URL
@@ -129,6 +130,19 @@ curl \
         "description": "域名信息",
         "value": "photora.lol"
       },
+      "linked_demand": {
+        "description": "关联项目管理需求",
+        "value": {
+          "demand_id": {
+            "description": "需求ID",
+            "value": "D202607160001"
+          },
+          "demand_name": {
+            "description": "需求名称",
+            "value": "【矩阵包生产】Photora（测试版本）"
+          }
+        }
+      },
       "side_notes": {
         "description": "各侧补充信息",
         "value": {}
@@ -173,13 +187,23 @@ curl \
 | `health` | 健康度 | 返回 `{ code, name }` |
 | `expected_cold_ready_date` | 统一截止时间 | 信息录入统一截止时间 |
 | `owner_name` | 矩阵包负责人 | 矩阵包总负责人 |
+| `linked_demand` | 关联项目管理需求 | 自动创建的项目管理需求信息 |
 | `developer_account` | 开发者账号 | 开发者账号信息 |
 | `side_notes` | 各侧补充信息 | 各侧配置内容 |
 | `production_nodes` | 前置准备 | 生产详情页前置准备模块 |
 | `created_at` | 创建时间 | 矩阵包创建时间 |
 | `updated_at` | 更新时间 | 矩阵包更新时间 |
 
-## 9. 开发者账号字段
+## 9. 关联需求字段
+
+`linked_demand.value` 结构：
+
+| 字段 | description | 说明 |
+|------|-------------|------|
+| `demand_id` | 需求ID | 项目管理需求 ID，未关联时为空字符串 |
+| `demand_name` | 需求名称 | 项目管理需求名称，未关联时为空字符串 |
+
+## 10. 开发者账号字段
 
 `developer_account.value` 结构：
 
@@ -191,7 +215,7 @@ curl \
 | `account_id` | 开发者账号ID | 开发者账号平台 ID |
 | `status` | 开发者账号状态 | 返回 `{ code, name }` |
 
-## 10. 各侧补充信息
+## 11. 各侧补充信息
 
 `side_notes.value` 按模块返回：
 
@@ -214,7 +238,7 @@ curl \
 | `updated_by_name` | string | 该模块最近更新人 |
 | `is_confirmed` | boolean | 该模块是否已确认完成 |
 
-### 10.1 PUSH 信息补充
+### 11.1 PUSH 信息补充
 
 | 字段 | description |
 |------|-------------|
@@ -227,7 +251,7 @@ curl \
 | `testAppSecret` | 测试环境个推APPSecret |
 | `testMasterSecret` | 测试环境个推MasterSecret |
 
-### 10.2 运营侧补充
+### 11.2 运营侧补充
 
 | 字段 | description |
 |------|-------------|
@@ -245,7 +269,7 @@ curl \
 | `shortDescription` | 简短说明 |
 | `fullDescription` | 完整说明 |
 
-### 10.3 设计侧补充
+### 11.3 设计侧补充
 
 | 字段 | description | 类型 |
 |------|-------------|------|
@@ -257,7 +281,7 @@ curl \
 | `tokenDocUrl` | TOKEN文档 | 附件 |
 | `productFiveImagesZipPackage` | 商品5图的压缩包 | 附件 |
 
-### 10.4 前端补充
+### 11.4 前端补充
 
 | 字段 | description |
 |------|-------------|
@@ -268,7 +292,7 @@ curl \
 | `testSha1Fingerprint` | 测试环境sha1指纹 |
 | `testSha256Fingerprint` | 测试环境sha256指纹 |
 
-### 10.5 运维补充
+### 11.5 运维补充
 
 | 字段 | description | 类型 |
 |------|-------------|------|
@@ -280,7 +304,7 @@ curl \
 | `pushFcmFile` | push-fcm文件 | 附件 |
 | `googleServiceJsonFile` | google-service.json文件 | 附件 |
 
-## 11. 附件字段格式
+## 12. 附件字段格式
 
 图片、zip、json 等上传文件不会直接返回文件内容，而是返回文件信息和临时访问 URL。
 
@@ -317,7 +341,7 @@ curl \
 - 外部系统如需长期保存文件，请在 URL 有效期内下载并转存。
 - 如果附件不存在，字段 `value` 通常为空字符串或附件元信息为空。
 
-## 12. 前置准备字段
+## 13. 前置准备字段
 
 `production_nodes.value` 是数组，目前包含：
 
@@ -382,7 +406,7 @@ curl \
 | `COMPLETED` | 已完成 |
 | `BLOCKED` | 阻塞 |
 
-## 13. 错误响应
+## 14. 错误响应
 
 ### token 未配置
 
@@ -417,7 +441,7 @@ HTTP 状态码：`500`
 }
 ```
 
-## 14. 对接建议
+## 15. 对接建议
 
 - 外部调用方建议优先使用 `x-open-api-token` 请求头传 token，避免 token 出现在日志 URL 中。
 - 如果只需要单个矩阵包，优先传 `app_id`，因为包 ID 更稳定。
