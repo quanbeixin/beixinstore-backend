@@ -38,12 +38,20 @@ http://localhost:3000/api/open/matrix-packages
 ```env
 MATRIX_PACKAGE_OPEN_API_TOKEN=<your-open-api-token>
 MATRIX_PACKAGE_OPEN_API_SIGN_EXPIRE_SECONDS=300
+MATRIX_PACKAGE_OPEN_API_CORS_ORIGINS=*
 ```
 
 | 环境变量 | 必填 | 说明 |
 |----------|:----:|------|
 | `MATRIX_PACKAGE_OPEN_API_TOKEN` | 是 | 外部接口固定访问 token |
 | `MATRIX_PACKAGE_OPEN_API_SIGN_EXPIRE_SECONDS` | 否 | 附件签名 URL 有效期，单位秒，默认 `300` |
+| `MATRIX_PACKAGE_OPEN_API_CORS_ORIGINS` | 否 | 开放接口允许跨域访问的来源，多个用英文逗号分隔，默认 `*` |
+
+跨域说明：
+
+- `/api/open/*` 使用独立 CORS 配置，不影响后台管理接口。
+- 默认允许任意来源跨域读取开放接口，但不会允许 cookie 凭证。
+- 如需限制到固定系统，配置示例：`MATRIX_PACKAGE_OPEN_API_CORS_ORIGINS=https://team-a.example.com,https://team-b.example.com`。
 
 ## 4. 鉴权方式
 

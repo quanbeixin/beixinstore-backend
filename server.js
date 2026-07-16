@@ -62,6 +62,15 @@ const allowedOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:5173')
   .map((origin) => origin.trim())
   .filter(Boolean)
 
+const openApiAllowedOrigins = (
+  process.env.MATRIX_PACKAGE_OPEN_API_CORS_ORIGINS ||
+  process.env.OPEN_API_CORS_ORIGINS ||
+  '*'
+)
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean)
+
 const corsOptions = {
   origin: (origin, callback) => {
     // Allow non-browser clients (curl/postman/server-to-server)
@@ -81,12 +90,35 @@ const corsOptions = {
   credentials: true,
 }
 
+const openApiCorsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) {
+      callback(null, true)
+      return
+    }
+
+    if (openApiAllowedOrigins.includes('*') || openApiAllowedOrigins.includes(origin)) {
+      callback(null, true)
+      return
+    }
+
+    console.warn(`[OPEN_API_CORS] Blocked origin: ${origin}`)
+    callback(null, false)
+  },
+  credentials: false,
+  methods: ['GET', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'X-Open-API-Token', 'Authorization'],
+  maxAge: 600,
+}
+
 // 安全中间件
 app.use(helmet({
   contentSecurityPolicy: false, // 如果需要可以自定义CSP策略
   crossOriginEmbedderPolicy: false,
 }))
 app.use(cookieParser())
+app.use('/api/open', cors(openApiCorsOptions))
+app.options('/api/open/*', cors(openApiCorsOptions))
 app.use(cors(corsOptions))
 app.options('*', cors(corsOptions))
 app.use(express.json({ limit: '10mb' }))
