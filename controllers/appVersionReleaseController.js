@@ -1,4 +1,5 @@
 const AppVersionRelease = require('../models/AppVersionRelease')
+const AppVersionReleaseNotificationService = require('../services/appVersionReleaseNotificationService')
 
 function handleError(res, error, fallbackMessage) {
   const statusCode = Number(error?.statusCode || 500)
@@ -39,6 +40,11 @@ async function updateAppVersionRelease(req, res) {
 async function createAppVersionReleaseApplications(req, res) {
   try {
     const data = await AppVersionRelease.createApplications(req.body || {}, req.user?.id)
+    try {
+      await AppVersionReleaseNotificationService.notifyApplicationCreated(data)
+    } catch (notifyError) {
+      console.error('发送APP版本发布申请通知失败', notifyError)
+    }
     return res.status(201).json({
       success: true,
       message: `已创建 ${data.length} 条版本发布申请`,
