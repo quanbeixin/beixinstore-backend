@@ -9,6 +9,8 @@ const RELEASE_STATUS_OPTIONS = [
   { code: 'QUEUED', name: '排队中', color: 'geekblue', sort: 20 },
   { code: 'IN_REVIEW', name: '审核中', color: 'gold', sort: 30 },
   { code: 'LISTED', name: '已上架', color: 'lime', sort: 40 },
+  { code: 'REJECTED', name: '被拒审', color: 'red', sort: 50 },
+  { code: 'CANCELLED', name: '取消', color: 'default', sort: 60 },
 ]
 
 const RELEASE_TYPE_OPTIONS = [
@@ -29,6 +31,7 @@ const URGENCY_MAP = new Map(URGENCY_OPTIONS.map((item) => [item.code, item]))
 const RELEASE_STATUS_TO_REVIEW_STAGE_MAP = new Map([
   ['LISTED', 'HOT_STANDBY'],
 ])
+const DEFAULT_RELEASE_OWNER_NAME = '赵佳颖'
 
 function toPositiveInt(value) {
   const numeric = Number.parseInt(value, 10)
@@ -48,6 +51,7 @@ function normalizeOptionalCode(value) {
 function normalizeOptionalDateTime(value) {
   const text = String(value || '').trim()
   if (!text) return null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return `${text} 00:00:00`
   if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}$/.test(text)) return text
   if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$/.test(text)) return `${text}:00`
   const err = new Error('datetime_invalid')
@@ -109,6 +113,7 @@ function mapRow(row) {
     app_developer: row.app_developer || '',
     app_company_subject: row.app_company_subject || '',
     app_console_url: row.app_console_url || '',
+    previous_release_info: row.previous_release_info || '',
     app_id: row.app_id || '',
     domain_info: row.domain_info || '',
     related_demand_id: row.related_demand_id || '',
@@ -219,9 +224,9 @@ async function getByMatrixPackageId(packageId) {
   const [rows] = await pool.query(
     `SELECT
        avr.*,
-       DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d %H:%i:%s') AS expected_submit_at,
-       DATE_FORMAT(avr.submitted_at, '%Y-%m-%d %H:%i:%s') AS submitted_at,
-       DATE_FORMAT(avr.listed_at, '%Y-%m-%d %H:%i:%s') AS listed_at,
+       DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d') AS expected_submit_at,
+       DATE_FORMAT(avr.submitted_at, '%Y-%m-%d') AS submitted_at,
+       DATE_FORMAT(avr.listed_at, '%Y-%m-%d') AS listed_at,
        DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
        DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
        COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name
@@ -273,6 +278,29 @@ async function resolveUserInfo(userId) {
   return {
     id: Number(user.id),
     name: normalizeText(user.real_name || user.username, 80),
+  }
+}
+
+async function resolveDefaultReleaseOwnerInfo(fallback = {}) {
+  const [rows] = await pool.query(
+    `SELECT id, username, COALESCE(real_name, '') AS real_name
+     FROM users
+     WHERE COALESCE(status_code, 'ACTIVE') = 'ACTIVE'
+       AND (real_name = ? OR username = ?)
+     ORDER BY id ASC
+     LIMIT 1`,
+    [DEFAULT_RELEASE_OWNER_NAME, DEFAULT_RELEASE_OWNER_NAME],
+  )
+  const user = rows[0]
+  if (user) {
+    return {
+      id: Number(user.id),
+      name: normalizeText(user.real_name || user.username, 80),
+    }
+  }
+  return {
+    id: toPositiveInt(fallback.owner_user_id) || null,
+    name: normalizeText(fallback.owner_name, 80),
   }
 }
 
@@ -366,7 +394,7 @@ async function findBlockingReleasesByPackageIds(packageIds = []) {
      LEFT JOIN matrix_packages mp
        ON mp.id = avr.matrix_package_id
      WHERE avr.deleted_at IS NULL
-       AND avr.release_status <> 'LISTED'
+       AND avr.release_status NOT IN ('LISTED', 'REJECTED', 'CANCELLED')
        AND avr.matrix_package_id IN (?)
      ORDER BY avr.id DESC`,
     [normalizedIds],
@@ -382,6 +410,22 @@ async function findBlockingReleasesByPackageIds(packageIds = []) {
     release_status: row.release_status || '',
     release_status_name: RELEASE_STATUS_MAP.get(row.release_status || '')?.name || row.release_status || '',
   }))
+}
+
+function createGroupNode(key, rowType, groupName, extra = {}) {
+  return {
+    key,
+    row_type: rowType,
+    group_name: groupName,
+    release_count: 0,
+    children: [],
+    ...extra,
+  }
+}
+
+function incrementGroupCount(node) {
+  if (!node) return
+  node.release_count = Number(node.release_count || 0) + 1
 }
 
 const AppVersionRelease = {
@@ -405,10 +449,10 @@ const AppVersionRelease = {
     const [rows] = await pool.query(
       `SELECT
          avr.*,
-         DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d %H:%i:%s') AS expected_submit_at,
-         DATE_FORMAT(avr.submitted_at, '%Y-%m-%d %H:%i:%s') AS submitted_at,
-         DATE_FORMAT(avr.listed_at, '%Y-%m-%d %H:%i:%s') AS listed_at,
-         DATE_FORMAT(avr.requested_at, '%Y-%m-%d %H:%i:%s') AS requested_at,
+         DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d') AS expected_submit_at,
+         DATE_FORMAT(avr.submitted_at, '%Y-%m-%d') AS submitted_at,
+         DATE_FORMAT(avr.listed_at, '%Y-%m-%d') AS listed_at,
+         DATE_FORMAT(avr.requested_at, '%Y-%m-%d') AS requested_at,
          DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
          COALESCE(NULLIF(applicantUser.real_name, ''), applicantUser.username) AS applicant_display_name,
@@ -420,14 +464,7 @@ const AppVersionRelease = {
          ON ownerUser.id = avr.owner_user_id
        WHERE ${whereSql}
        ORDER BY
-         CASE avr.release_status
-           WHEN 'PENDING_PLAN' THEN 1
-           WHEN 'QUEUED' THEN 2
-           WHEN 'IN_REVIEW' THEN 3
-           WHEN 'LISTED' THEN 4
-           ELSE 9
-         END ASC,
-         avr.updated_at DESC,
+         avr.created_at DESC,
          avr.id DESC
        LIMIT ? OFFSET ?`,
       [...params, pageSize, offset],
@@ -444,6 +481,114 @@ const AppVersionRelease = {
     }
   },
 
+  async listGrouped(filters = {}) {
+    const { whereSql, params } = buildWhere(filters)
+    const [rows] = await pool.query(
+      `SELECT
+         avr.*,
+         DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d') AS expected_submit_at,
+         DATE_FORMAT(avr.submitted_at, '%Y-%m-%d') AS submitted_at,
+         DATE_FORMAT(avr.listed_at, '%Y-%m-%d') AS listed_at,
+         DATE_FORMAT(avr.requested_at, '%Y-%m-%d') AS requested_at,
+         DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+         COALESCE(NULLIF(applicantUser.real_name, ''), applicantUser.username) AS applicant_display_name,
+         COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name
+       FROM app_version_releases avr
+       LEFT JOIN users applicantUser
+         ON applicantUser.id = avr.applicant_user_id
+       LEFT JOIN users ownerUser
+         ON ownerUser.id = avr.owner_user_id
+       WHERE ${whereSql}
+       ORDER BY
+         COALESCE(NULLIF(avr.app_developer, ''), '未设置') ASC,
+         COALESCE(NULLIF(avr.app_company_subject, ''), '未设置') ASC,
+         COALESCE(NULLIF(avr.app_name, ''), '未设置') ASC,
+         avr.created_at DESC,
+         avr.id DESC`,
+      params,
+    )
+
+    const developerMap = new Map()
+    const appKeySet = new Set()
+    const statusKeySet = new Set()
+
+    rows.map(mapRow).filter(Boolean).forEach((release) => {
+      const developerName = normalizeText(release.app_developer, 160) || '未设置开发者'
+      const companySubject = normalizeText(release.app_company_subject, 160)
+      const developerKey = `${developerName}::${companySubject}`
+      if (!developerMap.has(developerKey)) {
+        developerMap.set(developerKey, createGroupNode(`developer:${developerKey}`, 'developer', developerName, {
+          app_developer: developerName,
+          app_company_subject: companySubject,
+          __appMap: new Map(),
+        }))
+      }
+
+      const developerNode = developerMap.get(developerKey)
+      incrementGroupCount(developerNode)
+
+      const appName = normalizeText(release.app_name, 160) || '未设置APP'
+      const appIdentity = normalizeText(release.app_id, 120) || normalizeText(release.domain_info, 255) || String(release.matrix_package_id || appName)
+      const appKey = `${developerKey}::${appIdentity}`
+      appKeySet.add(appKey)
+      if (!developerNode.__appMap.has(appKey)) {
+        developerNode.__appMap.set(appKey, createGroupNode(`app:${appKey}`, 'app', appName, {
+          app_name: appName,
+          app_id: release.app_id || '',
+          domain_info: release.domain_info || '',
+          matrix_package_id: release.matrix_package_id || null,
+          __statusMap: new Map(),
+        }))
+        developerNode.children.push(developerNode.__appMap.get(appKey))
+      }
+
+      const appNode = developerNode.__appMap.get(appKey)
+      incrementGroupCount(appNode)
+
+      const statusCode = release.release_status || 'UNKNOWN'
+      const statusKey = `${appKey}::${statusCode}`
+      statusKeySet.add(statusKey)
+      if (!appNode.__statusMap.has(statusKey)) {
+        appNode.__statusMap.set(statusKey, createGroupNode(`status:${statusKey}`, 'status', release.release_status_name || statusCode, {
+          release_status: statusCode,
+          release_status_name: release.release_status_name || statusCode,
+          release_status_color: release.release_status_color || 'default',
+        }))
+        appNode.children.push(appNode.__statusMap.get(statusKey))
+      }
+
+      const statusNode = appNode.__statusMap.get(statusKey)
+      incrementGroupCount(statusNode)
+      statusNode.children.push({
+        ...release,
+        key: `release:${release.id}`,
+        row_type: 'release',
+        group_name: release.release_request_no || release.app_version || `记录 ${release.id}`,
+        release_count: 1,
+      })
+    })
+
+    const stripInternalMaps = (node) => {
+      const { __appMap, __statusMap, ...rest } = node
+      return {
+        ...rest,
+        children: Array.isArray(rest.children) ? rest.children.map(stripInternalMaps) : [],
+      }
+    }
+
+    return {
+      tree: Array.from(developerMap.values()).map(stripInternalMaps),
+      total: rows.length,
+      developer_count: developerMap.size,
+      app_count: appKeySet.size,
+      status_group_count: statusKeySet.size,
+      release_status_options: RELEASE_STATUS_OPTIONS,
+      release_type_options: RELEASE_TYPE_OPTIONS,
+      urgency_options: URGENCY_OPTIONS,
+    }
+  },
+
   getByMatrixPackageId,
 
   async getById(id) {
@@ -452,10 +597,10 @@ const AppVersionRelease = {
     const [rows] = await pool.query(
       `SELECT
          avr.*,
-         DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d %H:%i:%s') AS expected_submit_at,
-         DATE_FORMAT(avr.submitted_at, '%Y-%m-%d %H:%i:%s') AS submitted_at,
-         DATE_FORMAT(avr.listed_at, '%Y-%m-%d %H:%i:%s') AS listed_at,
-         DATE_FORMAT(avr.requested_at, '%Y-%m-%d %H:%i:%s') AS requested_at,
+         DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d') AS expected_submit_at,
+         DATE_FORMAT(avr.submitted_at, '%Y-%m-%d') AS submitted_at,
+         DATE_FORMAT(avr.listed_at, '%Y-%m-%d') AS listed_at,
+         DATE_FORMAT(avr.requested_at, '%Y-%m-%d') AS requested_at,
          DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
          COALESCE(NULLIF(applicantUser.real_name, ''), applicantUser.username) AS applicant_display_name,
@@ -512,6 +657,12 @@ const AppVersionRelease = {
     const listedAt = Object.prototype.hasOwnProperty.call(payload, 'listed_at')
       ? normalizeOptionalDateTime(payload.listed_at)
       : existing.listed_at
+    const owner = Object.prototype.hasOwnProperty.call(payload, 'owner_user_id')
+      ? await resolveUserInfo(payload.owner_user_id)
+      : { id: existing.owner_user_id || null, name: existing.owner_name || '' }
+    const previousReleaseInfo = Object.prototype.hasOwnProperty.call(payload, 'previous_release_info')
+      ? normalizeText(payload.previous_release_info, 255)
+      : existing.previous_release_info
     const remark = Object.prototype.hasOwnProperty.call(payload, 'remark')
       ? normalizeText(payload.remark, 1000)
       : existing.remark
@@ -524,6 +675,9 @@ const AppVersionRelease = {
            expected_submit_at = ?,
            submitted_at = ?,
            listed_at = ?,
+           owner_user_id = ?,
+           owner_name = ?,
+           previous_release_info = ?,
            remark = ?,
            updated_by = ?
        WHERE id = ? AND deleted_at IS NULL`,
@@ -534,6 +688,9 @@ const AppVersionRelease = {
         expectedSubmitAt || null,
         submittedAt || null,
         listedAt || null,
+        owner.id || null,
+        owner.name || null,
+        previousReleaseInfo || null,
         remark || null,
         userId || null,
         releaseId,
@@ -635,6 +792,7 @@ const AppVersionRelease = {
         ])
         const appName = normalizeText(operationContent.appName, 160) || normalizeText(packageDetail.package_name, 160)
         const appConsoleUrl = applicationItem.app_console_url || normalizeText(frontendContent.appConsoleUrl, 1000)
+        const releaseOwner = await resolveDefaultReleaseOwnerInfo(packageDetail)
 
         const [result] = await connection.query(
           `INSERT INTO app_version_releases
@@ -655,8 +813,8 @@ const AppVersionRelease = {
             relatedDemand.name || null,
             applicant.id,
             applicant.name || null,
-            packageDetail.owner_user_id || null,
-            normalizeText(packageDetail.owner_name, 80),
+            releaseOwner.id || null,
+            releaseOwner.name || null,
             applicationItem.expected_submit_at,
             remark || null,
             userId || null,
@@ -699,6 +857,7 @@ const AppVersionRelease = {
     const appName = normalizeText(operationContent.appName, 160) || normalizeText(packageDetail.package_name, 160)
     const appVersion = normalizeText(frontendContent.appVersion, 80)
     const appConsoleUrl = normalizeText(frontendContent.appConsoleUrl, 1000)
+    const releaseOwner = await resolveDefaultReleaseOwnerInfo(packageDetail)
 
     const [result] = await pool.query(
       `INSERT INTO app_version_releases
@@ -719,8 +878,8 @@ const AppVersionRelease = {
         normalizeText(packageDetail.domain_info, 255),
         applicant.id,
         applicant.name || null,
-        packageDetail.owner_user_id || null,
-        normalizeText(packageDetail.owner_name, 80),
+        releaseOwner.id || null,
+        releaseOwner.name || null,
         userId || null,
         userId || null,
       ],

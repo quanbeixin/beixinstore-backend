@@ -25,11 +25,29 @@ async function listAppVersionReleases(req, res) {
   }
 }
 
+async function listGroupedAppVersionReleases(req, res) {
+  try {
+    const data = await AppVersionRelease.listGrouped(req.query || {})
+    return res.json({ success: true, data })
+  } catch (error) {
+    return handleError(res, error, '获取APP版本发布分组列表失败')
+  }
+}
+
 async function updateAppVersionRelease(req, res) {
   try {
+    const beforeRelease = await AppVersionRelease.getById(req.params.id)
     const data = await AppVersionRelease.update(req.params.id, req.body || {}, req.user?.id)
     if (!data) {
       return res.status(404).json({ success: false, message: 'APP发版记录不存在' })
+    }
+    try {
+      await AppVersionReleaseNotificationService.notifyApplicantStatusChanged({
+        beforeRelease,
+        afterRelease: data,
+      })
+    } catch (notifyError) {
+      console.error('发送APP版本发布状态通知失败', notifyError)
     }
     return res.json({ success: true, message: 'APP发版记录已更新', data })
   } catch (error) {
@@ -69,6 +87,7 @@ async function deleteAppVersionRelease(req, res) {
 
 module.exports = {
   createAppVersionReleaseApplications,
+  listGroupedAppVersionReleases,
   listAppVersionReleases,
   updateAppVersionRelease,
   deleteAppVersionRelease,

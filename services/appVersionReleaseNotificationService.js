@@ -8,6 +8,7 @@ const APP_RELEASE_MANAGER_ROLE_KEYS = [
 ]
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 const APP_VERSION_RELEASE_PATH = '/app-version-release'
+const APPLICANT_NOTIFY_STATUS_CODES = new Set(['LISTED', 'REJECTED', 'CANCELLED'])
 
 function normalizeText(value, maxLength = 500) {
   return String(value || '').trim().slice(0, maxLength)
@@ -102,6 +103,21 @@ function buildNotificationContent(releases = []) {
   ].filter((line) => line !== '').join('\n')
 }
 
+function buildStatusChangeContent(release, previousStatusName = '') {
+  return [
+    `发版申请ID：${formatValue(release.release_request_no || release.id)}`,
+    `APP：${formatValue(release.app_name)}`,
+    `版本号：${formatValue(release.app_version)}`,
+    `当前状态：${formatValue(release.release_status_name || release.release_status)}`,
+    previousStatusName ? `原状态：${previousStatusName}` : '',
+    `发版负责人：${formatValue(release.owner_name)}`,
+    `包ID：${formatValue(release.app_id)}`,
+    `域名：${formatValue(release.domain_info)}`,
+    `备注：${formatValue(release.remark)}`,
+    `更新时间：${formatValue(release.updated_at)}`,
+  ].filter(Boolean).join('\n')
+}
+
 async function listAppReleaseManagers() {
   const [rows] = await pool.query(
     `SELECT DISTINCT
@@ -128,7 +144,38 @@ async function listAppReleaseManagers() {
   })).filter((row) => row.user_id > 0 && row.feishu_open_id)
 }
 
+async function getApplicantTarget(release) {
+  const userId = Number(release?.applicant_user_id || 0)
+  if (!Number.isInteger(userId) || userId <= 0) return null
+
+  const [rows] = await pool.query(
+    `SELECT
+       id,
+       COALESCE(NULLIF(real_name, ''), username) AS display_name,
+       feishu_open_id
+     FROM users
+     WHERE id = ?
+       AND COALESCE(status_code, 'ACTIVE') = 'ACTIVE'
+       AND COALESCE(NULLIF(feishu_open_id, ''), '') <> ''
+     LIMIT 1`,
+    [userId],
+  )
+  const row = rows[0]
+  if (!row?.feishu_open_id) return null
+
+  return {
+    target_type: 'user',
+    target_id: normalizeText(row.feishu_open_id, 128),
+    target_name: normalizeText(row.display_name, 80),
+    extra: {
+      user_id: Number(row.id),
+    },
+  }
+}
+
 const AppVersionReleaseNotificationService = {
+  APPLICANT_NOTIFY_STATUS_CODES: Array.from(APPLICANT_NOTIFY_STATUS_CODES),
+
   async notifyApplicationCreated(releases = []) {
     const normalizedReleases = Array.isArray(releases) ? releases.filter(Boolean) : []
     if (normalizedReleases.length === 0) {
@@ -164,6 +211,39 @@ const AppVersionReleaseNotificationService = {
       targets,
       metadata: {
         source: 'app_version_release_application_created',
+        detail_url: buildAppVersionReleaseUrl(),
+        detail_action_text: '查看APP版本发布',
+      },
+    })
+  },
+
+  async notifyApplicantStatusChanged({ beforeRelease, afterRelease } = {}) {
+    const beforeStatus = normalizeText(beforeRelease?.release_status, 64).toUpperCase()
+    const afterStatus = normalizeText(afterRelease?.release_status, 64).toUpperCase()
+    if (!afterStatus || beforeStatus === afterStatus || !APPLICANT_NOTIFY_STATUS_CODES.has(afterStatus)) {
+      return {
+        success: true,
+        skipped: true,
+        reason: 'STATUS_NOT_MATCHED',
+      }
+    }
+
+    const target = await getApplicantTarget(afterRelease)
+    if (!target) {
+      return {
+        success: true,
+        skipped: true,
+        reason: 'APPLICANT_FEISHU_NOT_FOUND',
+      }
+    }
+
+    return sendNotification({
+      channelType: 'feishu',
+      title: 'APP版本发布状态更新',
+      content: buildStatusChangeContent(afterRelease, beforeRelease?.release_status_name || beforeStatus),
+      targets: [target],
+      metadata: {
+        source: 'app_version_release_status_changed',
         detail_url: buildAppVersionReleaseUrl(),
         detail_action_text: '查看APP版本发布',
       },
