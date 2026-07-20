@@ -220,6 +220,11 @@ const BUSINESS_ROLE_RECEIVER_KEYS = new Set([
   'daily_report_unfilled',
   'daily_report_unscheduled',
 ])
+const MATRIX_PACKAGE_GROUP_EVENT_TYPES = new Set([
+  'matrix_package_upcoming_deadline',
+  'matrix_package_overdue_deadline',
+  'matrix_package_side_info_deadline',
+])
 
 function getValueByPath(obj, path) {
   if (!path) return undefined
@@ -733,6 +738,47 @@ async function resolveDemandBoundChatTargets(eventData) {
   }
 }
 
+async function resolveMatrixPackageProductionGroupTargets(eventData) {
+  const packageId = toNullableInt(eventData?.package_id || eventData?.matrix_package_id)
+  if (!packageId) return []
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT
+         mp.id AS package_id,
+         mp.linked_demand_id,
+         wd.name AS demand_name,
+         wd.group_chat_mode,
+         wd.group_chat_id
+       FROM matrix_packages mp
+       LEFT JOIN work_demands wd
+         ON wd.id = mp.linked_demand_id
+       WHERE mp.id = ?
+         AND mp.deleted_at IS NULL
+       LIMIT 1`,
+      [packageId],
+    )
+    const row = rows?.[0] || null
+    if (!row) return []
+    const demandId = normalizeDemandId(row.linked_demand_id)
+    const mode = normalizeText(row.group_chat_mode, 20).toLowerCase()
+    const chatId = normalizeText(row.group_chat_id, 128)
+    if (!demandId || (mode !== 'bind' && mode !== 'auto') || !chatId) return []
+
+    return [{
+      target_type: 'chat',
+      target_id: chatId,
+      target_name: normalizeText(row.demand_name, 128) || `矩阵包生产群(${demandId})`,
+      extra: {
+        demand_id: demandId,
+        matrix_package_id: packageId,
+      },
+    }]
+  } catch {
+    return []
+  }
+}
+
 async function resolveDemandOwnerUserIdByDemandId(demandId) {
   const normalizedDemandId = normalizeDemandId(demandId)
   if (!normalizedDemandId) return null
@@ -920,6 +966,11 @@ async function resolveTargetsFromRuleConfig(rule, eventData) {
   if (rule.receiver_type === 'demand_group' || config.use_demand_bound_chat === true) {
     const demandChatTargets = await resolveDemandBoundChatTargets(eventData)
     chatIds.push(...demandChatTargets.map((item) => item.target_id))
+  }
+
+  if (rule.receiver_type === 'matrix_package_group' || config.use_matrix_package_group === true) {
+    const matrixPackageChatTargets = await resolveMatrixPackageProductionGroupTargets(eventData)
+    chatIds.push(...matrixPackageChatTargets.map((item) => item.target_id))
   }
 
   const [usersById, usersByRole, usersByRoleKeys, usersByDept] = await Promise.all([
@@ -1149,7 +1200,9 @@ const NotificationEvent = {
         errorCode = 'RULE_MESSAGE_EMPTY'
         errorMessage = '规则未配置可发送文案'
       } else {
-        const resolvedTargets = await resolveTargets(rule, data)
+        const resolvedTargets = MATRIX_PACKAGE_GROUP_EVENT_TYPES.has(String(normalizedEventType || '').toLowerCase())
+          ? await resolveMatrixPackageProductionGroupTargets(data)
+          : await resolveTargets(rule, data)
         const filteredTargetsResult = excludeOperatorSelfTargets(resolvedTargets, operatorContext, {
           allowSelfTargets: normalizedEventType.startsWith('bug_') || normalizedEventType === 'demand_score_assign',
         })

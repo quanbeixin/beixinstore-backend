@@ -1,7 +1,7 @@
 const pool = require('../utils/db')
 const MatrixPackage = require('./MatrixPackage')
 
-const NOTE_TYPES = ['DELIVERY', 'REQUIREMENT', 'DESIGN', 'OPERATION', 'FRONTEND', 'BACKEND', 'DEVOPS', 'DEVELOPMENT']
+const NOTE_TYPES = ['DELIVERY', 'REQUIREMENT', 'DESIGN', 'OPERATION', 'FRONTEND', 'BACKEND', 'DEVOPS', 'ADVERTISING', 'DEVELOPMENT']
 
 function normalizeNoteType(value) {
   const text = String(value || '').trim().toUpperCase()
@@ -102,7 +102,7 @@ const MatrixPackageSideNote = {
        LEFT JOIN users updatedUser
          ON updatedUser.id = mpn.updated_by
        WHERE mpn.package_id = ?
-       ORDER BY FIELD(mpn.note_type, 'DELIVERY', 'REQUIREMENT', 'DESIGN', 'OPERATION', 'FRONTEND', 'BACKEND', 'DEVOPS', 'DEVELOPMENT'), mpn.id ASC`,
+       ORDER BY FIELD(mpn.note_type, 'DELIVERY', 'REQUIREMENT', 'DESIGN', 'OPERATION', 'FRONTEND', 'BACKEND', 'DEVOPS', 'ADVERTISING', 'DEVELOPMENT'), mpn.id ASC`,
       [matrixPackage.id],
     )
 

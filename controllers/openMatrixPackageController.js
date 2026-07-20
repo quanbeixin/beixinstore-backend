@@ -11,6 +11,7 @@ const SIDE_NOTE_SECTIONS = [
   { type: 'FRONTEND', key: 'frontend', description: '前端补充' },
   { type: 'BACKEND', key: 'backend', description: 'GP初始化配置信息' },
   { type: 'DEVOPS', key: 'devops', description: '运维补充' },
+  { type: 'ADVERTISING', key: 'advertising', description: '投放侧补充' },
   { type: 'REQUIREMENT', key: 'requirement', description: '需求侧补充' },
   { type: 'DEVELOPMENT', key: 'development', description: '研发侧补充' },
 ]
@@ -52,7 +53,8 @@ const FIELD_DEFINITIONS = {
   ],
   FRONTEND: [
     { name: 'appVersion', description: 'APP版本号' },
-    { name: 'appConsoleUrl', description: 'APP后台地址' },
+    { name: 'appConsoleUrl', description: 'APP谷歌平台发版地址' },
+    { name: 'googleServiceJsonFile', description: 'google-service.json文件' },
     { name: 'prodGooglePlatformAppId', description: '生产环境Google平台应用ID' },
     { name: 'prodSha1Fingerprint', description: '生产环境sha1指纹' },
     { name: 'prodSha256Fingerprint', description: '生产环境sha256指纹' },
@@ -71,7 +73,11 @@ const FIELD_DEFINITIONS = {
     { name: 'testGooglePayCertificateUrl', description: '测试环境谷歌支付证书地址' },
     { name: 'testGooglePayPackageName', description: '测试环境谷歌支付包名' },
     { name: 'pushFcmFile', description: 'push-fcm文件' },
-    { name: 'googleServiceJsonFile', description: 'google-service.json文件' },
+  ],
+  ADVERTISING: [
+    { name: 'MATRIX_FACEBOOK_INSTALL_DECRYPT_SECRET', description: 'Facebook 投放解析安装来源密钥' },
+    { name: 'facebook_app_id', description: 'android 内 facebook app id 配置' },
+    { name: 'facebook_client_token', description: 'android app 内 facebook 密钥' },
   ],
 }
 

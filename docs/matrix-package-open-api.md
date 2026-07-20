@@ -291,16 +291,17 @@ curl \
 
 ### 11.4 前端补充
 
-| 字段 | description |
-|------|-------------|
-| `appVersion` | APP版本号 |
-| `appConsoleUrl` | APP后台地址 |
-| `prodGooglePlatformAppId` | 生产环境Google平台应用ID |
-| `prodSha1Fingerprint` | 生产环境sha1指纹 |
-| `prodSha256Fingerprint` | 生产环境sha256指纹 |
-| `testGooglePlatformAppId` | 测试环境Google平台应用ID |
-| `testSha1Fingerprint` | 测试环境sha1指纹 |
-| `testSha256Fingerprint` | 测试环境sha256指纹 |
+| 字段 | description | 类型 |
+|------|-------------|------|
+| `appVersion` | APP版本号 | 文本 |
+| `appConsoleUrl` | APP谷歌平台发版地址 | 文本/链接 |
+| `googleServiceJsonFile` | google-service.json文件 | 附件 |
+| `prodGooglePlatformAppId` | 生产环境Google平台应用ID | 文本 |
+| `prodSha1Fingerprint` | 生产环境sha1指纹 | 文本 |
+| `prodSha256Fingerprint` | 生产环境sha256指纹 | 文本 |
+| `testGooglePlatformAppId` | 测试环境Google平台应用ID | 文本 |
+| `testSha1Fingerprint` | 测试环境sha1指纹 | 文本 |
+| `testSha256Fingerprint` | 测试环境sha256指纹 | 文本 |
 
 ### 11.5 运维补充
 
@@ -315,7 +316,14 @@ curl \
 | `testGooglePayCertificateUrl` | 测试环境谷歌支付证书地址 | 文本/链接 |
 | `testGooglePayPackageName` | 测试环境谷歌支付包名 | 文本 |
 | `pushFcmFile` | push-fcm文件 | 附件 |
-| `googleServiceJsonFile` | google-service.json文件 | 附件 |
+
+### 11.6 投放侧补充
+
+| 字段 | description | 类型 |
+|------|-------------|------|
+| `MATRIX_FACEBOOK_INSTALL_DECRYPT_SECRET` | Facebook 投放解析安装来源密钥 | 文本 |
+| `facebook_app_id` | android 内 facebook app id 配置 | 文本 |
+| `facebook_client_token` | android app 内 facebook 密钥 | 文本 |
 
 ## 12. 附件字段格式
 
@@ -331,7 +339,7 @@ curl \
     "mime_type": "application/json",
     "file_size": 12345,
     "url": "https://example.oss-cn-shanghai.aliyuncs.com/xxx?Expires=...",
-    "object_key": "matrix-packages/4/DEVOPS/googleServiceJsonFile/google-service.json",
+    "object_key": "matrix-packages/4/FRONTEND/googleServiceJsonFile/google-service.json",
     "storage_provider": "ALIYUN_OSS",
     "uploaded_at": "2026-07-10T10:00:00.000Z"
   }

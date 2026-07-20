@@ -306,7 +306,7 @@ function buildMatrixPackageSideNoteAccessUrl(
 }
 
 function decorateMatrixPackageSideNote(note, options = {}) {
-  if (!note || note.note_type !== 'DESIGN') return note
+  if (!note) return note
   let parsed = null
   try {
     parsed = JSON.parse(String(note.content || '{}'))

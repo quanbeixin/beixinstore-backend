@@ -3,6 +3,7 @@ const ConfigDict = require('../models/ConfigDict')
 const MatrixPackage = require('../models/MatrixPackage')
 const NotificationEvent = require('../models/NotificationEvent')
 const NotificationRule = require('../models/NotificationRule')
+const MatrixPackageDemandService = require('./matrixPackageDemandService')
 
 const DEFAULT_TIMEZONE = 'Asia/Shanghai'
 
@@ -16,19 +17,19 @@ const SCENE_DEFINITIONS = Object.freeze([
   {
     code: 'matrix_package_upcoming_deadline',
     name: '矩阵包即将到期提醒',
-    description: '按设定时间扫描，命中预计冷备完成时间即将到期的矩阵包时通知固定飞书群。',
+    description: '按设定时间扫描，命中预计冷备完成时间即将到期的矩阵包时通知对应矩阵包生产群。',
     type: 'UPCOMING',
   },
   {
     code: 'matrix_package_overdue_deadline',
     name: '矩阵包逾期提醒',
-    description: '按设定时间扫描，命中预计冷备完成时间已逾期且未完成的矩阵包时通知固定飞书群。',
+    description: '按设定时间扫描，命中预计冷备完成时间已逾期且未完成的矩阵包时通知对应矩阵包生产群。',
     type: 'OVERDUE',
   },
   {
     code: 'matrix_package_side_info_deadline',
     name: '各侧信息截止前提醒',
-    description: '按设定时间扫描，在统一截止时间前提醒未完成各侧信息 check 的对应负责人。',
+    description: '按设定时间扫描，在统一截止时间前提醒未完成各侧信息 check，并通知对应矩阵包生产群。',
     type: 'SIDE_DEADLINE',
   },
   {
@@ -41,6 +42,7 @@ const SCENE_DEFINITIONS = Object.freeze([
 
 const SCENE_CODE_SET = new Set(SCENE_DEFINITIONS.map((item) => item.code))
 const ACTIVE_PRODUCTION_STATUS_CODES = new Set(['PENDING_DEV', 'IN_DEVELOPMENT'])
+const MATRIX_PACKAGE_GROUP_SCENE_TYPES = new Set(['UPCOMING', 'OVERDUE', 'SIDE_DEADLINE'])
 
 function normalizeText(value, maxLength = 255) {
   if (value === undefined || value === null) return ''
@@ -86,6 +88,10 @@ function getSceneDefinition(sceneCode) {
 
 function getSceneType(sceneCode) {
   return getSceneDefinition(sceneCode)?.type || ''
+}
+
+function shouldUseMatrixPackageGroup(sceneCode) {
+  return MATRIX_PACKAGE_GROUP_SCENE_TYPES.has(getSceneType(sceneCode))
 }
 
 function normalizeStatusCodeArray(values) {
@@ -401,7 +407,7 @@ function buildTriggerSummary(sceneCode, parsedCondition, statusNameMap = new Map
   if (sceneType === 'SIDE_DEADLINE') {
     const reminder = parsedCondition?.reminder || {}
     const unitText = reminder.offset_unit === 'day' ? '天' : '小时'
-    return `每日 ${hh}:${mm} 扫描，提前 ${reminder.offset_value || 24}${unitText} 提醒未完成侧负责人`
+    return `每日 ${hh}:${mm} 扫描，提前 ${reminder.offset_value || 24}${unitText} 提醒到矩阵包生产群`
   }
 
   if (sceneType === 'INVENTORY_LOW') {
@@ -528,8 +534,8 @@ function mapManagedRule(row, receiverInfo, statusNameMap) {
     scene_type: sceneDef?.type || '',
     trigger_summary: buildTriggerSummary(sceneCode, parsedCondition, statusNameMap),
     receiver_label:
-      sceneDef?.type === 'SIDE_DEADLINE'
-        ? '各侧负责人'
+      shouldUseMatrixPackageGroup(sceneCode)
+        ? '矩阵包生产群'
         : receiverInfo?.receiver_label || receiverInfo?.chat_name || '',
     chat_id: receiverInfo?.chat_id || '',
     chat_name: receiverInfo?.chat_name || '',
@@ -733,6 +739,7 @@ async function listCandidateMatrixPackages() {
        mp.app_id,
        mp.domain_info,
        mp.developer_account_id,
+       mp.linked_demand_id,
        da.account_name AS developer_account_name,
        mp.owner_user_id,
        COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username, mp.owner_name, '') AS owner_name,
@@ -758,6 +765,7 @@ async function listCandidateMatrixPackages() {
     app_id: row.app_id || '',
     domain_info: row.domain_info || '',
     developer_account_id: row.developer_account_id ? Number(row.developer_account_id) : null,
+    linked_demand_id: row.linked_demand_id || '',
     developer_account_name: row.developer_account_name || '',
     owner_user_id: row.owner_user_id ? Number(row.owner_user_id) : null,
     owner_name: row.owner_name || '',
@@ -771,6 +779,29 @@ function shouldParticipateInDeadlineScan(pkg) {
   return ACTIVE_PRODUCTION_STATUS_CODES.has(String(pkg?.status_code || '').trim().toUpperCase())
 }
 
+async function ensureMatrixPackageProductionGroupQuietly(pkg) {
+  if (!pkg || !shouldParticipateInDeadlineScan(pkg)) return null
+  try {
+    return await MatrixPackageDemandService.ensureProductionDemand({
+      id: pkg.id || pkg.package_id,
+      package_name: pkg.package_name,
+      app_id: pkg.app_id,
+      domain_info: pkg.domain_info,
+      owner_user_id: pkg.owner_user_id,
+      developer_account_id: pkg.developer_account_id,
+      status_code: pkg.status_code,
+      expected_cold_ready_date: pkg.expected_cold_ready_date,
+      linked_demand_id: pkg.linked_demand_id,
+    }, null)
+  } catch (error) {
+    console.warn('矩阵包生产群准备失败（已忽略）:', {
+      packageId: pkg.id || pkg.package_id,
+      message: error?.message || error,
+    })
+    return null
+  }
+}
+
 async function listPendingSideDeadlineNotes() {
   const [rows] = await pool.query(
     `SELECT
@@ -779,6 +810,7 @@ async function listPendingSideDeadlineNotes() {
        mp.app_id,
        mp.domain_info,
        mp.owner_user_id,
+       mp.linked_demand_id,
        COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username, mp.owner_name, '') AS owner_name,
        mp.developer_account_id,
        da.account_name AS developer_account_name,
@@ -808,8 +840,7 @@ async function listPendingSideDeadlineNotes() {
      LEFT JOIN config_dict_items statusDict
        ON statusDict.type_key = ?
       AND statusDict.item_code = mp.status_code
-     WHERE mp.expected_cold_ready_date IS NOT NULL
-       AND mpn.owner_user_id IS NOT NULL`,
+     WHERE mp.expected_cold_ready_date IS NOT NULL`,
     [MatrixPackage.STATUS_DICT_KEY],
   )
 
@@ -819,6 +850,7 @@ async function listPendingSideDeadlineNotes() {
     app_id: row.app_id || '',
     domain_info: row.domain_info || '',
     owner_user_id: row.owner_user_id ? Number(row.owner_user_id) : null,
+    linked_demand_id: row.linked_demand_id || '',
     owner_name: row.owner_name || '',
     developer_account_id: row.developer_account_id ? Number(row.developer_account_id) : null,
     developer_account_name: row.developer_account_name || '',
@@ -840,6 +872,7 @@ function getSideTypeDisplayName(sideType) {
     FRONTEND: '前端补充',
     BACKEND: 'GP初始化配置信息',
     DEVOPS: '运维补充',
+    ADVERTISING: '投放侧补充',
     REQUIREMENT: '需求侧补充',
     DEVELOPMENT: '研发侧补充',
   }
@@ -900,7 +933,7 @@ const MatrixPackageNotificationService = {
 
     const sceneType = getSceneType(sceneCode)
     const chatId = normalizeText(payload.chat_id, 128)
-    if (sceneType !== 'SIDE_DEADLINE' && !chatId) {
+    if (!shouldUseMatrixPackageGroup(sceneCode) && !chatId) {
       const err = new Error('matrix_package_notification_chat_required')
       err.statusCode = 400
       err.message = '飞书群不能为空'
@@ -922,10 +955,10 @@ const MatrixPackageNotificationService = {
       scene_code: sceneCode,
       biz_domain: 'matrix_package',
       channel_type: 'feishu',
-      receiver_type: sceneType === 'SIDE_DEADLINE' ? 'field' : 'chat',
+      receiver_type: shouldUseMatrixPackageGroup(sceneCode) ? 'matrix_package_group' : 'chat',
       receiver_config_json:
-        sceneType === 'SIDE_DEADLINE'
-          ? { user_id_field: 'side_owner_user_id' }
+        shouldUseMatrixPackageGroup(sceneCode)
+          ? { use_matrix_package_group: true }
           : {
             chat_ids: [chatId],
           },
@@ -936,7 +969,7 @@ const MatrixPackageNotificationService = {
       created_by: userId,
       updated_by: userId,
     })
-    if (sceneType !== 'SIDE_DEADLINE') {
+    if (!shouldUseMatrixPackageGroup(sceneCode)) {
       await syncChatReceiverLabel(createdId, chatId, payload.chat_name)
     }
     return this.getRuleById(createdId)
@@ -964,7 +997,7 @@ const MatrixPackageNotificationService = {
 
     const sceneType = getSceneType(sceneCode)
     const chatId = normalizeText(payload.chat_id, 128)
-    if (sceneType !== 'SIDE_DEADLINE' && !chatId) {
+    if (!shouldUseMatrixPackageGroup(sceneCode) && !chatId) {
       const err = new Error('matrix_package_notification_chat_required')
       err.statusCode = 400
       err.message = '飞书群不能为空'
@@ -986,10 +1019,10 @@ const MatrixPackageNotificationService = {
       scene_code: sceneCode,
       biz_domain: 'matrix_package',
       channel_type: 'feishu',
-      receiver_type: sceneType === 'SIDE_DEADLINE' ? 'field' : 'chat',
+      receiver_type: shouldUseMatrixPackageGroup(sceneCode) ? 'matrix_package_group' : 'chat',
       receiver_config_json:
-        sceneType === 'SIDE_DEADLINE'
-          ? { user_id_field: 'side_owner_user_id' }
+        shouldUseMatrixPackageGroup(sceneCode)
+          ? { use_matrix_package_group: true }
           : {
             chat_ids: [chatId],
           },
@@ -999,7 +1032,7 @@ const MatrixPackageNotificationService = {
       is_enabled: toBooleanInt(payload.is_enabled, Number(existing.enabled) === 1 ? 1 : 0),
       updated_by: userId,
     })
-    if (sceneType !== 'SIDE_DEADLINE') {
+    if (!shouldUseMatrixPackageGroup(sceneCode)) {
       await syncChatReceiverLabel(Number(ruleId), chatId, payload.chat_name)
     }
     return this.getRuleById(ruleId)
@@ -1056,12 +1089,14 @@ const MatrixPackageNotificationService = {
 
         for (const note of sideNotes) {
           if (!shouldParticipateInDeadlineScan(note)) continue
-          if (note.is_confirmed || !note.side_owner_user_id) continue
+          if (note.is_confirmed) continue
           const dueAt = normalizeDueDateEnd(note.expected_cold_ready_date)
           if (!dueAt) continue
 
           const diffHours = Number(((dueAt.getTime() - now.getTime()) / (60 * 60 * 1000)).toFixed(1))
           if (!(diffHours >= 0 && diffHours <= thresholdHours)) continue
+          const groupResult = await ensureMatrixPackageProductionGroupQuietly(note)
+          if (!normalizeText(groupResult?.group_chat?.chat_id, 128)) continue
 
           const triggerKey = `matrix_package_side_deadline:${Number(row.id)}:${Number(note.package_id)}:${note.side_type}:${note.expected_cold_ready_date}:${thresholdHours}`
           const acquired = await acquireTriggerCursor(Number(row.id), triggerKey, 240)
@@ -1078,6 +1113,7 @@ const MatrixPackageNotificationService = {
               owner_name: note.owner_name,
               developer_account_id: note.developer_account_id,
               developer_account_name: note.developer_account_name,
+              linked_demand_id: note.linked_demand_id,
               status_code: note.status_code,
               status_name: note.status_name,
               expected_cold_ready_date: note.expected_cold_ready_date,
@@ -1105,13 +1141,15 @@ const MatrixPackageNotificationService = {
         const dueAt = normalizeDueDateEnd(pkg.expected_cold_ready_date)
         if (!dueAt) continue
 
-        const diffHours = Number(((dueAt.getTime() - now.getTime()) / (60 * 60 * 1000)).toFixed(1))
-        if (sceneCode === 'matrix_package_upcoming_deadline') {
+          const diffHours = Number(((dueAt.getTime() - now.getTime()) / (60 * 60 * 1000)).toFixed(1))
+          if (sceneCode === 'matrix_package_upcoming_deadline') {
           const reminder = parsed.reminder || { offset_unit: 'hour', offset_value: 24 }
           const thresholdHours = reminder.offset_unit === 'day'
             ? Number(reminder.offset_value || 1) * 24
             : Number(reminder.offset_value || 1)
           if (!(diffHours >= 0 && diffHours <= thresholdHours)) continue
+          const groupResult = await ensureMatrixPackageProductionGroupQuietly(pkg)
+          if (!normalizeText(groupResult?.group_chat?.chat_id, 128)) continue
 
           const triggerKey = `matrix_package_upcoming:${Number(row.id)}:${Number(pkg.id)}:${pkg.expected_cold_ready_date}:${thresholdHours}`
           const acquired = await acquireTriggerCursor(Number(row.id), triggerKey, 240)
@@ -1128,6 +1166,7 @@ const MatrixPackageNotificationService = {
               owner_name: pkg.owner_name,
               developer_account_id: pkg.developer_account_id,
               developer_account_name: pkg.developer_account_name,
+              linked_demand_id: pkg.linked_demand_id,
               status_code: pkg.status_code,
               status_name: pkg.status_name,
               expected_cold_ready_date: pkg.expected_cold_ready_date,
@@ -1146,6 +1185,8 @@ const MatrixPackageNotificationService = {
         }
 
         if (diffHours >= 0) continue
+        const groupResult = await ensureMatrixPackageProductionGroupQuietly(pkg)
+        if (!normalizeText(groupResult?.group_chat?.chat_id, 128)) continue
         const triggerKey = `matrix_package_overdue:${Number(row.id)}:${Number(pkg.id)}:${now.toISOString().slice(0, 10)}`
         const acquired = await acquireTriggerCursor(Number(row.id), triggerKey, 48)
         if (!acquired) continue
@@ -1161,6 +1202,7 @@ const MatrixPackageNotificationService = {
             owner_name: pkg.owner_name,
             developer_account_id: pkg.developer_account_id,
             developer_account_name: pkg.developer_account_name,
+            linked_demand_id: pkg.linked_demand_id,
             status_code: pkg.status_code,
             status_name: pkg.status_name,
             expected_cold_ready_date: pkg.expected_cold_ready_date,
