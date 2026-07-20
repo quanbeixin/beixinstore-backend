@@ -5,6 +5,7 @@ const MatrixPackageSideNote = require('../models/MatrixPackageSideNote')
 const MatrixPackageNotificationService = require('../services/matrixPackageNotificationService')
 const MatrixPackageDemandService = require('../services/matrixPackageDemandService')
 const { sendNotification } = require('../utils/notificationSender')
+const pool = require('../utils/db')
 const {
   buildOssObjectKey,
   buildPublicObjectUrl,
@@ -14,6 +15,7 @@ const {
 } = require('../utils/oss')
 
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
+const PREPARATION_NODE_CODES = new Set(['OPERATION_MATERIAL', 'DESIGN_PRODUCTION'])
 
 function normalizeText(value, maxLen = 500) {
   return String(value || '').trim().slice(0, maxLen)
@@ -155,6 +157,111 @@ async function sendMatrixPackageManualReminder({
   }
 
   return targetUser
+}
+
+async function resolveMatrixPackageDemandChatTarget(packageDetail) {
+  const demandId = normalizeText(packageDetail?.linked_demand_id, 64)
+  if (!demandId) return null
+
+  const [rows] = await pool.query(
+    `SELECT id, name, group_chat_mode, group_chat_id
+     FROM work_demands
+     WHERE id = ?
+     LIMIT 1`,
+    [demandId],
+  )
+  const demand = rows?.[0]
+  if (!demand) return null
+
+  const mode = normalizeText(demand.group_chat_mode, 20).toLowerCase()
+  const chatId = normalizeText(demand.group_chat_id, 128)
+  if ((mode !== 'auto' && mode !== 'bind') || !chatId) return null
+
+  return {
+    target_type: 'chat',
+    target_id: chatId,
+    target_name: normalizeText(demand.name, 128) || `矩阵包需求群(${demand.id})`,
+    extra: {
+      demand_id: demand.id,
+      group_chat_mode: mode,
+    },
+  }
+}
+
+async function sendPreparationNodeCompletedNotification({ packageDetail, node, operatorUserId = null }) {
+  if (!packageDetail || !node || !PREPARATION_NODE_CODES.has(String(node.node_code || '').toUpperCase())) return null
+
+  let latestPackageDetail = packageDetail
+  let chatTarget = await resolveMatrixPackageDemandChatTarget(latestPackageDetail)
+  if (!chatTarget && MatrixPackageDemandService.shouldEnsureDemand(packageDetail)) {
+    await MatrixPackageDemandService.ensureProductionDemand(packageDetail, operatorUserId)
+    latestPackageDetail = await MatrixPackage.getById(packageDetail.id)
+    chatTarget = await resolveMatrixPackageDemandChatTarget(latestPackageDetail)
+  }
+  if (!chatTarget) {
+    return {
+      success: false,
+      skipped: true,
+      reason: 'DEMAND_GROUP_CHAT_NOT_FOUND',
+    }
+  }
+
+  const detailUrl = buildMatrixPackageProductionDetailUrl(latestPackageDetail.id)
+  const content = [
+    '**前置准备已完成**',
+    `矩阵包：${latestPackageDetail.package_name || '-'}`,
+    `完成模块：${node.node_name || node.node_code || '-'}`,
+    node.owner_name ? `负责人：${node.owner_name}` : '',
+    node.completed_at ? `完成时间：${node.completed_at}` : '',
+    `域名：${latestPackageDetail.domain_info || '-'}`,
+    `包ID：${latestPackageDetail.app_id || '-'}`,
+  ].filter(Boolean).join('\n')
+
+  return sendNotification({
+    channelType: 'feishu',
+    title: '矩阵包前置准备完成',
+    content,
+    targets: [chatTarget],
+    metadata: {
+      detail_url: detailUrl,
+      detail_action_text: '查看生产详情',
+    },
+  })
+}
+
+async function notifyPreparationNodeCompletedQuietly({ packageDetail, beforeNode, afterNode, operatorUserId = null }) {
+  const beforeStatus = String(beforeNode?.status_code || '').toUpperCase()
+  const afterStatus = String(afterNode?.status_code || '').toUpperCase()
+  const nodeCode = String(afterNode?.node_code || '').toUpperCase()
+  if (!PREPARATION_NODE_CODES.has(nodeCode) || beforeStatus === 'COMPLETED' || afterStatus !== 'COMPLETED') {
+    return null
+  }
+
+  try {
+    const result = await sendPreparationNodeCompletedNotification({ packageDetail, node: afterNode, operatorUserId })
+    if (result?.skipped) {
+      console.warn('矩阵包前置准备完成通知已跳过:', {
+        packageId: packageDetail?.id,
+        nodeCode,
+        reason: result.reason,
+        linkedDemandId: packageDetail?.linked_demand_id || '',
+      })
+    } else if (!result?.success) {
+      console.warn('矩阵包前置准备完成通知发送失败:', {
+        packageId: packageDetail?.id,
+        nodeCode,
+        error: result?.error_message || result?.message || 'UNKNOWN',
+      })
+    }
+    return result
+  } catch (error) {
+    console.warn('矩阵包前置准备完成通知异常（已忽略）:', {
+      packageId: packageDetail?.id,
+      nodeCode,
+      message: error?.message || error,
+    })
+    return null
+  }
 }
 
 function normalizeFileSizeBytes(value) {
@@ -484,15 +591,33 @@ async function listMatrixPackageProductionNodes(req, res) {
 
 async function updateMatrixPackageProductionNode(req, res) {
   try {
+    const nodeCode = normalizeText(req.params.nodeCode, 50).toUpperCase()
+    const [packageDetail, beforeNodes] = await Promise.all([
+      MatrixPackage.getById(req.params.id),
+      MatrixPackageProductionNode.listByPackageId(req.params.id),
+    ])
+    if (!packageDetail || !Array.isArray(beforeNodes)) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    const beforeNode = beforeNodes.find((item) => item.node_code === nodeCode) || null
     const data = await MatrixPackageProductionNode.updateStatus(
       req.params.id,
-      req.params.nodeCode,
+      nodeCode,
       req.body || {},
       req.user?.id,
     )
     if (!data) {
       return res.status(404).json({ success: false, message: '矩阵包不存在' })
     }
+    const afterNode = Array.isArray(data)
+      ? data.find((item) => item.node_code === nodeCode) || null
+      : null
+    await notifyPreparationNodeCompletedQuietly({
+      packageDetail,
+      beforeNode,
+      afterNode,
+      operatorUserId: req.user?.id || null,
+    })
     return res.json({ success: true, message: '生产节点已更新', data })
   } catch (error) {
     return handleError(res, error, '更新矩阵包生产节点失败')

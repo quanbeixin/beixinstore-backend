@@ -2,6 +2,8 @@ const pool = require('../utils/db')
 const Work = require('../models/Work')
 const Workflow = require('../models/Workflow')
 const MatrixPackage = require('../models/MatrixPackage')
+const FeishuUserBinding = require('../models/FeishuUserBinding')
+const { createFeishuDemandChat } = require('../utils/notificationSender')
 
 const TEMPLATE_NAME = '矩阵包生产流程'
 const NODE_KEYS = {
@@ -60,6 +62,114 @@ async function linkPackageDemand(packageId, demandId) {
      WHERE id = ? AND deleted_at IS NULL`,
     [demandId, packageId],
   )
+}
+
+async function resolveUserFeishuOpenId(userId) {
+  const normalizedUserId = toPositiveInt(userId)
+  if (!normalizedUserId) return ''
+
+  try {
+    const binding = await FeishuUserBinding.getByUserId(normalizedUserId)
+    return normalizeText(binding?.open_id, 128)
+  } catch {
+    return ''
+  }
+}
+
+async function resolveDemandGroupChat(demandId) {
+  const normalizedDemandId = normalizeText(demandId, 64)
+  if (!normalizedDemandId) return null
+
+  const [rows] = await pool.query(
+    `SELECT id, name, owner_user_id, group_chat_mode, group_chat_id
+     FROM work_demands
+     WHERE id = ?
+     LIMIT 1`,
+    [normalizedDemandId],
+  )
+  return rows[0] || null
+}
+
+async function ensureDemandAutoGroupChat(demandId, ownerUserId) {
+  const demand = await resolveDemandGroupChat(demandId)
+  if (!demand) {
+    return {
+      created: false,
+      reason: 'DEMAND_NOT_FOUND',
+    }
+  }
+
+  const existingChatId = normalizeText(demand.group_chat_id, 128)
+  if (existingChatId) {
+    return {
+      created: false,
+      chat_id: existingChatId,
+      mode: normalizeText(demand.group_chat_mode, 20) || 'none',
+      reason: 'CHAT_ALREADY_EXISTS',
+    }
+  }
+
+  const groupChatMode = normalizeText(demand.group_chat_mode, 20).toLowerCase()
+  if (groupChatMode === 'bind') {
+    return {
+      created: false,
+      mode: groupChatMode,
+      reason: 'BIND_CHAT_ID_EMPTY',
+    }
+  }
+
+  const finalOwnerUserId = toPositiveInt(ownerUserId) || toPositiveInt(demand.owner_user_id)
+  const ownerOpenId = await resolveUserFeishuOpenId(finalOwnerUserId)
+  if (!ownerOpenId) {
+    return {
+      created: false,
+      mode: groupChatMode || 'auto',
+      reason: 'OWNER_FEISHU_OPEN_ID_MISSING',
+    }
+  }
+
+  const chatResult = await createFeishuDemandChat({
+    demandId: demand.id,
+    demandName: demand.name,
+    ownerOpenId,
+    memberOpenIds: [ownerOpenId],
+  })
+  if (!chatResult?.success || !chatResult?.data?.chat_id) {
+    return {
+      created: false,
+      mode: groupChatMode || 'auto',
+      reason: chatResult?.error_code || 'FEISHU_CHAT_CREATE_FAILED',
+      error_message: chatResult?.error_message || '自动拉群失败',
+    }
+  }
+
+  await Work.updateDemandGroupChatBinding(demand.id, {
+    groupChatMode: 'auto',
+    groupChatId: chatResult.data.chat_id,
+  })
+
+  return {
+    created: true,
+    mode: 'auto',
+    chat_id: chatResult.data.chat_id,
+    chat_name: chatResult.data.name || null,
+  }
+}
+
+async function ensureDemandAutoGroupChatQuietly(demandId, ownerUserId) {
+  try {
+    return await ensureDemandAutoGroupChat(demandId, ownerUserId)
+  } catch (error) {
+    console.warn('矩阵包需求自动拉群失败（已忽略）:', {
+      demandId: normalizeText(demandId, 64),
+      message: error?.message || error,
+    })
+    return {
+      created: false,
+      reason: 'AUTO_GROUP_CHAT_ERROR',
+      error_message: error?.message || '自动拉群异常',
+    }
+  }
 }
 
 async function unlinkPackageDemand(packageId, demandId) {
@@ -131,10 +241,15 @@ const MatrixPackageDemandService = {
       if (!linkedDemand) {
         await unlinkPackageDemand(packageId, existingLinkedDemandId)
       } else {
+        const groupChat = await ensureDemandAutoGroupChatQuietly(
+          existingLinkedDemandId,
+          linkedDemand.owner_user_id || matrixPackage.owner_user_id,
+        )
         return {
           demand_id: existingLinkedDemandId,
           created: false,
           linked: true,
+          group_chat: groupChat,
         }
       }
     }
@@ -146,10 +261,15 @@ const MatrixPackageDemandService = {
 
     const latestLinkedDemandId = normalizeText(latestMatrixPackage.linked_demand_id, 64)
     if (latestLinkedDemandId) {
+      const groupChat = await ensureDemandAutoGroupChatQuietly(
+        latestLinkedDemandId,
+        latestMatrixPackage.owner_user_id || operatorUserId,
+      )
       return {
         demand_id: latestLinkedDemandId,
         created: false,
         linked: true,
+        group_chat: groupChat,
       }
     }
 
@@ -164,10 +284,15 @@ const MatrixPackageDemandService = {
     const existingDemand = await findExistingDemandForPackage(packageId, template.id)
     if (existingDemand?.id) {
       await linkPackageDemand(packageId, existingDemand.id)
+      const groupChat = await ensureDemandAutoGroupChatQuietly(
+        existingDemand.id,
+        latestMatrixPackage.owner_user_id || operatorUserId,
+      )
       return {
         demand_id: existingDemand.id,
         created: false,
         linked: true,
+        group_chat: groupChat,
       }
     }
 
@@ -214,11 +339,13 @@ const MatrixPackageDemandService = {
     )
 
     await linkPackageDemand(packageId, demandId)
+    const groupChat = await ensureDemandAutoGroupChatQuietly(demandId, ownerUserId)
 
     return {
       demand_id: demandId,
       created: true,
       linked: true,
+      group_chat: groupChat,
     }
   },
 

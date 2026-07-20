@@ -295,8 +295,10 @@ curl \
 |------|-------------|
 | `appVersion` | APP版本号 |
 | `appConsoleUrl` | APP后台地址 |
+| `prodGooglePlatformAppId` | 生产环境Google平台应用ID |
 | `prodSha1Fingerprint` | 生产环境sha1指纹 |
 | `prodSha256Fingerprint` | 生产环境sha256指纹 |
+| `testGooglePlatformAppId` | 测试环境Google平台应用ID |
 | `testSha1Fingerprint` | 测试环境sha1指纹 |
 | `testSha256Fingerprint` | 测试环境sha256指纹 |
 
@@ -304,11 +306,14 @@ curl \
 
 | 字段 | description | 类型 |
 |------|-------------|------|
-| `googleAuthClientId` | 谷歌鉴权认证ClientId | 文本 |
-| `googleAuthClientSecret` | 谷歌鉴权认证ClientSecret | 文本 |
-| `firebaseEmailAccount` | Firebase邮箱账号 | 文本 |
-| `googlePayPackageName` | 谷歌支付包名 | 文本 |
-| `googlePayCertificateUrl` | 谷歌支付证书地址 | 文本/链接 |
+| `prodGoogleAuthClientId` | 生产环境谷歌鉴权认证ClientId | 文本 |
+| `prodGoogleAuthClientSecret` | 生产环境谷歌鉴权认证ClientSecret | 文本 |
+| `prodGooglePayCertificateUrl` | 生产环境谷歌支付证书地址 | 文本/链接 |
+| `prodGooglePayPackageName` | 生产环境谷歌支付包名 | 文本 |
+| `testGoogleAuthClientId` | 测试环境谷歌鉴权认证ClientId | 文本 |
+| `testGoogleAuthClientSecret` | 测试环境谷歌鉴权认证ClientSecret | 文本 |
+| `testGooglePayCertificateUrl` | 测试环境谷歌支付证书地址 | 文本/链接 |
+| `testGooglePayPackageName` | 测试环境谷歌支付包名 | 文本 |
 | `pushFcmFile` | push-fcm文件 | 附件 |
 | `googleServiceJsonFile` | google-service.json文件 | 附件 |
 
