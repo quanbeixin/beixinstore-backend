@@ -16,6 +16,7 @@ const {
 
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 const PREPARATION_NODE_CODES = new Set(['OPERATION_MATERIAL', 'DESIGN_PRODUCTION'])
+const SIDE_CHECK_NOTIFICATION_NOTE_TYPES = new Set(['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS'])
 
 function normalizeText(value, maxLen = 500) {
   return String(value || '').trim().slice(0, maxLen)
@@ -102,6 +103,7 @@ function getSideNoteTitle(noteType) {
     FRONTEND: '前端补充',
     BACKEND: 'GP初始化配置信息',
     DEVOPS: '运维补充',
+    ADVERTISING: '投放侧补充',
     REQUIREMENT: '需求侧补充',
     DEVELOPMENT: '研发侧补充',
   }
@@ -258,6 +260,87 @@ async function notifyPreparationNodeCompletedQuietly({ packageDetail, beforeNode
     console.warn('矩阵包前置准备完成通知异常（已忽略）:', {
       packageId: packageDetail?.id,
       nodeCode,
+      message: error?.message || error,
+    })
+    return null
+  }
+}
+
+async function sendSideNoteConfirmedNotification({ packageDetail, note, operatorUserId = null }) {
+  if (!packageDetail || !note) return null
+
+  const noteType = String(note.note_type || '').trim().toUpperCase()
+  if (!SIDE_CHECK_NOTIFICATION_NOTE_TYPES.has(noteType)) return null
+
+  let latestPackageDetail = packageDetail
+  let chatTarget = await resolveMatrixPackageDemandChatTarget(latestPackageDetail)
+  if (!chatTarget && MatrixPackageDemandService.shouldEnsureDemand(packageDetail)) {
+    await MatrixPackageDemandService.ensureProductionDemand(packageDetail, operatorUserId)
+    latestPackageDetail = await MatrixPackage.getById(packageDetail.id)
+    chatTarget = await resolveMatrixPackageDemandChatTarget(latestPackageDetail)
+  }
+  if (!chatTarget) {
+    return {
+      success: false,
+      skipped: true,
+      reason: 'DEMAND_GROUP_CHAT_NOT_FOUND',
+    }
+  }
+
+  const detailUrl = buildMatrixPackageProductionDetailUrl(latestPackageDetail.id)
+  const content = [
+    '**各侧信息check已确认完成**',
+    `矩阵包：${latestPackageDetail.package_name || '-'}`,
+    `完成模块：${getSideNoteTitle(noteType) || '-'}`,
+    note.owner_name ? `负责人：${note.owner_name}` : '',
+    note.confirmed_at ? `确认时间：${note.confirmed_at}` : '',
+    `域名：${latestPackageDetail.domain_info || '-'}`,
+    `包ID：${latestPackageDetail.app_id || '-'}`,
+  ].filter(Boolean).join('\n')
+
+  return sendNotification({
+    channelType: 'feishu',
+    title: '矩阵包各侧信息check完成',
+    content,
+    targets: [chatTarget],
+    metadata: {
+      detail_url: detailUrl,
+      detail_action_text: '查看生产详情',
+    },
+  })
+}
+
+async function notifySideNoteConfirmedQuietly({
+  packageDetail,
+  beforeNote,
+  afterNote,
+  operatorUserId = null,
+}) {
+  const noteType = String(afterNote?.note_type || '').trim().toUpperCase()
+  if (!SIDE_CHECK_NOTIFICATION_NOTE_TYPES.has(noteType)) return null
+  if (beforeNote?.is_confirmed || !afterNote?.is_confirmed) return null
+
+  try {
+    const result = await sendSideNoteConfirmedNotification({ packageDetail, note: afterNote, operatorUserId })
+    if (result?.skipped) {
+      console.warn('矩阵包各侧信息check完成通知已跳过:', {
+        packageId: packageDetail?.id,
+        noteType,
+        reason: result.reason,
+        linkedDemandId: packageDetail?.linked_demand_id || '',
+      })
+    } else if (!result?.success) {
+      console.warn('矩阵包各侧信息check完成通知发送失败:', {
+        packageId: packageDetail?.id,
+        noteType,
+        error: result?.error_message || result?.message || 'UNKNOWN',
+      })
+    }
+    return result
+  } catch (error) {
+    console.warn('矩阵包各侧信息check完成通知异常（已忽略）:', {
+      packageId: packageDetail?.id,
+      noteType,
       message: error?.message || error,
     })
     return null
@@ -692,10 +775,28 @@ async function saveMatrixPackageSideNotes(req, res) {
 
 async function confirmMatrixPackageSideNote(req, res) {
   try {
+    const noteType = normalizeText(req.params.noteType, 50).toUpperCase()
+    const [packageDetail, beforeNotes] = await Promise.all([
+      MatrixPackage.getById(req.params.id),
+      MatrixPackageSideNote.listByPackageId(req.params.id),
+    ])
+    if (!packageDetail || !Array.isArray(beforeNotes)) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    const beforeNote = beforeNotes.find((item) => item.note_type === noteType) || null
     const data = await MatrixPackageSideNote.confirm(req.params.id, req.params.noteType, req.user?.id)
     if (!data) {
       return res.status(404).json({ success: false, message: '矩阵包不存在' })
     }
+    const afterNote = Array.isArray(data)
+      ? data.find((item) => item.note_type === noteType) || null
+      : null
+    await notifySideNoteConfirmedQuietly({
+      packageDetail,
+      beforeNote,
+      afterNote,
+      operatorUserId: req.user?.id || null,
+    })
     return res.json({ success: true, message: '补充信息已确认', data: decorateMatrixPackageSideNotes(data) })
   } catch (error) {
     return handleError(res, error, '确认矩阵包补充信息失败')
