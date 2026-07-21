@@ -27,6 +27,21 @@ function normalizeHttpBaseUrl(value) {
   }
 }
 
+function isLocalHost(hostname = '') {
+  const normalized = String(hostname || '').trim().toLowerCase()
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '0.0.0.0'
+}
+
+function isProductionOrigin(value) {
+  try {
+    const parsed = new URL(value)
+    if (isLocalHost(parsed.hostname)) return false
+    return !parsed.port || parsed.port === '80' || parsed.port === '443'
+  } catch {
+    return false
+  }
+}
+
 function resolvePortalBaseUrl() {
   const explicitPublic = normalizeHttpBaseUrl(process.env.NOTIFICATION_PORTAL_PUBLIC_BASE_URL)
   if (explicitPublic) return explicitPublic
@@ -34,11 +49,12 @@ function resolvePortalBaseUrl() {
   const configuredBase = normalizeHttpBaseUrl(process.env.NOTIFICATION_PORTAL_BASE_URL)
   if (configuredBase) return configuredBase
 
-  const firstOrigin = String(process.env.CLIENT_ORIGIN || '')
+  const origins = String(process.env.CLIENT_ORIGIN || '')
     .split(',')
     .map((item) => normalizeHttpBaseUrl(item))
-    .find(Boolean)
-  if (firstOrigin) return firstOrigin
+    .filter(Boolean)
+  const productionOrigin = origins.find(isProductionOrigin)
+  if (productionOrigin) return productionOrigin
 
   return DEFAULT_NOTIFICATION_PUBLIC_BASE_URL
 }

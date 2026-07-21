@@ -53,7 +53,6 @@ const SCENE_DEFINITIONS = Object.freeze([
 ])
 
 const SCENE_CODE_SET = new Set(SCENE_DEFINITIONS.map((item) => item.code))
-const ACTIVE_PRODUCTION_STATUS_CODES = new Set(['PENDING_DEV', 'IN_DEVELOPMENT'])
 const MATRIX_PACKAGE_GROUP_SCENE_TYPES = new Set([
   'UPCOMING',
   'OVERDUE',
@@ -942,11 +941,11 @@ function getPreparationCompletionSignature(nodes = []) {
 }
 
 function shouldParticipateInDeadlineScan(pkg) {
-  return ACTIVE_PRODUCTION_STATUS_CODES.has(String(pkg?.status_code || '').trim().toUpperCase())
+  return ['PENDING_DEV', 'IN_DEVELOPMENT'].includes(String(pkg?.status_code || '').trim().toUpperCase())
 }
 
 async function ensureMatrixPackageProductionGroupQuietly(pkg) {
-  if (!pkg || !shouldParticipateInDeadlineScan(pkg)) return null
+  if (!pkg || !MatrixPackageDemandService.shouldEnsureDemand(pkg)) return null
   try {
     return await MatrixPackageDemandService.ensureProductionDemand({
       id: pkg.id || pkg.package_id,

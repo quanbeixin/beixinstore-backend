@@ -350,7 +350,11 @@ function buildMatrixPackageSideNotePolicyPayload({ packageId, noteType, fieldNam
     }
   }
 
-  const maxFileSize = Number(oss.maxFileSize || 50 * 1024 * 1024)
+  const normalizedNoteType = normalizeText(noteType, 50).toUpperCase()
+  const configuredMaxFileSize = Number(oss.maxFileSize || 50 * 1024 * 1024)
+  const maxFileSize = normalizedNoteType === 'DESIGN'
+    ? Math.max(configuredMaxFileSize, 100 * 1024 * 1024)
+    : configuredMaxFileSize
   const normalizedFileSize = normalizeFileSizeBytes(fileSize)
   if (normalizedFileSize > 0 && normalizedFileSize > maxFileSize) {
     return {
@@ -360,11 +364,11 @@ function buildMatrixPackageSideNotePolicyPayload({ packageId, noteType, fieldNam
     }
   }
 
-  const normalizedNoteType = normalizeText(noteType, 50).toLowerCase() || 'side-note'
+  const normalizedNoteTypePath = normalizedNoteType.toLowerCase() || 'side-note'
   const normalizedFieldName = normalizeText(fieldName, 80).replace(/[^a-zA-Z0-9._-]+/g, '_') || 'file'
   const objectKey = buildOssObjectKey({
     rootDir: oss.uploadDir,
-    businessDir: `matrix-packages/${packageId}/${normalizedNoteType}/${normalizedFieldName}`,
+    businessDir: `matrix-packages/${packageId}/${normalizedNoteTypePath}/${normalizedFieldName}`,
     businessNo: `PKG_${packageId}`,
     fileName,
   })
