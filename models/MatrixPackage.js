@@ -3,6 +3,8 @@ const DeveloperAccount = require('./DeveloperAccount')
 
 const STATUS_DICT_KEY = 'matrix_package_status'
 const HEALTH_DICT_KEY = 'matrix_package_health'
+const PLATFORM_DICT_KEY = 'matrix_package_delivery_platform'
+const DELIVERY_STATUS_DICT_KEY = 'matrix_package_delivery_status'
 const PRODUCTION_STAGE_DICT_KEY = 'matrix_package_production_stage'
 const PRODUCTION_STATUS_CODES = ['IN_DEVELOPMENT', 'COLD_STANDBY']
 const COMPLETION_SIDE_NOTE_TYPES = ['DELIVERY', 'REQUIREMENT', 'DESIGN', 'OPERATION', 'FRONTEND', 'BACKEND', 'DEVOPS', 'ADVERTISING']
@@ -53,6 +55,19 @@ function normalizeChecklist(value) {
   return []
 }
 
+function normalizePlatformCodes(value) {
+  const source = Array.isArray(value)
+    ? value
+    : String(value || '')
+      .split(',')
+
+  return Array.from(new Set(
+    source
+      .map((item) => normalizeOptionalCode(item))
+      .filter(Boolean),
+  ))
+}
+
 function mapRow(row) {
   if (!row) return null
   const sideNoteConfirmedCount = Number(row.side_note_confirmed_count || 0)
@@ -67,6 +82,10 @@ function mapRow(row) {
     new_package_version: row.new_package_version || '',
     domain_info: row.domain_info || '',
     platform: row.platform || '',
+    platform_codes: normalizePlatformCodes(row.platform),
+    delivery_status_code: row.delivery_status_code || '',
+    delivery_status_name: row.delivery_status_name || row.delivery_status_code || '',
+    delivery_status_color: row.delivery_status_color || '',
     owner_user_id: row.owner_user_id ? Number(row.owner_user_id) : null,
     owner_name: row.owner_display_name || row.owner_name || '',
     status_code: row.status_code || '',
@@ -107,6 +126,20 @@ async function validateDictCode(typeKey, itemCode, { allowNull = false } = {}) {
   return rows.length > 0
 }
 
+async function validateDictCodes(typeKey, itemCodes = []) {
+  const codes = normalizePlatformCodes(itemCodes)
+  if (codes.length === 0) return true
+
+  const [rows] = await pool.query(
+    `SELECT item_code
+     FROM config_dict_items
+     WHERE type_key = ? AND enabled = 1 AND item_code IN (${codes.map(() => '?').join(', ')})`,
+    [typeKey, ...codes],
+  )
+  const validCodes = new Set((rows || []).map((row) => normalizeOptionalCode(row.item_code)))
+  return codes.every((code) => validCodes.has(code))
+}
+
 function buildWhere(filters = {}) {
   const clauses = ['mp.deleted_at IS NULL']
   const params = []
@@ -142,6 +175,18 @@ function buildWhere(filters = {}) {
   if (healthCode) {
     clauses.push('mp.health_code = ?')
     params.push(healthCode)
+  }
+
+  const platformCodes = normalizePlatformCodes(filters.platform)
+  if (platformCodes.length > 0) {
+    clauses.push(`(${platformCodes.map(() => 'FIND_IN_SET(?, mp.platform)').join(' OR ')})`)
+    params.push(...platformCodes)
+  }
+
+  const deliveryStatusCode = normalizeOptionalCode(filters.delivery_status_code)
+  if (deliveryStatusCode) {
+    clauses.push('mp.delivery_status_code = ?')
+    params.push(deliveryStatusCode)
   }
 
   const ownerName = normalizeText(filters.owner_name, 80)
@@ -216,6 +261,8 @@ const MatrixPackage = {
          COUNT(*) AS total,
          SUM(CASE WHEN mp.status_code = 'PENDING_DEV' THEN 1 ELSE 0 END) AS pending_dev,
          SUM(CASE WHEN mp.status_code = 'IN_DEVELOPMENT' THEN 1 ELSE 0 END) AS in_development,
+         SUM(CASE WHEN mp.status_code = 'COLD_STANDBY' THEN 1 ELSE 0 END) AS cold_standby,
+         SUM(CASE WHEN mp.status_code = 'PENDING_REVIEW_SUBMIT' THEN 1 ELSE 0 END) AS pending_review_submit,
          SUM(CASE WHEN mp.status_code = 'DELIVERING' THEN 1 ELSE 0 END) AS delivering,
          SUM(CASE WHEN mp.status_code = 'IN_REVIEW' THEN 1 ELSE 0 END) AS in_review,
          SUM(CASE WHEN mp.status_code = 'HOT_STANDBY' THEN 1 ELSE 0 END) AS hot_standby,
@@ -243,6 +290,9 @@ const MatrixPackage = {
          mp.new_package_version,
          mp.domain_info,
          mp.platform,
+         mp.delivery_status_code,
+         deliveryStatusDict.item_name AS delivery_status_name,
+         deliveryStatusDict.color AS delivery_status_color,
          mp.owner_user_id,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
          mp.owner_name,
@@ -296,6 +346,9 @@ const MatrixPackage = {
        LEFT JOIN config_dict_items productionStageDict
          ON productionStageDict.type_key = ?
         AND productionStageDict.item_code = mp.production_stage_code
+       LEFT JOIN config_dict_items deliveryStatusDict
+         ON deliveryStatusDict.type_key = ?
+        AND deliveryStatusDict.item_code = mp.delivery_status_code
        WHERE ${whereSql}
        ORDER BY
          ${statusOrderSql} ASC,
@@ -313,6 +366,7 @@ const MatrixPackage = {
         STATUS_DICT_KEY,
         HEALTH_DICT_KEY,
         PRODUCTION_STAGE_DICT_KEY,
+        DELIVERY_STATUS_DICT_KEY,
         ...params,
         pageSize,
         offset,
@@ -328,6 +382,8 @@ const MatrixPackage = {
         total: Number(summaryRows[0]?.total || 0),
         pending_dev: Number(summaryRows[0]?.pending_dev || 0),
         in_development: Number(summaryRows[0]?.in_development || 0),
+        cold_standby: Number(summaryRows[0]?.cold_standby || 0),
+        pending_review_submit: Number(summaryRows[0]?.pending_review_submit || 0),
         delivering: Number(summaryRows[0]?.delivering || 0),
         in_review: Number(summaryRows[0]?.in_review || 0),
         hot_standby: Number(summaryRows[0]?.hot_standby || 0),
@@ -353,6 +409,9 @@ const MatrixPackage = {
          mp.new_package_version,
          mp.domain_info,
          mp.platform,
+         mp.delivery_status_code,
+         deliveryStatusDict.item_name AS delivery_status_name,
+         deliveryStatusDict.color AS delivery_status_color,
          mp.owner_user_id,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
          mp.owner_name,
@@ -406,6 +465,9 @@ const MatrixPackage = {
        LEFT JOIN config_dict_items productionStageDict
          ON productionStageDict.type_key = ?
         AND productionStageDict.item_code = mp.production_stage_code
+       LEFT JOIN config_dict_items deliveryStatusDict
+         ON deliveryStatusDict.type_key = ?
+        AND deliveryStatusDict.item_code = mp.delivery_status_code
        WHERE mp.id = ? AND mp.deleted_at IS NULL
        LIMIT 1`,
       [
@@ -413,6 +475,7 @@ const MatrixPackage = {
         STATUS_DICT_KEY,
         HEALTH_DICT_KEY,
         PRODUCTION_STAGE_DICT_KEY,
+        DELIVERY_STATUS_DICT_KEY,
         packageId,
       ],
     )
@@ -423,8 +486,8 @@ const MatrixPackage = {
     const normalized = await this.normalizePayload(payload)
     const [result] = await pool.query(
       `INSERT INTO matrix_packages
-       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, latest_progress, production_checklist, created_by, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, delivery_status_code, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, latest_progress, production_checklist, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         normalized.developer_account_id,
         normalized.package_name,
@@ -432,6 +495,7 @@ const MatrixPackage = {
         normalized.new_package_version,
         normalized.domain_info,
         normalized.platform,
+        normalized.delivery_status_code,
         normalized.owner_user_id,
         normalized.owner_name,
         normalized.status_code,
@@ -463,6 +527,7 @@ const MatrixPackage = {
            domain_info = ?,
            developer_account_id = ?,
            platform = ?,
+           delivery_status_code = ?,
            owner_user_id = ?,
            owner_name = ?,
            status_code = ?,
@@ -480,6 +545,7 @@ const MatrixPackage = {
         normalized.domain_info,
         normalized.developer_account_id,
         normalized.platform,
+        normalized.delivery_status_code,
         normalized.owner_user_id,
         normalized.owner_name,
         normalized.status_code,
@@ -554,7 +620,7 @@ const MatrixPackage = {
     if (statusCode === 'DELIVERING' && !(await validateDictCode(HEALTH_DICT_KEY, healthCode))) {
       const err = new Error('health_code_invalid')
       err.statusCode = 400
-      err.message = '投放中的矩阵包必须选择健康度'
+      err.message = '运营中的矩阵包必须选择健康度'
       throw err
     }
 
@@ -563,6 +629,14 @@ const MatrixPackage = {
       const err = new Error('developer_account_invalid')
       err.statusCode = 400
       err.message = '开发者账号不存在'
+      throw err
+    }
+
+    const existingStatusCode = normalizeOptionalCode(existing.status_code)
+    if (existingStatusCode === 'PENDING_DEV' && statusCode === 'IN_DEVELOPMENT' && !developerAccountId) {
+      const err = new Error('developer_account_required_before_development')
+      err.statusCode = 400
+      err.message = '请先绑定开发者账号后推进开发'
       throw err
     }
 
@@ -618,9 +692,26 @@ const MatrixPackage = {
     }
 
     const hasPlatform = Object.prototype.hasOwnProperty.call(payload, 'platform')
-    const platform = hasPlatform
-      ? normalizeText(payload.platform, 40)
-      : normalizeText(existing.platform, 40)
+    const platformCodes = hasPlatform
+      ? normalizePlatformCodes(payload.platform)
+      : normalizePlatformCodes(existing.platform)
+    if (platformCodes.length > 0 && !(await validateDictCodes(PLATFORM_DICT_KEY, platformCodes))) {
+      const err = new Error('platform_invalid')
+      err.statusCode = 400
+      err.message = '投放平台不合法'
+      throw err
+    }
+
+    const hasDeliveryStatus = Object.prototype.hasOwnProperty.call(payload, 'delivery_status_code')
+    const deliveryStatusCode = hasDeliveryStatus
+      ? normalizeOptionalCode(payload.delivery_status_code)
+      : normalizeOptionalCode(existing.delivery_status_code)
+    if (deliveryStatusCode && !(await validateDictCode(DELIVERY_STATUS_DICT_KEY, deliveryStatusCode, { allowNull: true }))) {
+      const err = new Error('delivery_status_invalid')
+      err.statusCode = 400
+      err.message = '投放状态不合法'
+      throw err
+    }
 
     const hasOwnerUser = Object.prototype.hasOwnProperty.call(payload, 'owner_user_id')
     const ownerUser = hasOwnerUser
@@ -636,7 +727,8 @@ const MatrixPackage = {
       app_id: appId || null,
       new_package_version: newPackageVersion || null,
       domain_info: domainInfo || null,
-      platform: platform || null,
+      platform: platformCodes.join(',') || null,
+      delivery_status_code: deliveryStatusCode || null,
       owner_user_id: ownerUser.id,
       owner_name: normalizeText(ownerUser.displayName, 80),
       status_code: statusCode,

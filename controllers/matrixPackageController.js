@@ -513,7 +513,8 @@ async function completeMatrixPackageProduction(req, res) {
       new_package_version: beforePackage.new_package_version || '',
       domain_info: beforePackage.domain_info || '',
       developer_account_id: beforePackage.developer_account_id || null,
-      platform: beforePackage.platform || '',
+      platform: beforePackage.platform_codes || beforePackage.platform || '',
+      delivery_status_code: beforePackage.delivery_status_code || null,
       owner_user_id: beforePackage.owner_user_id || null,
       status_code: 'COLD_STANDBY',
       health_code: null,
@@ -616,6 +617,13 @@ async function updateMatrixPackageProductionNode(req, res) {
       packageDetail,
       beforeNode,
       afterNode,
+      operatorUserId: req.user?.id || null,
+    })
+    await MatrixPackageNotificationService.triggerPreparationAllCompletedNotifications({
+      packageDetail,
+      beforeNode,
+      afterNode,
+      nodes: data,
       operatorUserId: req.user?.id || null,
     })
     return res.json({ success: true, message: '生产节点已更新', data })

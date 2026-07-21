@@ -174,6 +174,8 @@ function buildActionMetaByEventType(eventType, eventData = {}) {
     'matrix_package_upcoming_deadline',
     'matrix_package_overdue_deadline',
     'matrix_package_side_info_deadline',
+    'matrix_package_production_node_deadline',
+    'matrix_package_preparation_all_completed',
   ])
 
   const viewMatrixPackageSpecialEvents = new Set([
@@ -224,6 +226,8 @@ const MATRIX_PACKAGE_GROUP_EVENT_TYPES = new Set([
   'matrix_package_upcoming_deadline',
   'matrix_package_overdue_deadline',
   'matrix_package_side_info_deadline',
+  'matrix_package_production_node_deadline',
+  'matrix_package_preparation_all_completed',
 ])
 
 function getValueByPath(obj, path) {

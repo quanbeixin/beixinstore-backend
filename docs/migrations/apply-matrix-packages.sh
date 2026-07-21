@@ -8,3 +8,6 @@ node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-09-matrix-pa
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-08-matrix-package-production-nodes-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-08-matrix-package-production-node-meta-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-09-matrix-package-production-node-expected-delivery-datetime-up.sql
+node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-21-matrix-package-delivering-label-up.sql
+node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-21-matrix-package-delivery-platform-up.sql
+node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-21-matrix-package-delivery-status-up.sql

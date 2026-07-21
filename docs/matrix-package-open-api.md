@@ -138,6 +138,17 @@ curl \
         "description": "域名信息",
         "value": "photora.lol"
       },
+      "delivery_platform": {
+        "description": "投放平台",
+        "value": ["META", "GOOGLE"]
+      },
+      "delivery_status": {
+        "description": "投放状态",
+        "value": {
+          "code": "ACTIVE",
+          "name": "在投"
+        }
+      },
       "linked_demand": {
         "description": "关联项目管理需求",
         "value": {
@@ -190,6 +201,8 @@ curl \
 | `package_name` | 矩阵包名 | 矩阵包名称 |
 | `app_id` | 包ID（应用ID） | 应用包 ID |
 | `domain_info` | 域名信息 | 矩阵包域名 |
+| `delivery_platform` | 投放平台 | 返回平台编码数组，如 `["META", "GOOGLE"]` |
+| `delivery_status` | 投放状态 | 返回 `{ code, name }`，当前枚举为 `ACTIVE`/在投、`STOPPED`/停投 |
 | `new_package_version` | 新包版本 | 新包版本 |
 | `status` | 包状态 | 返回 `{ code, name }` |
 | `health` | 健康度 | 返回 `{ code, name }` |

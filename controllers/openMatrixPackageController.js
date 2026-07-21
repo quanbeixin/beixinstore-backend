@@ -110,6 +110,17 @@ function normalizeText(value, maxLength = 255) {
   return text.length > maxLength ? text.slice(0, maxLength) : text
 }
 
+function normalizePlatformCodes(value) {
+  const source = Array.isArray(value)
+    ? value
+    : String(value || '').split(',')
+  return Array.from(new Set(
+    source
+      .map((item) => normalizeText(item, 64).toUpperCase())
+      .filter(Boolean),
+  ))
+}
+
 function field(description, value) {
   return { description, value: value ?? '' }
 }
@@ -266,6 +277,11 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
     package_name: field('矩阵包名', row.package_name || ''),
     app_id: field('包ID（应用ID）', row.app_id || ''),
     domain_info: field('域名信息', row.domain_info || ''),
+    delivery_platform: field('投放平台', normalizePlatformCodes(row.platform)),
+    delivery_status: field('投放状态', {
+      code: row.delivery_status_code || '',
+      name: row.delivery_status_name || row.delivery_status_code || '',
+    }),
     new_package_version: field('新包版本', row.new_package_version || ''),
     status: field('包状态', {
       code: row.status_code || '',
@@ -328,6 +344,9 @@ async function listOpenMatrixPackages(req, res) {
          mp.package_name,
          mp.app_id,
          mp.domain_info,
+         mp.platform,
+         mp.delivery_status_code,
+         deliveryStatusDict.item_name AS delivery_status_name,
          mp.new_package_version,
          mp.status_code,
          statusDict.item_name AS status_name,
@@ -363,6 +382,9 @@ async function listOpenMatrixPackages(req, res) {
        LEFT JOIN config_dict_items healthDict
          ON healthDict.type_key = 'matrix_package_health'
         AND healthDict.item_code = mp.health_code
+       LEFT JOIN config_dict_items deliveryStatusDict
+         ON deliveryStatusDict.type_key = 'matrix_package_delivery_status'
+        AND deliveryStatusDict.item_code = mp.delivery_status_code
        LEFT JOIN config_dict_items accountStatusDict
          ON accountStatusDict.type_key = 'developer_account_status'
         AND accountStatusDict.item_code = da.status_code

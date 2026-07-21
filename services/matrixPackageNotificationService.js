@@ -33,6 +33,18 @@ const SCENE_DEFINITIONS = Object.freeze([
     type: 'SIDE_DEADLINE',
   },
   {
+    code: 'matrix_package_production_node_deadline',
+    name: '前置准备节点到期提醒',
+    description: '按设定时间扫描，在前置准备节点预计完成时间前提醒未完成节点，并通知对应矩阵包生产群。',
+    type: 'PRODUCTION_NODE_DEADLINE',
+  },
+  {
+    code: 'matrix_package_preparation_all_completed',
+    name: '前置准备全部完成通知',
+    description: '当前置准备中的运营物料信息提供、前端空包构建上传都完成时，通知对应矩阵包生产群。',
+    type: 'PREPARATION_ALL_COMPLETED',
+  },
+  {
     code: 'matrix_package_inventory_low',
     name: '库存低水位提醒',
     description: '当冷备包或热备包数量低于配置准线时，通知固定飞书群。',
@@ -42,7 +54,14 @@ const SCENE_DEFINITIONS = Object.freeze([
 
 const SCENE_CODE_SET = new Set(SCENE_DEFINITIONS.map((item) => item.code))
 const ACTIVE_PRODUCTION_STATUS_CODES = new Set(['PENDING_DEV', 'IN_DEVELOPMENT'])
-const MATRIX_PACKAGE_GROUP_SCENE_TYPES = new Set(['UPCOMING', 'OVERDUE', 'SIDE_DEADLINE'])
+const MATRIX_PACKAGE_GROUP_SCENE_TYPES = new Set([
+  'UPCOMING',
+  'OVERDUE',
+  'SIDE_DEADLINE',
+  'PRODUCTION_NODE_DEADLINE',
+  'PREPARATION_ALL_COMPLETED',
+])
+const REQUIRED_PREPARATION_NODE_CODES = ['OPERATION_MATERIAL', 'DESIGN_PRODUCTION']
 
 function normalizeText(value, maxLength = 255) {
   if (value === undefined || value === null) return ''
@@ -52,11 +71,6 @@ function normalizeText(value, maxLength = 255) {
 function toPositiveInt(value, fallback = 0) {
   const num = Number.parseInt(value, 10)
   return Number.isFinite(num) && num > 0 ? num : fallback
-}
-
-function toNullableInt(value) {
-  const num = Number.parseInt(value, 10)
-  return Number.isFinite(num) && num > 0 ? num : null
 }
 
 function toBooleanInt(value, fallback = 1) {
@@ -225,6 +239,36 @@ function buildDefaultTemplate(sceneCode) {
     }
   }
 
+  if (type === 'PRODUCTION_NODE_DEADLINE') {
+    return {
+      title: '矩阵包前置准备节点到期提醒',
+      content: [
+        '**${rule_name}**',
+        '矩阵包：${package_name}',
+        '前置准备：${node_name}',
+        '当前状态：${node_status_name}',
+        '负责人：${node_owner_name}',
+        '预计完成时间：${node_expected_delivery_date}',
+        '距离到期：${deadline_distance_text}',
+        '域名：${domain_info}',
+        '包ID：${app_id}',
+      ].join('\n'),
+    }
+  }
+
+  if (type === 'PREPARATION_ALL_COMPLETED') {
+    return {
+      title: '矩阵包前置准备全部完成',
+      content: [
+        '**${rule_name}**',
+        '矩阵包：${package_name}',
+        '所有前置信息都已经完成补充，各侧可入场进行下一步生产。',
+        '域名：${domain_info}',
+        '包ID：${app_id}',
+      ].join('\n'),
+    }
+  }
+
   if (type === 'INVENTORY_LOW') {
     return {
       title: '矩阵包库存低水位提醒',
@@ -280,6 +324,16 @@ function buildConditionConfig(payload = {}) {
     }
   }
 
+  if (sceneType === 'PREPARATION_ALL_COMPLETED') {
+    return {
+      trigger_mode: 'event',
+      matrix_package: {
+        reminder_kind: 'preparation_all_completed',
+        required_node_codes: REQUIRED_PREPARATION_NODE_CODES,
+      },
+    }
+  }
+
   const schedule = normalizeScheduleConfig(payload.schedule || {})
   if (sceneType === 'UPCOMING') {
     const reminder = normalizeReminderConfig(payload.reminder || {})
@@ -293,13 +347,13 @@ function buildConditionConfig(payload = {}) {
     }
   }
 
-  if (sceneType === 'SIDE_DEADLINE') {
+  if (sceneType === 'SIDE_DEADLINE' || sceneType === 'PRODUCTION_NODE_DEADLINE') {
     const reminder = normalizeReminderConfig(payload.reminder || {})
     return {
       trigger_mode: 'schedule',
       schedule,
       matrix_package: {
-        reminder_kind: 'side_deadline',
+        reminder_kind: sceneType === 'PRODUCTION_NODE_DEADLINE' ? 'production_node_deadline' : 'side_deadline',
         ...reminder,
       },
     }
@@ -364,7 +418,7 @@ function parseManagedConditionConfig(sceneCode, conditionConfig) {
     }
   }
 
-  if (sceneType === 'SIDE_DEADLINE') {
+  if (sceneType === 'SIDE_DEADLINE' || sceneType === 'PRODUCTION_NODE_DEADLINE') {
     const reminder = normalizeReminderConfig(cfg?.matrix_package || {})
     return {
       schedule,
@@ -376,6 +430,10 @@ function parseManagedConditionConfig(sceneCode, conditionConfig) {
     return {
       inventory: normalizeInventoryConfig(cfg?.matrix_package || {}),
     }
+  }
+
+  if (sceneType === 'PREPARATION_ALL_COMPLETED') {
+    return {}
   }
 
   return {
@@ -404,7 +462,7 @@ function buildTriggerSummary(sceneCode, parsedCondition, statusNameMap = new Map
     return `每日 ${hh}:${mm} 扫描，提前 ${reminder.offset_value || 24}${unitText} 提醒`
   }
 
-  if (sceneType === 'SIDE_DEADLINE') {
+  if (sceneType === 'SIDE_DEADLINE' || sceneType === 'PRODUCTION_NODE_DEADLINE') {
     const reminder = parsedCondition?.reminder || {}
     const unitText = reminder.offset_unit === 'day' ? '天' : '小时'
     return `每日 ${hh}:${mm} 扫描，提前 ${reminder.offset_value || 24}${unitText} 提醒到矩阵包生产群`
@@ -413,6 +471,10 @@ function buildTriggerSummary(sceneCode, parsedCondition, statusNameMap = new Map
   if (sceneType === 'INVENTORY_LOW') {
     const inventory = parsedCondition?.inventory || {}
     return `${getInventoryTypeName(inventory.inventory_type)}数量 < ${inventory.threshold_count || 1} 时提醒`
+  }
+
+  if (sceneType === 'PREPARATION_ALL_COMPLETED') {
+    return '运营物料信息提供、前端空包构建上传都完成时提醒到矩阵包生产群'
   }
 
   return `每日 ${hh}:${mm} 扫描，命中逾期包提醒`
@@ -668,6 +730,22 @@ async function listEnabledInventoryLowRuleRows() {
   return rows || []
 }
 
+async function listEnabledPreparationAllCompletedRuleRows() {
+  const [rows] = await pool.query(
+    `SELECT
+       id,
+       rule_name,
+       trigger_condition_json,
+       enabled
+     FROM notification_rules
+     WHERE biz_domain = 'matrix_package'
+       AND event_type = 'matrix_package_preparation_all_completed'
+       AND enabled = 1
+     ORDER BY id ASC`,
+  )
+  return rows || []
+}
+
 async function dispatchInventoryLowNotifications({ beforePackage, afterPackage, operatorUserId = null } = {}) {
   const rules = await listEnabledInventoryLowRuleRows()
   if (rules.length === 0) return
@@ -775,6 +853,28 @@ async function listCandidateMatrixPackages() {
   }))
 }
 
+function areRequiredPreparationNodesCompleted(nodes = []) {
+  const statusMap = new Map(
+    (Array.isArray(nodes) ? nodes : []).map((item) => [
+      String(item?.node_code || '').trim().toUpperCase(),
+      String(item?.status_code || '').trim().toUpperCase(),
+    ]),
+  )
+  return REQUIRED_PREPARATION_NODE_CODES.every((code) => statusMap.get(code) === 'COMPLETED')
+}
+
+function getPreparationCompletionSignature(nodes = []) {
+  const nodeMap = new Map(
+    (Array.isArray(nodes) ? nodes : []).map((item) => [
+      String(item?.node_code || '').trim().toUpperCase(),
+      item,
+    ]),
+  )
+  return REQUIRED_PREPARATION_NODE_CODES
+    .map((code) => `${code}:${String(nodeMap.get(code)?.completed_at || '')}`)
+    .join('|')
+}
+
 function shouldParticipateInDeadlineScan(pkg) {
   return ACTIVE_PRODUCTION_STATUS_CODES.has(String(pkg?.status_code || '').trim().toUpperCase())
 }
@@ -879,6 +979,81 @@ function getSideTypeDisplayName(sideType) {
   return map[String(sideType || '').trim().toUpperCase()] || sideType || ''
 }
 
+function getProductionNodeDisplayName(nodeCode) {
+  const map = {
+    OPERATION_MATERIAL: '运营物料信息提供',
+    DESIGN_PRODUCTION: '前端空包构建上传',
+  }
+  return map[String(nodeCode || '').trim().toUpperCase()] || nodeCode || ''
+}
+
+async function listPendingProductionNodeDeadlineItems() {
+  const [rows] = await pool.query(
+    `SELECT
+       mp.id AS package_id,
+       mp.package_name,
+       mp.app_id,
+       mp.domain_info,
+       mp.owner_user_id,
+       mp.linked_demand_id,
+       COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username, mp.owner_name, '') AS owner_name,
+       mp.developer_account_id,
+       da.account_name AS developer_account_name,
+       mp.status_code,
+       statusDict.item_name AS status_name,
+       mpn.node_code,
+       mpn.status_code AS node_status_code,
+       mpn.owner_user_id AS node_owner_user_id,
+       COALESCE(NULLIF(nodeOwner.real_name, ''), nodeOwner.username, mpn.owner_name, '') AS node_owner_name,
+       DATE_FORMAT(mpn.expected_delivery_date, '%Y-%m-%d %H:%i:%s') AS node_expected_delivery_date
+     FROM matrix_package_production_nodes mpn
+     INNER JOIN matrix_packages mp
+       ON mp.id = mpn.package_id
+      AND mp.deleted_at IS NULL
+     LEFT JOIN developer_accounts da
+       ON da.id = mp.developer_account_id
+      AND da.deleted_at IS NULL
+     LEFT JOIN users ownerUser
+       ON ownerUser.id = mp.owner_user_id
+     LEFT JOIN users nodeOwner
+       ON nodeOwner.id = mpn.owner_user_id
+     LEFT JOIN config_dict_items statusDict
+       ON statusDict.type_key = ?
+      AND statusDict.item_code = mp.status_code
+     WHERE mpn.expected_delivery_date IS NOT NULL
+       AND COALESCE(mpn.status_code, 'NOT_STARTED') <> 'COMPLETED'`,
+    [MatrixPackage.STATUS_DICT_KEY],
+  )
+
+  return (rows || []).map((row) => {
+    const nodeStatusCode = String(row.node_status_code || 'NOT_STARTED').trim().toUpperCase()
+    return {
+      package_id: Number(row.package_id),
+      package_name: row.package_name || '',
+      app_id: row.app_id || '',
+      domain_info: row.domain_info || '',
+      owner_user_id: row.owner_user_id ? Number(row.owner_user_id) : null,
+      linked_demand_id: row.linked_demand_id || '',
+      owner_name: row.owner_name || '',
+      developer_account_id: row.developer_account_id ? Number(row.developer_account_id) : null,
+      developer_account_name: row.developer_account_name || '',
+      status_code: String(row.status_code || '').trim().toUpperCase(),
+      status_name: row.status_name || row.status_code || '',
+      node_code: String(row.node_code || '').trim().toUpperCase(),
+      node_name: getProductionNodeDisplayName(row.node_code),
+      node_status_code: nodeStatusCode,
+      node_status_name: nodeStatusCode === 'IN_PROGRESS'
+        ? '进行中'
+        : nodeStatusCode === 'BLOCKED'
+          ? '阻塞'
+          : '未开始',
+      node_owner_user_id: row.node_owner_user_id ? Number(row.node_owner_user_id) : null,
+      node_owner_name: row.node_owner_name || '',
+      node_expected_delivery_date: row.node_expected_delivery_date || '',
+    }
+  })
+}
+
 const MatrixPackageNotificationService = {
   SCENE_DEFINITIONS,
 
@@ -931,7 +1106,6 @@ const MatrixPackageNotificationService = {
       throw err
     }
 
-    const sceneType = getSceneType(sceneCode)
     const chatId = normalizeText(payload.chat_id, 128)
     if (!shouldUseMatrixPackageGroup(sceneCode) && !chatId) {
       const err = new Error('matrix_package_notification_chat_required')
@@ -995,7 +1169,6 @@ const MatrixPackageNotificationService = {
       throw err
     }
 
-    const sceneType = getSceneType(sceneCode)
     const chatId = normalizeText(payload.chat_id, 128)
     if (!shouldUseMatrixPackageGroup(sceneCode) && !chatId) {
       const err = new Error('matrix_package_notification_chat_required')
@@ -1044,6 +1217,64 @@ const MatrixPackageNotificationService = {
     return NotificationRule.remove(Number(ruleId))
   },
 
+  async triggerPreparationAllCompletedNotifications({
+    packageDetail,
+    beforeNode = null,
+    afterNode = null,
+    nodes = [],
+    operatorUserId = null,
+  } = {}) {
+    const rules = await listEnabledPreparationAllCompletedRuleRows()
+    if (rules.length === 0) return []
+
+    const packageId = Number(packageDetail?.id || packageDetail?.package_id || 0) || null
+    if (!packageId || !packageDetail) return []
+
+    const nodeCode = String(afterNode?.node_code || '').trim().toUpperCase()
+    const beforeStatus = String(beforeNode?.status_code || '').trim().toUpperCase()
+    const afterStatus = String(afterNode?.status_code || '').trim().toUpperCase()
+    if (!REQUIRED_PREPARATION_NODE_CODES.includes(nodeCode)) return []
+    if (beforeStatus === 'COMPLETED' || afterStatus !== 'COMPLETED') return []
+    if (!areRequiredPreparationNodesCompleted(nodes)) return []
+
+    const groupResult = await ensureMatrixPackageProductionGroupQuietly(packageDetail)
+    if (!normalizeText(groupResult?.group_chat?.chat_id, 128)) return []
+
+    const completionSignature = getPreparationCompletionSignature(nodes)
+    const results = []
+    for (const rule of rules) {
+      const ruleId = Number(rule.id)
+      if (!ruleId) continue
+      const triggerKey = `matrix_package_preparation_all_completed:${packageId}:${completionSignature || 'completed'}`
+      const acquired = await acquireTriggerCursor(ruleId, triggerKey, 24 * 365 * 5)
+      if (!acquired) continue
+
+      const result = await NotificationEvent.processEvent({
+        eventType: 'matrix_package_preparation_all_completed',
+        data: {
+          package_id: packageId,
+          package_name: packageDetail.package_name || '',
+          app_id: packageDetail.app_id || '',
+          domain_info: packageDetail.domain_info || '',
+          owner_user_id: packageDetail.owner_user_id ? Number(packageDetail.owner_user_id) : null,
+          owner_name: packageDetail.owner_name || '',
+          developer_account_id: packageDetail.developer_account_id ? Number(packageDetail.developer_account_id) : null,
+          developer_account_name: packageDetail.developer_account_name || '',
+          linked_demand_id: packageDetail.linked_demand_id || '',
+          status_code: String(packageDetail.status_code || '').trim().toUpperCase(),
+          status_name: packageDetail.status_name || packageDetail.status_code || '',
+          completed_node_code: nodeCode,
+          completed_node_name: afterNode?.node_name || getProductionNodeDisplayName(nodeCode),
+          preparation_node_completion_signature: completionSignature,
+        },
+        operatorUserId,
+        targetRuleIds: [ruleId],
+      })
+      results.push(result)
+    }
+    return results
+  },
+
   async triggerStatusChangeNotifications({ beforePackage, afterPackage, operatorUserId = null } = {}) {
     if (!beforePackage || !afterPackage) return
     const beforeStatus = String(beforePackage.status_code || '').trim().toUpperCase()
@@ -1072,7 +1303,8 @@ const MatrixPackageNotificationService = {
       if (
         sceneCode !== 'matrix_package_upcoming_deadline' &&
         sceneCode !== 'matrix_package_overdue_deadline' &&
-        sceneCode !== 'matrix_package_side_info_deadline'
+        sceneCode !== 'matrix_package_side_info_deadline' &&
+        sceneCode !== 'matrix_package_production_node_deadline'
       ) continue
 
       const conditionConfig = safeJsonParse(row.trigger_condition_json, null) || {}
@@ -1121,6 +1353,63 @@ const MatrixPackageNotificationService = {
               side_name: getSideTypeDisplayName(note.side_type),
               side_owner_user_id: note.side_owner_user_id,
               side_owner_name: note.side_owner_name,
+              deadline_distance_hours: diffHours,
+              deadline_distance_text: buildDeadlineDistanceText(diffHours),
+              __schedule_context: {
+                matched: true,
+                trigger_key: triggerKey,
+                trigger_time: now.toISOString(),
+              },
+            },
+            operatorUserId: null,
+            targetRuleIds: [Number(row.id)],
+          })
+        }
+        continue
+      }
+
+      if (sceneCode === 'matrix_package_production_node_deadline') {
+        const reminder = parsed.reminder || { offset_unit: 'hour', offset_value: 24 }
+        const thresholdHours = reminder.offset_unit === 'day'
+          ? Number(reminder.offset_value || 1) * 24
+          : Number(reminder.offset_value || 1)
+        const nodeItems = await listPendingProductionNodeDeadlineItems()
+
+        for (const item of nodeItems) {
+          if (!shouldParticipateInDeadlineScan(item)) continue
+          const dueAt = new Date(String(item.node_expected_delivery_date || '').replace(' ', 'T') + '+08:00')
+          if (Number.isNaN(dueAt.getTime())) continue
+
+          const diffHours = Number(((dueAt.getTime() - now.getTime()) / (60 * 60 * 1000)).toFixed(1))
+          if (!(diffHours >= 0 && diffHours <= thresholdHours)) continue
+          const groupResult = await ensureMatrixPackageProductionGroupQuietly(item)
+          if (!normalizeText(groupResult?.group_chat?.chat_id, 128)) continue
+
+          const triggerKey = `matrix_package_node_deadline:${Number(row.id)}:${Number(item.package_id)}:${item.node_code}:${item.node_expected_delivery_date}:${thresholdHours}`
+          const acquired = await acquireTriggerCursor(Number(row.id), triggerKey, 240)
+          if (!acquired) continue
+
+          await NotificationEvent.processEvent({
+            eventType: sceneCode,
+            data: {
+              package_id: item.package_id,
+              package_name: item.package_name,
+              app_id: item.app_id,
+              domain_info: item.domain_info,
+              owner_user_id: item.owner_user_id,
+              owner_name: item.owner_name,
+              developer_account_id: item.developer_account_id,
+              developer_account_name: item.developer_account_name,
+              linked_demand_id: item.linked_demand_id,
+              status_code: item.status_code,
+              status_name: item.status_name,
+              node_code: item.node_code,
+              node_name: item.node_name,
+              node_status_code: item.node_status_code,
+              node_status_name: item.node_status_name,
+              node_owner_user_id: item.node_owner_user_id,
+              node_owner_name: item.node_owner_name,
+              node_expected_delivery_date: item.node_expected_delivery_date,
               deadline_distance_hours: diffHours,
               deadline_distance_text: buildDeadlineDistanceText(diffHours),
               __schedule_context: {
