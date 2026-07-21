@@ -15,7 +15,7 @@ const NODE_DEFINITIONS = [
     node_name: '前端空包构建上传',
     owner_side: '前端',
     sort_order: 20,
-    depends_on: ['OPERATION_MATERIAL'],
+    depends_on: [],
   },
 ]
 
