@@ -66,7 +66,12 @@ const FIELD_DEFINITIONS = {
     { name: 'testReleaseDownloadUrl', description: '测试环境包下载地址' },
     { name: 'testH5Url', description: 'H5测试环境' },
   ],
-  BACKEND: [],
+  BACKEND: [
+    { name: 'coldStartInfo', description: '冷启信息' },
+    { name: 'productDetail', description: '商品详情' },
+    { name: 'addOnPackage', description: '加量包' },
+    { name: 'subscription', description: '订阅' },
+  ],
   DEVOPS: [
     { name: 'prodGoogleAuthClientId', description: '生产环境谷歌鉴权认证ClientId' },
     { name: 'prodGoogleAuthClientSecret', description: '生产环境谷歌鉴权认证ClientSecret' },
