@@ -2,9 +2,9 @@ const pool = require('../utils/db')
 
 const DEFAULT_TEMPLATE_ROWS = [
   {
-    template_key: 'data_safety_file',
-    template_name: '报名-数据安全文件',
-    description: '用于维护报名-数据安全文件模板',
+    template_key: 'date-safe-file',
+    template_name: '数据安全文件',
+    description: '用于维护数据安全文件模板',
     sort_order: 1,
   },
   {
@@ -85,6 +85,36 @@ async function ensureTable() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `)
 
+  const [canonicalRows] = await pool.query(
+    `SELECT id
+     FROM notification_template_files
+     WHERE template_key = 'date-safe-file'
+     LIMIT 1`,
+  )
+  const [legacyRows] = await pool.query(
+    `SELECT id
+     FROM notification_template_files
+     WHERE template_key = 'data_safety_file'
+     LIMIT 1`,
+  )
+  if (canonicalRows.length > 0) {
+    if (legacyRows.length > 0) {
+      await pool.query(
+        `DELETE FROM notification_template_files
+         WHERE template_key = 'data_safety_file'`,
+      )
+    }
+  } else if (legacyRows.length > 0) {
+    await pool.query(
+      `UPDATE notification_template_files
+       SET template_key = 'date-safe-file',
+           template_name = '数据安全文件',
+           description = '用于维护数据安全文件模板',
+           sort_order = 1
+       WHERE template_key = 'data_safety_file'`,
+    )
+  }
+
   for (const row of DEFAULT_TEMPLATE_ROWS) {
     await pool.query(
       `INSERT IGNORE INTO notification_template_files
@@ -93,6 +123,14 @@ async function ensureTable() {
       [row.template_key, row.template_name, row.description, row.sort_order],
     )
   }
+
+  await pool.query(
+    `UPDATE notification_template_files
+     SET template_name = '数据安全文件',
+         description = '用于维护数据安全文件模板',
+         sort_order = 1
+     WHERE template_key = 'date-safe-file'`,
+  )
 
   tableReady = true
 }

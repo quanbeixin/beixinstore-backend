@@ -68,6 +68,45 @@ function normalizeText(value, maxLength = 255) {
   return String(value).trim().slice(0, maxLength)
 }
 
+function parseJsonObject(value) {
+  if (!value) return {}
+  if (typeof value === 'object' && !Array.isArray(value)) return value
+  try {
+    const parsed = JSON.parse(String(value || ''))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function normalizeH5PackageName(packageName) {
+  return String(packageName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+function normalizeH5Domain(domainInfo) {
+  return String(domainInfo || '')
+    .trim()
+    .split(/[\s,，;；]+/)[0]
+    .replace(/^[a-z][a-z\d+.-]*:\/\//i, '')
+    .split(/[/?#]/)[0]
+    .replace(/^\.+|\.+$/g, '')
+    .toLowerCase()
+}
+
+function buildGeneratedH5Values(packageDetail) {
+  const packageName = normalizeH5PackageName(packageDetail?.package_name)
+  const domain = normalizeH5Domain(packageDetail?.domain_info)
+  return {
+    prodH5Url: packageName && domain ? `https://${packageName}.app.${domain}` : '',
+    testH5Url: packageName ? `https://${packageName}-itest.a1aws.geesdev.com` : '',
+  }
+}
+
 function toPositiveInt(value, fallback = 0) {
   const num = Number.parseInt(value, 10)
   return Number.isFinite(num) && num > 0 ? num : fallback
@@ -201,6 +240,10 @@ function buildDefaultTemplate(sceneCode) {
         '${status_date_label}：${status_date}',
         '域名：${domain_info}',
         '包ID：${app_id}',
+        '正式包下载地址：${prod_release_download_url}',
+        '测试包下载地址：${test_release_download_url}',
+        'H5生产环境：${prod_h5_url}',
+        'H5测试环境：${test_h5_url}',
       ].join('\n'),
     }
   }
@@ -635,6 +678,25 @@ async function buildStatusChangeEventData(beforePackage, afterPackage) {
   const fallbackDate = String(afterPackage?.expected_cold_ready_date || '')
   const statusDateLabel = toStatus === 'HOT_STANDBY' ? '审核通过日期' : '预计冷备完成时间'
   const statusDate = toStatus === 'HOT_STANDBY' ? listedAt : fallbackDate
+  let frontendNoteRows = []
+  try {
+    const queryResult = await pool.query(
+      `SELECT content
+       FROM matrix_package_side_notes
+       WHERE package_id = ?
+         AND note_type = 'FRONTEND'
+       LIMIT 1`,
+      [Number(afterPackage?.id || 0)],
+    )
+    frontendNoteRows = queryResult?.[0] || []
+  } catch (error) {
+    console.warn('读取前端补充信息用于生产完成通知失败（已使用默认值）:', {
+      packageId: afterPackage?.id,
+      message: error?.message || error,
+    })
+  }
+  const frontendValues = parseJsonObject(frontendNoteRows?.[0]?.content)
+  const generatedH5Values = buildGeneratedH5Values(afterPackage)
   return {
     package_id: Number(afterPackage?.id || 0) || null,
     package_name: String(afterPackage?.package_name || ''),
@@ -648,6 +710,10 @@ async function buildStatusChangeEventData(beforePackage, afterPackage) {
     review_passed_at: listedAt,
     status_date_label: statusDateLabel,
     status_date: statusDate,
+    prod_release_download_url: normalizeText(frontendValues.prodReleaseDownloadUrl, 2000) || '-',
+    test_release_download_url: normalizeText(frontendValues.testReleaseDownloadUrl, 2000) || '-',
+    prod_h5_url: generatedH5Values.prodH5Url || '-',
+    test_h5_url: generatedH5Values.testH5Url || '-',
     from_status: String(beforePackage?.status_code || '').trim().toUpperCase(),
     from_status_name: String(beforePackage?.status_name || beforePackage?.status_code || ''),
     to_status: toStatus,
@@ -940,7 +1006,8 @@ async function listPendingSideDeadlineNotes() {
      LEFT JOIN config_dict_items statusDict
        ON statusDict.type_key = ?
       AND statusDict.item_code = mp.status_code
-     WHERE mp.expected_cold_ready_date IS NOT NULL`,
+     WHERE mp.expected_cold_ready_date IS NOT NULL
+       AND mpn.note_type <> 'ADVERTISING'`,
     [MatrixPackage.STATUS_DICT_KEY],
   )
 

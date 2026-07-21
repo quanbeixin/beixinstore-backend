@@ -350,6 +350,21 @@ function renderTemplateText(template, data) {
   })
 }
 
+function appendMatrixPackageProductionLinks(renderedContent, eventData = {}) {
+  const source = String(renderedContent || '').trim()
+  if (String(eventData?.to_status || '').trim().toUpperCase() !== 'COLD_STANDBY') return source
+  if (source.includes('正式包下载地址：')) return source
+
+  return [
+    source,
+    '',
+    '正式包下载地址：' + (eventData.prod_release_download_url || '-'),
+    '测试包下载地址：' + (eventData.test_release_download_url || '-'),
+    'H5生产环境：' + (eventData.prod_h5_url || '-'),
+    'H5测试环境：' + (eventData.test_h5_url || '-'),
+  ].join('\n')
+}
+
 const STATUS_CN_MAP = Object.freeze({
   TODO: '待处理',
   NOT_STARTED: '未开始',
@@ -1177,6 +1192,9 @@ const NotificationEvent = {
       }
       const renderedTitle = renderTemplateText(rule.message_title || rule.rule_name || '系统通知', templateData)
       let renderedContent = renderTemplateText(rule.message_content || `事件 ${normalizedEventType} 已触发`, templateData)
+      if (normalizedEventType === 'matrix_package_status_change') {
+        renderedContent = appendMatrixPackageProductionLinks(renderedContent, templateData)
+      }
       const normalizedRuleName = normalizeText(rule.rule_name, 255)
       if (
         normalizedRuleName &&

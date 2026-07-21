@@ -7,7 +7,7 @@ const PLATFORM_DICT_KEY = 'matrix_package_delivery_platform'
 const DELIVERY_STATUS_DICT_KEY = 'matrix_package_delivery_status'
 const PRODUCTION_STAGE_DICT_KEY = 'matrix_package_production_stage'
 const PRODUCTION_STATUS_CODES = ['IN_DEVELOPMENT', 'COLD_STANDBY']
-const COMPLETION_SIDE_NOTE_TYPES = ['DELIVERY', 'REQUIREMENT', 'DESIGN', 'OPERATION', 'FRONTEND', 'BACKEND', 'DEVOPS', 'ADVERTISING']
+const COMPLETION_SIDE_NOTE_TYPES = ['DELIVERY', 'REQUIREMENT', 'DESIGN', 'OPERATION', 'FRONTEND', 'BACKEND', 'DEVOPS']
 const COMPLETION_SIDE_NOTE_TOTAL = COMPLETION_SIDE_NOTE_TYPES.length
 const COMPLETION_SIDE_NOTE_TYPE_SQL = COMPLETION_SIDE_NOTE_TYPES.map(() => '?').join(', ')
 
@@ -692,9 +692,10 @@ const MatrixPackage = {
     }
 
     const hasPlatform = Object.prototype.hasOwnProperty.call(payload, 'platform')
-    const platformCodes = hasPlatform
+    const rawPlatformCodes = hasPlatform
       ? normalizePlatformCodes(payload.platform)
       : normalizePlatformCodes(existing.platform)
+    const platformCodes = statusCode === 'DELIVERING' ? rawPlatformCodes : []
     if (platformCodes.length > 0 && !(await validateDictCodes(PLATFORM_DICT_KEY, platformCodes))) {
       const err = new Error('platform_invalid')
       err.statusCode = 400
@@ -703,9 +704,10 @@ const MatrixPackage = {
     }
 
     const hasDeliveryStatus = Object.prototype.hasOwnProperty.call(payload, 'delivery_status_code')
-    const deliveryStatusCode = hasDeliveryStatus
+    const rawDeliveryStatusCode = hasDeliveryStatus
       ? normalizeOptionalCode(payload.delivery_status_code)
       : normalizeOptionalCode(existing.delivery_status_code)
+    const deliveryStatusCode = statusCode === 'DELIVERING' ? rawDeliveryStatusCode : null
     if (deliveryStatusCode && !(await validateDictCode(DELIVERY_STATUS_DICT_KEY, deliveryStatusCode, { allowNull: true }))) {
       const err = new Error('delivery_status_invalid')
       err.statusCode = 400

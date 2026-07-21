@@ -58,9 +58,13 @@ const FIELD_DEFINITIONS = {
     { name: 'prodGooglePlatformAppId', description: '生产环境Google平台应用ID' },
     { name: 'prodSha1Fingerprint', description: '生产环境sha1指纹' },
     { name: 'prodSha256Fingerprint', description: '生产环境sha256指纹' },
+    { name: 'prodReleaseDownloadUrl', description: '生产环境包下载地址' },
+    { name: 'prodH5Url', description: 'H5生产环境' },
     { name: 'testGooglePlatformAppId', description: '测试环境Google平台应用ID' },
     { name: 'testSha1Fingerprint', description: '测试环境sha1指纹' },
     { name: 'testSha256Fingerprint', description: '测试环境sha256指纹' },
+    { name: 'testReleaseDownloadUrl', description: '测试环境包下载地址' },
+    { name: 'testH5Url', description: 'H5测试环境' },
   ],
   BACKEND: [],
   DEVOPS: [
@@ -108,6 +112,34 @@ const PRODUCTION_NODE_STATUS_NAMES = {
 function normalizeText(value, maxLength = 255) {
   const text = String(value || '').trim()
   return text.length > maxLength ? text.slice(0, maxLength) : text
+}
+
+function normalizeH5PackageName(packageName) {
+  return String(packageName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+function normalizeH5Domain(domainInfo) {
+  return String(domainInfo || '')
+    .trim()
+    .split(/[\s,，;；]+/)[0]
+    .replace(/^[a-z][a-z\d+.-]*:\/\//i, '')
+    .split(/[/?#]/)[0]
+    .replace(/^\.+|\.+$/g, '')
+    .toLowerCase()
+}
+
+function buildGeneratedH5Values(row) {
+  const packageName = normalizeH5PackageName(row?.package_name)
+  const domain = normalizeH5Domain(row?.domain_info)
+  return {
+    prodH5Url: packageName && domain ? `https://${packageName}.app.${domain}` : '',
+    testH5Url: packageName ? `https://${packageName}-itest.a1aws.geesdev.com` : '',
+  }
 }
 
 function normalizePlatformCodes(value) {
@@ -271,6 +303,15 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
     sections[section.key].updated_by_name = note?.updated_by_name || ''
     sections[section.key].is_confirmed = Boolean(note?.is_confirmed)
   })
+  const generatedH5Values = buildGeneratedH5Values(row)
+  if (sections.frontend?.value && typeof sections.frontend.value === 'object') {
+    Object.entries(generatedH5Values).forEach(([key, value]) => {
+      sections.frontend.value[key] = field(
+        key === 'prodH5Url' ? 'H5生产环境' : 'H5测试环境',
+        value,
+      )
+    })
+  }
 
   return {
     package_id: field('矩阵包记录ID', Number(row.id)),
