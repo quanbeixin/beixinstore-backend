@@ -23,6 +23,33 @@ function normalizeText(value, maxLength = 255) {
   return text.length > maxLength ? text.slice(0, maxLength) : text
 }
 
+function normalizeGroupChatConfig(value = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const defaultMemberUserIds = Array.from(
+    new Set(
+      (Array.isArray(source.default_member_user_ids) ? source.default_member_user_ids : [])
+        .map((item) => toPositiveInt(item))
+        .filter(Boolean),
+    ),
+  )
+  return {
+    auto_group_chat_enabled: source.auto_group_chat_enabled === false ? false : true,
+    include_owner: source.include_owner === false ? false : true,
+    default_member_user_ids: defaultMemberUserIds,
+  }
+}
+
+function parseGroupChatConfig(raw) {
+  if (!raw) return normalizeGroupChatConfig()
+  if (typeof raw === 'object' && !Array.isArray(raw)) return normalizeGroupChatConfig(raw)
+  if (typeof raw !== 'string') return normalizeGroupChatConfig()
+  try {
+    return normalizeGroupChatConfig(JSON.parse(raw))
+  } catch {
+    return normalizeGroupChatConfig()
+  }
+}
+
 function shouldEnsureDemand(matrixPackage) {
   const statusCode = normalizeText(matrixPackage?.status_code, 50).toUpperCase()
   return PRODUCTION_STATUS_CODES.has(statusCode)
@@ -76,14 +103,39 @@ async function resolveUserFeishuOpenId(userId) {
   }
 }
 
+async function resolveUserFeishuOpenIds(userIds = []) {
+  const normalizedUserIds = Array.from(
+    new Set((Array.isArray(userIds) ? userIds : []).map((item) => toPositiveInt(item)).filter(Boolean)),
+  )
+  if (normalizedUserIds.length === 0) return []
+
+  try {
+    const result = await FeishuUserBinding.listByUserIds(normalizedUserIds)
+    return normalizedUserIds
+      .map((userId) => normalizeText(result?.map?.[userId]?.open_id, 128))
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
 async function resolveDemandGroupChat(demandId) {
   const normalizedDemandId = normalizeText(demandId, 64)
   if (!normalizedDemandId) return null
 
   const [rows] = await pool.query(
-    `SELECT id, name, owner_user_id, group_chat_mode, group_chat_id
-     FROM work_demands
-     WHERE id = ?
+    `SELECT
+       d.id,
+       d.name,
+       d.owner_user_id,
+       d.group_chat_mode,
+       d.group_chat_id,
+       d.template_id,
+       pt.group_chat_config AS template_group_chat_config
+     FROM work_demands d
+     LEFT JOIN project_templates pt
+       ON pt.id = d.template_id
+     WHERE d.id = ?
      LIMIT 1`,
     [normalizedDemandId],
   )
@@ -118,21 +170,39 @@ async function ensureDemandAutoGroupChat(demandId, ownerUserId) {
     }
   }
 
-  const finalOwnerUserId = toPositiveInt(ownerUserId) || toPositiveInt(demand.owner_user_id)
-  const ownerOpenId = await resolveUserFeishuOpenId(finalOwnerUserId)
-  if (!ownerOpenId) {
+  const templateGroupChatConfig = parseGroupChatConfig(demand.template_group_chat_config)
+  if (!templateGroupChatConfig.auto_group_chat_enabled) {
     return {
       created: false,
       mode: groupChatMode || 'auto',
-      reason: 'OWNER_FEISHU_OPEN_ID_MISSING',
+      reason: 'AUTO_GROUP_CHAT_DISABLED_BY_TEMPLATE',
     }
   }
+
+  const finalOwnerUserId = toPositiveInt(ownerUserId) || toPositiveInt(demand.owner_user_id)
+  const configuredMemberUserIds = templateGroupChatConfig.default_member_user_ids || []
+  const memberUserIds = [
+    ...(templateGroupChatConfig.include_owner ? [finalOwnerUserId] : []),
+    ...configuredMemberUserIds,
+  ].filter(Boolean)
+  const memberOpenIds = await resolveUserFeishuOpenIds(memberUserIds)
+  const ownerOpenId = memberOpenIds[0] || (
+    templateGroupChatConfig.include_owner ? await resolveUserFeishuOpenId(finalOwnerUserId) : ''
+  )
+  if (!ownerOpenId || memberOpenIds.length === 0) {
+    return {
+      created: false,
+      mode: groupChatMode || 'auto',
+      reason: 'GROUP_CHAT_MEMBER_FEISHU_OPEN_ID_MISSING',
+    }
+  }
+  const finalMemberOpenIds = Array.from(new Set(memberOpenIds.filter(Boolean)))
 
   const chatResult = await createFeishuDemandChat({
     demandId: demand.id,
     demandName: demand.name,
     ownerOpenId,
-    memberOpenIds: [ownerOpenId],
+    memberOpenIds: finalMemberOpenIds,
   })
   if (!chatResult?.success || !chatResult?.data?.chat_id) {
     return {

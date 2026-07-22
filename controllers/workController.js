@@ -745,6 +745,15 @@ function normalizeTemplateNodeConfig(value) {
   }
 }
 
+function normalizeProjectTemplateGroupChatConfig(value = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  return {
+    auto_group_chat_enabled: source.auto_group_chat_enabled === false ? false : true,
+    include_owner: source.include_owner === false ? false : true,
+    default_member_user_ids: toPositiveIntList(source.default_member_user_ids),
+  }
+}
+
 function normalizeParticipantRolesFromBody(value) {
   if (value === undefined) return { ok: true, value: undefined }
   if (value === null || value === '') return { ok: true, value: [] }
@@ -1356,6 +1365,7 @@ const createProjectTemplate = async (req, res) => {
   const description = normalizeText(req.body.description, 4000)
   const status = toBool(req.body.status, true) ? 1 : 0
   const nodeConfigResult = normalizeTemplateNodeConfig(req.body.node_config)
+  const groupChatConfig = normalizeProjectTemplateGroupChatConfig(req.body.group_chat_config)
 
   if (!name) {
     return res.status(400).json({ success: false, message: '模板名称不能为空' })
@@ -1369,6 +1379,7 @@ const createProjectTemplate = async (req, res) => {
       name,
       description,
       nodeConfig: nodeConfigResult.value || [],
+      groupChatConfig,
       status,
     })
     const created = await Work.findProjectTemplateById(templateId)
@@ -1398,6 +1409,9 @@ const updateProjectTemplate = async (req, res) => {
     const nodeConfigResult = normalizeTemplateNodeConfig(
       req.body.node_config === undefined ? existing.node_config : req.body.node_config,
     )
+    const groupChatConfig = normalizeProjectTemplateGroupChatConfig(
+      req.body.group_chat_config === undefined ? existing.group_chat_config : req.body.group_chat_config,
+    )
 
     if (!name) {
       return res.status(400).json({ success: false, message: '模板名称不能为空' })
@@ -1410,6 +1424,7 @@ const updateProjectTemplate = async (req, res) => {
       name,
       description,
       nodeConfig: nodeConfigResult.value || [],
+      groupChatConfig,
       status,
     })
 

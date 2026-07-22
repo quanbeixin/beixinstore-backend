@@ -680,6 +680,34 @@ function parseProjectTemplateNodeConfig(raw) {
   }
 }
 
+function normalizeProjectTemplateGroupChatConfig(value = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const defaultMemberUserIds = Array.from(
+    new Set(
+      (Array.isArray(source.default_member_user_ids) ? source.default_member_user_ids : [])
+        .map((item) => toPositiveInt(item))
+        .filter(Boolean),
+    ),
+  )
+  return {
+    auto_group_chat_enabled: source.auto_group_chat_enabled === false ? false : true,
+    include_owner: source.include_owner === false ? false : true,
+    default_member_user_ids: defaultMemberUserIds,
+  }
+}
+
+function parseProjectTemplateGroupChatConfig(raw) {
+  if (!raw) return normalizeProjectTemplateGroupChatConfig()
+  if (typeof raw === 'object' && !Array.isArray(raw)) return normalizeProjectTemplateGroupChatConfig(raw)
+  if (typeof raw !== 'string') return normalizeProjectTemplateGroupChatConfig()
+
+  try {
+    return normalizeProjectTemplateGroupChatConfig(JSON.parse(raw))
+  } catch (err) {
+    return normalizeProjectTemplateGroupChatConfig()
+  }
+}
+
 function buildPhaseNameMap(rows) {
   const map = new Map()
   ;(Array.isArray(rows) ? rows : []).forEach((row) => {
@@ -2321,6 +2349,7 @@ const Work = {
          name,
          description,
          node_config,
+         group_chat_config,
          status,
          DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
@@ -2343,6 +2372,7 @@ const Work = {
       name: row.name,
       description: row.description || '',
       node_config: parseProjectTemplateNodeConfig(row.node_config),
+      group_chat_config: parseProjectTemplateGroupChatConfig(row.group_chat_config),
       status: Number(row.status) === 1 ? 1 : 0,
       created_at: row.created_at || null,
       updated_at: row.updated_at || null,
@@ -2372,6 +2402,7 @@ const Work = {
          name,
          description,
          node_config,
+         group_chat_config,
          status,
          DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
@@ -2387,34 +2418,45 @@ const Work = {
       name: row.name,
       description: row.description || '',
       node_config: parseProjectTemplateNodeConfig(row.node_config),
+      group_chat_config: parseProjectTemplateGroupChatConfig(row.group_chat_config),
       status: Number(row.status) === 1 ? 1 : 0,
       created_at: row.created_at || null,
       updated_at: row.updated_at || null,
     }
   },
 
-  async createProjectTemplate({ name, description = '', nodeConfig = [], status = 1 }) {
+  async createProjectTemplate({ name, description = '', nodeConfig = [], groupChatConfig = {}, status = 1 }) {
+    const normalizedGroupChatConfig = normalizeProjectTemplateGroupChatConfig(groupChatConfig)
     const [result] = await pool.query(
-      `INSERT INTO project_templates (name, description, node_config, status)
-       VALUES (?, ?, CAST(? AS JSON), ?)`,
-      [name, description || null, JSON.stringify(nodeConfig || []), status === 1 ? 1 : 0],
+      `INSERT INTO project_templates (name, description, node_config, group_chat_config, status)
+       VALUES (?, ?, CAST(? AS JSON), CAST(? AS JSON), ?)`,
+      [
+        name,
+        description || null,
+        JSON.stringify(nodeConfig || []),
+        JSON.stringify(normalizedGroupChatConfig),
+        status === 1 ? 1 : 0,
+      ],
     )
     return Number(result.insertId)
   },
 
-  async updateProjectTemplate(templateId, { name, description = '', nodeConfig = [], status = 1 }) {
+  async updateProjectTemplate(templateId, { name, description = '', nodeConfig = [], groupChatConfig = {}, status = 1 }) {
+    const normalizedGroupChatConfig = normalizeProjectTemplateGroupChatConfig(groupChatConfig)
     const [result] = await pool.query(
       `UPDATE project_templates
        SET
          name = ?,
          description = ?,
          node_config = CAST(? AS JSON),
+         group_chat_config = CAST(? AS JSON),
          status = ?
        WHERE id = ?`,
       [
         name,
         description || null,
         JSON.stringify(nodeConfig || []),
+        JSON.stringify(normalizedGroupChatConfig),
         status === 1 ? 1 : 0,
         templateId,
       ],

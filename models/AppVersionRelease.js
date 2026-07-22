@@ -179,10 +179,32 @@ function buildWhere(filters = {}) {
     params.push(`%${releaseRequestNo}%`, toPositiveInt(releaseRequestNo) || 0)
   }
 
+  const matrixPackageId = toPositiveInt(filters.matrix_package_id || filters.package_id)
+  if (matrixPackageId) {
+    clauses.push('avr.matrix_package_id = ?')
+    params.push(matrixPackageId)
+  }
+
   return {
     whereSql: clauses.join(' AND '),
     params,
   }
+}
+
+async function getLatestAppConsoleUrlByPackageId(packageId) {
+  const normalizedPackageId = toPositiveInt(packageId)
+  if (!normalizedPackageId) return ''
+  const [rows] = await pool.query(
+    `SELECT app_console_url
+     FROM app_version_releases
+     WHERE matrix_package_id = ?
+       AND deleted_at IS NULL
+       AND COALESCE(NULLIF(app_console_url, ''), '') <> ''
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [normalizedPackageId],
+  )
+  return normalizeText(rows?.[0]?.app_console_url, 1000)
 }
 
 async function getSideNoteContent(packageId, noteType) {
@@ -791,7 +813,15 @@ const AppVersionRelease = {
           getSideNoteContent(packageDetail.id, 'FRONTEND'),
         ])
         const appName = normalizeText(operationContent.appName, 160) || normalizeText(packageDetail.package_name, 160)
-        const appConsoleUrl = applicationItem.app_console_url || normalizeText(frontendContent.appConsoleUrl, 1000)
+        const appConsoleUrl = applicationItem.app_console_url
+          || await getLatestAppConsoleUrlByPackageId(packageDetail.id)
+          || normalizeText(frontendContent.appConsoleUrl, 1000)
+        if (!appConsoleUrl) {
+          const err = new Error('app_console_url_required')
+          err.statusCode = 400
+          err.message = `${packageDetail.package_name || `矩阵包${packageDetail.id}`} 的APP后台地址不能为空`
+          throw err
+        }
         const releaseOwner = await resolveDefaultReleaseOwnerInfo(packageDetail)
 
         const [result] = await connection.query(
