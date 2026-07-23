@@ -399,41 +399,6 @@ async function syncReviewPlanByReleaseStatus(existing, nextReleaseStatus, syncCo
   })
 }
 
-async function findBlockingReleasesByPackageIds(packageIds = []) {
-  const normalizedIds = normalizePackageIds(packageIds)
-  if (normalizedIds.length === 0) return []
-
-  const [rows] = await pool.query(
-    `SELECT
-       avr.id,
-       avr.matrix_package_id,
-       avr.release_status,
-       avr.app_version,
-       mp.package_name,
-       mp.app_id,
-       mp.domain_info
-     FROM app_version_releases avr
-     LEFT JOIN matrix_packages mp
-       ON mp.id = avr.matrix_package_id
-     WHERE avr.deleted_at IS NULL
-       AND avr.release_status NOT IN ('LISTED', 'REJECTED', 'CANCELLED')
-       AND avr.matrix_package_id IN (?)
-     ORDER BY avr.id DESC`,
-    [normalizedIds],
-  )
-
-  return rows.map((row) => ({
-    id: Number(row.id),
-    matrix_package_id: Number(row.matrix_package_id),
-    package_name: row.package_name || '',
-    app_id: row.app_id || '',
-    domain_info: row.domain_info || '',
-    app_version: row.app_version || '',
-    release_status: row.release_status || '',
-    release_status_name: RELEASE_STATUS_MAP.get(row.release_status || '')?.name || row.release_status || '',
-  }))
-}
-
 function createGroupNode(key, rowType, groupName, extra = {}) {
   return {
     key,
@@ -779,15 +744,6 @@ const AppVersionRelease = {
         err.message = '紧急程度不合法'
         throw err
       }
-    }
-
-    const conflicts = await findBlockingReleasesByPackageIds(packageIds)
-    if (conflicts.length > 0) {
-      const err = new Error('app_release_blocking_records_exist')
-      err.statusCode = 409
-      err.message = '所选app包存在未上架的发版记录，请先修改已有记录'
-      err.conflicts = conflicts
-      throw err
     }
 
     const packageDetails = await Promise.all(packageIds.map((packageId) => MatrixPackage.getById(packageId)))
