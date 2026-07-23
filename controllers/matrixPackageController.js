@@ -17,6 +17,7 @@ const {
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 const PREPARATION_NODE_CODES = new Set(['OPERATION_MATERIAL', 'DESIGN_PRODUCTION'])
 const SIDE_CHECK_NOTIFICATION_NOTE_TYPES = new Set(['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS'])
+const REQUIRED_PRODUCTION_COMPLETE_SIDE_CHECK_TYPES = ['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS']
 
 function normalizeText(value, maxLen = 500) {
   return String(value || '').trim().slice(0, maxLen)
@@ -592,6 +593,24 @@ async function completeMatrixPackageProduction(req, res) {
     const beforePackage = await MatrixPackage.getById(req.params.id)
     if (!beforePackage) {
       return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    const sideNotes = await MatrixPackageSideNote.listByPackageId(req.params.id)
+    const confirmedTypeSet = new Set(
+      (Array.isArray(sideNotes) ? sideNotes : [])
+        .filter((item) => item?.is_confirmed)
+        .map((item) => String(item.note_type || '').trim().toUpperCase()),
+    )
+    const missingSideCheckTypes = REQUIRED_PRODUCTION_COMPLETE_SIDE_CHECK_TYPES.filter(
+      (noteType) => !confirmedTypeSet.has(noteType),
+    )
+    if (missingSideCheckTypes.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: '请先完成各侧信息check后再生产完成',
+        data: {
+          missing_side_check_types: missingSideCheckTypes,
+        },
+      })
     }
 
     const packagePayload = {

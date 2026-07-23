@@ -47,7 +47,8 @@ function toPositiveInt(value) {
 }
 
 function normalizePositiveIntList(values) {
-  const source = Array.isArray(values) ? values : [values]
+  const source = (Array.isArray(values) ? values : [values])
+    .flatMap((item) => String(item || '').split(','))
   const dedup = new Set()
   source.forEach((item) => {
     const normalized = toPositiveInt(item)
@@ -858,6 +859,7 @@ const listBugs = async (req, res) => {
       issueStage: req.query.issue_stage,
       demandId: req.query.demand_id,
       assigneeId: req.query.assignee_id,
+      assigneeIds: req.query.assignee_ids,
       reporterId: req.query.reporter_id,
       startDate: normalizeDate(req.query.start_date),
       endDate: normalizeDate(req.query.end_date),
@@ -1950,6 +1952,7 @@ const listDemandBugs = async (req, res) => {
       issueStage: req.query.issue_stage,
       demandId,
       assigneeId: req.query.assignee_id,
+      assigneeIds: req.query.assignee_ids,
       reporterId: req.query.reporter_id,
       startDate: normalizeDate(req.query.start_date),
       endDate: normalizeDate(req.query.end_date),

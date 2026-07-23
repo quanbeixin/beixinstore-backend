@@ -119,7 +119,8 @@ function toPositiveInt(value) {
 }
 
 function normalizePositiveIntList(values) {
-  const source = Array.isArray(values) ? values : [values]
+  const source = (Array.isArray(values) ? values : [values])
+    .flatMap((item) => String(item || '').split(','))
   const dedup = new Set()
   source.forEach((item) => {
     const normalized = toPositiveInt(item)
@@ -220,6 +221,11 @@ function sanitizeBugViewConfig(config = {}) {
     })
     .slice(0, 3)
   const pageSize = Number(source.page_size || 0)
+  const assigneeIds = normalizePositiveIntList(source.assignee_ids)
+  const legacyAssigneeId = toPositiveInt(source.assignee_id)
+  if (legacyAssigneeId && !assigneeIds.includes(legacyAssigneeId)) {
+    assigneeIds.unshift(legacyAssigneeId)
+  }
 
   return {
     keyword: normalizeText(source.keyword, 100),
@@ -227,7 +233,8 @@ function sanitizeBugViewConfig(config = {}) {
     severity_code: normalizeCode(source.severity_code),
     issue_stage: normalizeCode(source.issue_stage),
     demand_id: normalizeText(source.demand_id, 50),
-    assignee_id: toPositiveInt(source.assignee_id),
+    assignee_id: assigneeIds[0] || null,
+    assignee_ids: assigneeIds,
     reporter_id: toPositiveInt(source.reporter_id),
     start_date: normalizeDateText(source.start_date),
     end_date: normalizeDateText(source.end_date),
@@ -356,6 +363,7 @@ function buildBugListWhere({
   issueStage = '',
   demandId = '',
   assigneeId = null,
+  assigneeIds = [],
   reporterId = null,
   startDate = '',
   endDate = '',
@@ -403,16 +411,22 @@ function buildBugListWhere({
     params.push(demandId)
   }
 
-  if (assigneeId) {
+  const normalizedAssigneeIds = normalizePositiveIntList(assigneeIds)
+  const legacyAssigneeId = toPositiveInt(assigneeId)
+  if (legacyAssigneeId && !normalizedAssigneeIds.includes(legacyAssigneeId)) {
+    normalizedAssigneeIds.unshift(legacyAssigneeId)
+  }
+  if (normalizedAssigneeIds.length > 0) {
+    const placeholders = normalizedAssigneeIds.map(() => '?').join(', ')
     conditions.push(
-      `(b.assignee_id = ? OR EXISTS (
+      `(b.assignee_id IN (${placeholders}) OR EXISTS (
         SELECT 1
         FROM bug_assignees ba_filter
         WHERE ba_filter.bug_id = b.id
-          AND ba_filter.user_id = ?
+          AND ba_filter.user_id IN (${placeholders})
       ))`,
     )
-    params.push(assigneeId, assigneeId)
+    params.push(...normalizedAssigneeIds, ...normalizedAssigneeIds)
   }
 
   if (reporterId) {
@@ -1245,6 +1259,7 @@ const Bug = {
     issueStage = '',
     demandId = '',
     assigneeId = null,
+    assigneeIds = [],
     reporterId = null,
     startDate = '',
     endDate = '',
@@ -1262,6 +1277,7 @@ const Bug = {
       issueStage: normalizeCode(issueStage),
       demandId: normalizeDemandId(demandId),
       assigneeId: toPositiveInt(assigneeId),
+      assigneeIds: normalizePositiveIntList(assigneeIds),
       reporterId: toPositiveInt(reporterId),
       startDate: normalizeText(startDate, 10),
       endDate: normalizeText(endDate, 10),

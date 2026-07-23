@@ -8,7 +8,7 @@ const APP_RELEASE_MANAGER_ROLE_KEYS = [
 ]
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 const APP_VERSION_RELEASE_PATH = '/app-version-release'
-const APPLICANT_NOTIFY_STATUS_CODES = new Set(['LISTED', 'REJECTED', 'CANCELLED'])
+const APPLICANT_NOTIFY_STATUS_CODES = new Set(['IN_REVIEW', 'LISTED', 'REJECTED', 'CANCELLED'])
 
 function normalizeText(value, maxLength = 500) {
   return String(value || '').trim().slice(0, maxLength)
