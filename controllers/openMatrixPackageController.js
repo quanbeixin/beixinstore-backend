@@ -76,10 +76,12 @@ const FIELD_DEFINITIONS = {
     { name: 'prodGoogleAuthClientId', description: '生产环境谷歌鉴权认证ClientId' },
     { name: 'prodGoogleAuthClientSecret', description: '生产环境谷歌鉴权认证ClientSecret' },
     { name: 'prodGooglePayCertificateUrl', description: '生产环境谷歌支付证书地址' },
+    { name: 'prodGooglePayCertificateContent', description: '生产环境谷歌支付证书内容' },
     { name: 'prodGooglePayPackageName', description: '生产环境谷歌支付包名' },
     { name: 'testGoogleAuthClientId', description: '测试环境谷歌鉴权认证ClientId' },
     { name: 'testGoogleAuthClientSecret', description: '测试环境谷歌鉴权认证ClientSecret' },
     { name: 'testGooglePayCertificateUrl', description: '测试环境谷歌支付证书地址' },
+    { name: 'testGooglePayCertificateContent', description: '测试环境谷歌支付证书内容' },
     { name: 'testGooglePayPackageName', description: '测试环境谷歌支付包名' },
     { name: 'pushFcmFile', description: 'push-fcm文件' },
   ],
@@ -138,6 +140,24 @@ function normalizeH5Domain(domainInfo) {
     .toLowerCase()
 }
 
+function normalizeDomainForMatch(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^[a-z][a-z\d+.-]*:\/\//i, '')
+    .split(/[/?#]/)[0]
+    .replace(/^\.+|\.+$/g, '')
+    .toLowerCase()
+}
+
+function extractDomainCandidates(value) {
+  return Array.from(new Set(
+    String(value || '')
+      .split(/[\s,，;；]+/)
+      .map((item) => normalizeDomainForMatch(item))
+      .filter(Boolean),
+  ))
+}
+
 function buildGeneratedH5Values(row) {
   const packageName = normalizeH5PackageName(row?.package_name)
   const domain = normalizeH5Domain(row?.domain_info)
@@ -171,6 +191,20 @@ function parseJsonObject(value) {
   } catch {
     return {}
   }
+}
+
+function verifyOpenApiToken(req, res) {
+  const expectedToken = normalizeText(process.env.MATRIX_PACKAGE_OPEN_API_TOKEN, 500)
+  const token = normalizeText(req.query?.token || req.body?.token || req.headers['x-open-api-token'], 500)
+  if (!expectedToken) {
+    res.status(503).json({ success: false, message: '开放接口 token 未配置' })
+    return false
+  }
+  if (!token || token !== expectedToken) {
+    res.status(401).json({ success: false, message: 'token 无效' })
+    return false
+  }
+  return true
 }
 
 function parseCompanyEnglishName(rawExtraJson) {
@@ -361,14 +395,7 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
 }
 
 async function listOpenMatrixPackages(req, res) {
-  const expectedToken = normalizeText(process.env.MATRIX_PACKAGE_OPEN_API_TOKEN, 500)
-  const token = normalizeText(req.query?.token || req.headers['x-open-api-token'], 500)
-  if (!expectedToken) {
-    return res.status(503).json({ success: false, message: '开放接口 token 未配置' })
-  }
-  if (!token || token !== expectedToken) {
-    return res.status(401).json({ success: false, message: 'token 无效' })
-  }
+  if (!verifyOpenApiToken(req, res)) return undefined
 
   const packageName = normalizeText(req.query?.package_name, 120)
   const appId = normalizeText(req.query?.app_id, 120)
@@ -519,6 +546,115 @@ async function listOpenMatrixPackages(req, res) {
   }
 }
 
+async function updateGooglePayCertificateContent(req, res) {
+  if (!verifyOpenApiToken(req, res)) return undefined
+
+  const domain = normalizeDomainForMatch(req.body?.domain || req.query?.domain)
+  const env = normalizeText(req.body?.env || req.query?.env, 20).toLowerCase()
+  const rawContent = req.body?.content ?? req.body?.Content ?? req.body?.CONTENT
+  const content = typeof rawContent === 'string' ? rawContent.slice(0, 500000) : String(rawContent ?? '').slice(0, 500000)
+
+  if (!domain) {
+    return res.status(400).json({ success: false, message: 'domain 不能为空' })
+  }
+  if (!['prod', 'test'].includes(env)) {
+    return res.status(400).json({ success: false, message: 'env 仅支持 prod / test' })
+  }
+  if (!String(content || '').trim()) {
+    return res.status(400).json({ success: false, message: 'content 不能为空' })
+  }
+
+  const fieldName = env === 'prod' ? 'prodGooglePayCertificateContent' : 'testGooglePayCertificateContent'
+
+  try {
+    const [packageRows] = await pool.query(
+      `SELECT id, package_name, domain_info
+       FROM matrix_packages
+       WHERE deleted_at IS NULL
+         AND COALESCE(TRIM(domain_info), '') <> ''`,
+    )
+    const matchedPackages = (packageRows || []).filter((row) => extractDomainCandidates(row.domain_info).includes(domain))
+    if (matchedPackages.length === 0) {
+      return res.status(404).json({ success: false, message: '未找到匹配域名的矩阵包' })
+    }
+    if (matchedPackages.length > 1) {
+      return res.status(409).json({
+        success: false,
+        message: '域名匹配到多个矩阵包，请检查域名配置',
+        data: matchedPackages.map((row) => ({
+          package_id: Number(row.id),
+          package_name: row.package_name || '',
+          domain_info: row.domain_info || '',
+        })),
+      })
+    }
+
+    const matchedPackage = matchedPackages[0]
+    const packageId = Number(matchedPackage.id)
+    const [noteRows] = await pool.query(
+      `SELECT content
+       FROM matrix_package_side_notes
+       WHERE package_id = ? AND note_type = 'DEVOPS'
+       LIMIT 1`,
+      [packageId],
+    )
+    const currentContent = parseJsonObject(noteRows?.[0]?.content)
+    const nextContent = {
+      ...currentContent,
+      [fieldName]: content,
+    }
+    const serializedContent = JSON.stringify(nextContent)
+
+    await pool.query(
+      `INSERT INTO matrix_package_side_notes
+       (package_id, note_type, content, created_by, updated_by)
+       VALUES (?, 'DEVOPS', ?, NULL, NULL)
+       ON DUPLICATE KEY UPDATE
+        content = VALUES(content),
+        updated_by = VALUES(updated_by),
+        updated_at = CURRENT_TIMESTAMP`,
+      [packageId, serializedContent],
+    )
+
+    const [[updatedRow]] = await pool.query(
+      `SELECT DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM matrix_package_side_notes
+       WHERE package_id = ? AND note_type = 'DEVOPS'
+       LIMIT 1`,
+      [packageId],
+    )
+
+    console.info('开放接口保存谷歌支付证书内容成功', {
+      package_id: packageId,
+      env,
+      field: fieldName,
+      content_length: content.length,
+    })
+
+    return res.json({
+      success: true,
+      message: '保存成功',
+      data: {
+        package_id: packageId,
+        package_name: matchedPackage.package_name || '',
+        domain,
+        env,
+        field: fieldName,
+        updated_at: updatedRow?.updated_at || null,
+      },
+    })
+  } catch (error) {
+    console.error('开放接口保存谷歌支付证书内容失败:', {
+      domain,
+      env,
+      content_length: content.length,
+      message: error?.message || error,
+    })
+    return res.status(500).json({ success: false, message: '保存谷歌支付证书内容失败' })
+  }
+}
+
 module.exports = {
   listOpenMatrixPackages,
+  updateGooglePayCertificateContent,
 }

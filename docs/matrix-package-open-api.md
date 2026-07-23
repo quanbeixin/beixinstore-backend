@@ -323,10 +323,12 @@ curl \
 | `prodGoogleAuthClientId` | 生产环境谷歌鉴权认证ClientId | 文本 |
 | `prodGoogleAuthClientSecret` | 生产环境谷歌鉴权认证ClientSecret | 文本 |
 | `prodGooglePayCertificateUrl` | 生产环境谷歌支付证书地址 | 文本/链接 |
+| `prodGooglePayCertificateContent` | 生产环境谷歌支付证书内容 | 文本 |
 | `prodGooglePayPackageName` | 生产环境谷歌支付包名 | 文本 |
 | `testGoogleAuthClientId` | 测试环境谷歌鉴权认证ClientId | 文本 |
 | `testGoogleAuthClientSecret` | 测试环境谷歌鉴权认证ClientSecret | 文本 |
 | `testGooglePayCertificateUrl` | 测试环境谷歌支付证书地址 | 文本/链接 |
+| `testGooglePayCertificateContent` | 测试环境谷歌支付证书内容 | 文本 |
 | `testGooglePayPackageName` | 测试环境谷歌支付包名 | 文本 |
 | `pushFcmFile` | push-fcm文件 | 附件 |
 
@@ -440,7 +442,71 @@ curl \
 | `COMPLETED` | 已完成 |
 | `BLOCKED` | 阻塞 |
 
-## 14. 错误响应
+## 14. 保存谷歌支付证书内容
+
+该接口用于外部运维系统按域名写入矩阵包运维补充中的谷歌支付证书内容。
+
+| 项目 | 说明 |
+|------|------|
+| 请求方式 | `POST` |
+| 接口路径 | `/api/open/matrix-packages/google-pay-certificate-content` |
+| 认证方式 | 固定 token，与查询接口共用 `MATRIX_PACKAGE_OPEN_API_TOKEN` |
+| 请求格式 | `application/json` |
+
+请求参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|:----:|------|
+| `token` | string | 条件必填 | 固定访问 token。使用 `x-open-api-token` 请求头时可不传 |
+| `domain` | string | 是 | 域名。系统会标准化匹配矩阵包 `domain_info` |
+| `env` | string | 是 | `prod` 或 `test` |
+| `content` / `Content` | string | 是 | 谷歌支付证书内容 |
+
+字段映射：
+
+| `env` | 写入字段 |
+|------|----------|
+| `prod` | `prodGooglePayCertificateContent` |
+| `test` | `testGooglePayCertificateContent` |
+
+请求示例：
+
+```bash
+curl -X POST "http://localhost:3000/api/open/matrix-packages/google-pay-certificate-content" \
+  -H "Content-Type: application/json" \
+  -H "x-open-api-token: <your-open-api-token>" \
+  -d '{
+    "domain": "storylume.example.com",
+    "env": "prod",
+    "content": "certificate content"
+  }'
+```
+
+成功响应：
+
+```json
+{
+  "success": true,
+  "message": "保存成功",
+  "data": {
+    "package_id": 123,
+    "package_name": "Storylume",
+    "domain": "storylume.example.com",
+    "env": "prod",
+    "field": "prodGooglePayCertificateContent",
+    "updated_at": "2026-07-23 12:00:00"
+  }
+}
+```
+
+匹配规则：
+
+- `domain` 会去掉 `http://`、`https://`、路径、查询参数并转小写。
+- 矩阵包 `domain_info` 支持用逗号、空格、换行分隔多个域名。
+- 如果匹配不到矩阵包，返回 `404`。
+- 如果同一个域名匹配到多个矩阵包，返回 `409`，需要先校准域名配置。
+
+## 15. 错误响应
 
 ### token 未配置
 
@@ -475,7 +541,7 @@ HTTP 状态码：`500`
 }
 ```
 
-## 15. 对接建议
+## 16. 对接建议
 
 - 外部调用方建议优先使用 `x-open-api-token` 请求头传 token，避免 token 出现在日志 URL 中。
 - 如果只需要单个矩阵包，优先传 `app_id`，因为包 ID 更稳定。

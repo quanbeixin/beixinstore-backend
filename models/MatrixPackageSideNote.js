@@ -28,7 +28,7 @@ function stripTransientAttachmentFields(value) {
 }
 
 function normalizeNoteContent(value) {
-  const text = normalizeText(value, 60000)
+  const text = normalizeText(value, 1000000)
   if (!text) return ''
 
   try {

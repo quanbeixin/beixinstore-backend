@@ -106,7 +106,7 @@ const openApiCorsOptions = {
     callback(null, false)
   },
   credentials: false,
-  methods: ['GET', 'OPTIONS'],
+  methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'X-Open-API-Token', 'Authorization'],
   maxAge: 600,
 }
