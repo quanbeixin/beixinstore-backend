@@ -882,10 +882,20 @@ function extractParticipantRoleUserIds(participantRoleUserMap = {}, participantR
   )
 }
 
-async function buildDemandAutoGroupMemberOpenIds({ ownerOpenId = '', participantRoleUserMap = {}, participantRoles = [] } = {}) {
+function extractTemplateDefaultGroupMemberUserIds(template = {}) {
+  return toPositiveIntList(template?.group_chat_config?.default_member_user_ids)
+}
+
+async function buildDemandAutoGroupMemberOpenIds({
+  ownerOpenId = '',
+  participantRoleUserMap = {},
+  participantRoles = [],
+  templateDefaultMemberUserIds = [],
+} = {}) {
   const normalizedOwnerOpenId = normalizeText(ownerOpenId, 128)
   const roleUserIds = extractParticipantRoleUserIds(participantRoleUserMap, participantRoles)
-  const participantOpenIds = await resolveOpenIdsByUserIds(roleUserIds)
+  const memberUserIds = Array.from(new Set([...roleUserIds, ...toPositiveIntList(templateDefaultMemberUserIds)]))
+  const participantOpenIds = await resolveOpenIdsByUserIds(memberUserIds)
   return Array.from(new Set([normalizedOwnerOpenId, ...participantOpenIds].filter(Boolean)))
 }
 
@@ -2255,6 +2265,7 @@ const createDemand = async (req, res) => {
   }
 
   try {
+    let selectedTemplate = null
     const owner = await User.findById(ownerUserId)
     if (!owner) {
       return res.status(400).json({ success: false, message: '负责人用户不存在' })
@@ -2272,6 +2283,7 @@ const createDemand = async (req, res) => {
       if (!template) {
         return res.status(400).json({ success: false, message: 'template_id 对应模板不存在或未启用' })
       }
+      selectedTemplate = template
       if (!validateTemplateParticipantRoles(template, syncedParticipantRolePayload.participantRoles || [])) {
         return res.status(400).json({ success: false, message: '当前参与角色未命中模板节点，请调整参与角色或模板配置' })
       }
@@ -2346,6 +2358,7 @@ const createDemand = async (req, res) => {
           ownerOpenId,
           participantRoleUserMap: syncedParticipantRolePayload.participantRoleUserMap || {},
           participantRoles: syncedParticipantRolePayload.participantRoles || [],
+          templateDefaultMemberUserIds: extractTemplateDefaultGroupMemberUserIds(selectedTemplate),
         })
 
         const chatResult = await createFeishuDemandChat({
@@ -2626,6 +2639,7 @@ const updateDemand = async (req, res) => {
       return res.status(400).json({ success: false, message: '需求名称不能为空' })
     }
 
+    let selectedTemplate = null
     const owner = await User.findById(ownerUserId)
     if (!owner) {
       return res.status(400).json({ success: false, message: '负责人用户不存在' })
@@ -2647,6 +2661,7 @@ const updateDemand = async (req, res) => {
       if (!template) {
         return res.status(400).json({ success: false, message: 'template_id 对应模板不存在或未启用' })
       }
+      selectedTemplate = template
       if (!validateTemplateParticipantRoles(template, finalParticipantRoles || [])) {
         return res.status(400).json({ success: false, message: '当前参与角色未命中模板节点，请调整参与角色或模板配置' })
       }
@@ -2768,6 +2783,7 @@ const updateDemand = async (req, res) => {
           ownerOpenId,
           participantRoleUserMap: finalParticipantRoleUserMap || {},
           participantRoles: finalParticipantRoles || [],
+          templateDefaultMemberUserIds: extractTemplateDefaultGroupMemberUserIds(selectedTemplate),
         })
         const currentChatId =
           normalizeDemandGroupChatId(updated?.group_chat_id) ||
