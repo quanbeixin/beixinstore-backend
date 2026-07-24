@@ -680,14 +680,6 @@ const MatrixPackage = {
       throw err
     }
 
-    const existingStatusCode = normalizeOptionalCode(existing.status_code)
-    if (existingStatusCode === 'PENDING_DEV' && statusCode === 'IN_DEVELOPMENT' && !developerAccountId) {
-      const err = new Error('developer_account_required_before_development')
-      err.statusCode = 400
-      err.message = '请先绑定开发者账号后推进开发'
-      throw err
-    }
-
     const hasProductionStage = Object.prototype.hasOwnProperty.call(payload, 'production_stage_code')
     const productionStageCode = hasProductionStage
       ? normalizeOptionalCode(payload.production_stage_code)

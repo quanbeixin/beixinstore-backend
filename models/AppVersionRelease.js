@@ -326,6 +326,22 @@ async function resolveDefaultReleaseOwnerInfo(fallback = {}) {
   }
 }
 
+async function resolveMatrixPackageReleaseApplicant(packageDetail = {}) {
+  const ownerUserId = toPositiveInt(packageDetail.owner_user_id)
+  if (ownerUserId) {
+    const owner = await resolveUserInfo(ownerUserId)
+    return {
+      id: owner.id || ownerUserId,
+      name: owner.name || normalizeText(packageDetail.owner_name, 80) || '系统创建',
+    }
+  }
+
+  return {
+    id: null,
+    name: '系统创建',
+  }
+}
+
 async function assignReleaseRequestNo(releaseId, conn = pool) {
   const normalizedReleaseId = toPositiveInt(releaseId)
   if (!normalizedReleaseId) return
@@ -848,7 +864,7 @@ const AppVersionRelease = {
     ])
 
     const releaseType = await resolveReleaseType(packageDetail)
-    const applicant = await resolveUserInfo(userId)
+    const applicant = await resolveMatrixPackageReleaseApplicant(packageDetail)
     const appName = normalizeText(operationContent.appName, 160) || normalizeText(packageDetail.package_name, 160)
     const appVersion = normalizeText(frontendContent.appVersion, 80)
     const appConsoleUrl = normalizeText(frontendContent.appConsoleUrl, 1000)
@@ -875,7 +891,7 @@ const AppVersionRelease = {
         applicant.name || null,
         releaseOwner.id || null,
         releaseOwner.name || null,
-        userId || null,
+        userId || applicant.id || null,
         userId || null,
       ],
     )
