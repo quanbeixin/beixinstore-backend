@@ -107,6 +107,13 @@ const PRODUCTION_NODE_DEFINITIONS = [
     owner_side: '前端',
     sort_order: 20,
   },
+  {
+    node_code: 'BACKEND_SCRIPT',
+    node_name: '后端脚本',
+    description: '后端脚本',
+    owner_side: '后端',
+    sort_order: 30,
+  },
 ]
 
 const PRODUCTION_NODE_STATUS_NAMES = {

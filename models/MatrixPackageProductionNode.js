@@ -17,6 +17,13 @@ const NODE_DEFINITIONS = [
     sort_order: 20,
     depends_on: [],
   },
+  {
+    node_code: 'BACKEND_SCRIPT',
+    node_name: '后端脚本',
+    owner_side: '后端',
+    sort_order: 30,
+    depends_on: [],
+  },
 ]
 
 const NODE_CODES = NODE_DEFINITIONS.map((item) => item.node_code)
@@ -130,9 +137,9 @@ const MatrixPackageProductionNode = {
          updated_by,
          DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
        FROM matrix_package_production_nodes
-       WHERE package_id = ? AND node_code IN (?, ?)
-       ORDER BY FIELD(node_code, 'OPERATION_MATERIAL', 'DESIGN_PRODUCTION')`,
-      [matrixPackage.id, ...NODE_CODES],
+       WHERE package_id = ? AND node_code IN (?)
+       ORDER BY FIELD(node_code, 'OPERATION_MATERIAL', 'DESIGN_PRODUCTION', 'BACKEND_SCRIPT')`,
+      [matrixPackage.id, NODE_CODES],
     )
     const rowMap = new Map(rows.map((row) => [row.node_code, row]))
     return NODE_DEFINITIONS.map((definition) => mergeDefinition(definition, rowMap.get(definition.node_code), matrixPackage.id))

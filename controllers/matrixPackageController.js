@@ -15,7 +15,7 @@ const {
 } = require('../utils/oss')
 
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
-const PREPARATION_NODE_CODES = new Set(['OPERATION_MATERIAL', 'DESIGN_PRODUCTION'])
+const PREPARATION_NODE_CODES = new Set(['OPERATION_MATERIAL', 'DESIGN_PRODUCTION', 'BACKEND_SCRIPT'])
 const SIDE_CHECK_NOTIFICATION_NOTE_TYPES = new Set(['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS'])
 const REQUIRED_PRODUCTION_COMPLETE_SIDE_CHECK_TYPES = ['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS']
 
@@ -719,6 +719,15 @@ async function updateMatrixPackageProductionNode(req, res) {
     const afterNode = Array.isArray(data)
       ? data.find((item) => item.node_code === nodeCode) || null
       : null
+    const prevOwnerUserId = toPositiveInt(beforeNode?.owner_user_id)
+    const nextOwnerUserId = toPositiveInt(afterNode?.owner_user_id)
+    if (nextOwnerUserId && nextOwnerUserId !== prevOwnerUserId) {
+      await MatrixPackageDemandService.syncProductionGroupMembers(
+        packageDetail,
+        [nextOwnerUserId],
+        req.user?.id || null,
+      )
+    }
     await notifyPreparationNodeCompletedQuietly({
       packageDetail,
       beforeNode,
@@ -782,9 +791,38 @@ async function remindMatrixPackageProductionNode(req, res) {
 
 async function saveMatrixPackageSideNotes(req, res) {
   try {
+    const [packageDetail, beforeNotes] = await Promise.all([
+      MatrixPackage.getById(req.params.id),
+      MatrixPackageSideNote.listByPackageId(req.params.id),
+    ])
+    if (!packageDetail || !Array.isArray(beforeNotes)) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
     const data = await MatrixPackageSideNote.saveBatch(req.params.id, req.body?.notes || [], req.user?.id)
     if (!data) {
       return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    const beforeOwnerMap = new Map(
+      beforeNotes.map((item) => [String(item?.note_type || '').trim().toUpperCase(), toPositiveInt(item?.owner_user_id)]),
+    )
+    const ownerUserIds = Array.from(
+      new Set(
+        (Array.isArray(data) ? data : [])
+          .filter((item) => {
+            const noteType = String(item?.note_type || '').trim().toUpperCase()
+            const nextOwnerUserId = toPositiveInt(item?.owner_user_id)
+            return nextOwnerUserId && nextOwnerUserId !== beforeOwnerMap.get(noteType)
+          })
+          .map((item) => toPositiveInt(item?.owner_user_id))
+          .filter(Boolean),
+      ),
+    )
+    if (ownerUserIds.length > 0) {
+      await MatrixPackageDemandService.syncProductionGroupMembers(
+        packageDetail,
+        ownerUserIds,
+        req.user?.id || null,
+      )
     }
     return res.json({ success: true, message: '补充信息已保存', data: decorateMatrixPackageSideNotes(data) })
   } catch (error) {

@@ -41,7 +41,7 @@ const SCENE_DEFINITIONS = Object.freeze([
   {
     code: 'matrix_package_preparation_all_completed',
     name: '前置准备全部完成通知',
-    description: '当前置准备中的运营物料信息提供、前端空包构建上传都完成时，通知对应矩阵包生产群。',
+    description: '当前置准备中的运营物料信息提供、前端空包构建上传、后端脚本都完成时，通知对应矩阵包生产群。',
     type: 'PREPARATION_ALL_COMPLETED',
   },
   {
@@ -60,7 +60,7 @@ const MATRIX_PACKAGE_GROUP_SCENE_TYPES = new Set([
   'PRODUCTION_NODE_DEADLINE',
   'PREPARATION_ALL_COMPLETED',
 ])
-const REQUIRED_PREPARATION_NODE_CODES = ['OPERATION_MATERIAL', 'DESIGN_PRODUCTION']
+const REQUIRED_PREPARATION_NODE_CODES = ['OPERATION_MATERIAL', 'DESIGN_PRODUCTION', 'BACKEND_SCRIPT']
 
 function normalizeText(value, maxLength = 255) {
   if (value === undefined || value === null) return ''
@@ -1049,6 +1049,7 @@ function getProductionNodeDisplayName(nodeCode) {
   const map = {
     OPERATION_MATERIAL: '运营物料信息提供',
     DESIGN_PRODUCTION: '前端空包构建上传',
+    BACKEND_SCRIPT: '后端脚本',
   }
   return map[String(nodeCode || '').trim().toUpperCase()] || nodeCode || ''
 }

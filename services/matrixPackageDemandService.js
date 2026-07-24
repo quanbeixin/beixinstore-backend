@@ -3,7 +3,7 @@ const Work = require('../models/Work')
 const Workflow = require('../models/Workflow')
 const MatrixPackage = require('../models/MatrixPackage')
 const FeishuUserBinding = require('../models/FeishuUserBinding')
-const { createFeishuDemandChat } = require('../utils/notificationSender')
+const { addFeishuChatMembers, createFeishuDemandChat } = require('../utils/notificationSender')
 
 const TEMPLATE_NAME = '矩阵包生产流程'
 const NODE_KEYS = {
@@ -11,7 +11,7 @@ const NODE_KEYS = {
   PRODUCTION: 'MATRIX_PRODUCTION',
   TEST_ACCEPTANCE: 'TEST_ACCEPTANCE',
 }
-const PRODUCTION_STATUS_CODES = new Set(['PENDING_DEV', 'IN_DEVELOPMENT', 'COLD_STANDBY'])
+const PRODUCTION_STATUS_CODES = new Set(['IN_DEVELOPMENT', 'COLD_STANDBY'])
 
 function toPositiveInt(value) {
   const numeric = Number.parseInt(value, 10)
@@ -242,6 +242,61 @@ async function ensureDemandAutoGroupChatQuietly(demandId, ownerUserId) {
   }
 }
 
+async function addDemandGroupChatMembersQuietly(demandId, userIds = []) {
+  const demand = await resolveDemandGroupChat(demandId)
+  if (!demand) {
+    return {
+      success: false,
+      skipped: true,
+      reason: 'DEMAND_NOT_FOUND',
+    }
+  }
+
+  const chatId = normalizeText(demand.group_chat_id, 128)
+  const groupChatMode = normalizeText(demand.group_chat_mode, 20).toLowerCase()
+  if ((groupChatMode !== 'auto' && groupChatMode !== 'bind') || !chatId) {
+    return {
+      success: false,
+      skipped: true,
+      reason: 'DEMAND_GROUP_CHAT_NOT_FOUND',
+    }
+  }
+
+  const memberOpenIds = await resolveUserFeishuOpenIds(userIds)
+  if (memberOpenIds.length === 0) {
+    return {
+      success: false,
+      skipped: true,
+      chat_id: chatId,
+      reason: 'GROUP_CHAT_MEMBER_FEISHU_OPEN_ID_MISSING',
+    }
+  }
+
+  try {
+    const result = await addFeishuChatMembers({
+      chatId,
+      memberOpenIds,
+    })
+    return {
+      ...result,
+      chat_id: chatId,
+    }
+  } catch (error) {
+    console.warn('矩阵包生产群补充成员失败（已忽略）:', {
+      demandId: normalizeText(demandId, 64),
+      chatId,
+      message: error?.message || error,
+    })
+    return {
+      success: false,
+      skipped: true,
+      chat_id: chatId,
+      reason: 'ADD_GROUP_CHAT_MEMBERS_ERROR',
+      error_message: error?.message || '补充群成员异常',
+    }
+  }
+}
+
 async function unlinkPackageDemand(packageId, demandId) {
   await pool.query(
     `UPDATE matrix_packages
@@ -461,6 +516,56 @@ const MatrixPackageDemandService = {
       advanced: true,
       from_node_key: NODE_KEYS.PRODUCTION,
       current_node_key: normalizeText(nextWorkflow?.current_node?.node_key, 64).toUpperCase() || null,
+    }
+  },
+
+  async syncProductionGroupMembers(matrixPackageInput, userIds = [], operatorUserId = null) {
+    try {
+      const packageId = toPositiveInt(matrixPackageInput?.id)
+      const normalizedUserIds = Array.from(
+        new Set((Array.isArray(userIds) ? userIds : []).map((item) => toPositiveInt(item)).filter(Boolean)),
+      )
+      if (!packageId || normalizedUserIds.length === 0) {
+        return {
+          success: false,
+          skipped: true,
+          reason: 'EMPTY_MEMBER_USER_IDS',
+        }
+      }
+
+      const matrixPackage = matrixPackageInput?.package_name
+        ? matrixPackageInput
+        : await MatrixPackage.getById(packageId)
+      if (!matrixPackage || !shouldEnsureDemand(matrixPackage)) {
+        return {
+          success: false,
+          skipped: true,
+          reason: 'PACKAGE_NOT_IN_PRODUCTION_FLOW',
+        }
+      }
+
+      const ensureResult = await this.ensureProductionDemand(matrixPackage, operatorUserId)
+      const demandId = normalizeText(ensureResult?.demand_id || matrixPackage.linked_demand_id, 64)
+      if (!demandId) {
+        return {
+          success: false,
+          skipped: true,
+          reason: 'NO_LINKED_DEMAND',
+        }
+      }
+
+      return addDemandGroupChatMembersQuietly(demandId, normalizedUserIds)
+    } catch (error) {
+      console.warn('矩阵包生产群成员同步失败（已忽略）:', {
+        packageId: toPositiveInt(matrixPackageInput?.id) || null,
+        message: error?.message || error,
+      })
+      return {
+        success: false,
+        skipped: true,
+        reason: 'SYNC_PRODUCTION_GROUP_MEMBERS_ERROR',
+        error_message: error?.message || '生产群成员同步异常',
+      }
     }
   },
 }

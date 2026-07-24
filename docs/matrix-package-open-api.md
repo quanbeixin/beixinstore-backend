@@ -385,6 +385,7 @@ curl \
 |----------|----------|
 | `OPERATION_MATERIAL` | 运营物料信息提供 |
 | `DESIGN_PRODUCTION` | 前端空包构建上传 |
+| `BACKEND_SCRIPT` | 后端脚本 |
 
 每个节点结构：
 
