@@ -518,9 +518,9 @@ async function safeGetDemandWorkflowSnapshot(demandId) {
   }
 }
 
-async function syncMatrixPackageAfterTestAcceptanceCompleted({ demandId, fromNodeKey, operatorUserId = null } = {}) {
+async function syncMatrixPackageAfterProductAcceptanceCompleted({ demandId, fromNodeKey, operatorUserId = null } = {}) {
   const normalizedDemandId = normalizeDemandId(demandId)
-  if (!normalizedDemandId || normalizePhaseKey(fromNodeKey) !== 'TEST_ACCEPTANCE') return null
+  if (!normalizedDemandId || normalizePhaseKey(fromNodeKey) !== 'PRODUCT_ACCEPTANCE') return null
 
   try {
     const [rows] = await pool.query(
@@ -577,7 +577,7 @@ async function syncMatrixPackageAfterTestAcceptanceCompleted({ demandId, fromNod
       release_id: release?.id || null,
     }
   } catch (error) {
-    console.warn('矩阵包测试验收通过后同步冷备包失败（已忽略）:', {
+    console.warn('矩阵包产品验收通过后同步冷备包失败（已忽略）:', {
       demand_id: normalizedDemandId,
       from_node_key: fromNodeKey || '',
       message: error?.message || String(error || ''),
@@ -5304,7 +5304,7 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
       demandBefore: demand,
       operatorUserId: req.user.id,
     })
-    await syncMatrixPackageAfterTestAcceptanceCompleted({
+    await syncMatrixPackageAfterProductAcceptanceCompleted({
       demandId,
       fromNodeKey,
       operatorUserId: req.user.id,
@@ -5409,7 +5409,7 @@ const submitDemandWorkflowNode = async (req, res) => {
       demandBefore: demand,
       operatorUserId: req.user.id,
     })
-    await syncMatrixPackageAfterTestAcceptanceCompleted({
+    await syncMatrixPackageAfterProductAcceptanceCompleted({
       demandId,
       fromNodeKey,
       operatorUserId: req.user.id,
@@ -5689,7 +5689,7 @@ const forceCompleteDemandWorkflowCurrentNode = async (req, res) => {
       demandBefore: demand,
       operatorUserId: req.user.id,
     })
-    await syncMatrixPackageAfterTestAcceptanceCompleted({
+    await syncMatrixPackageAfterProductAcceptanceCompleted({
       demandId,
       fromNodeKey,
       operatorUserId: req.user.id,
@@ -5789,7 +5789,7 @@ const forceCompleteDemandWorkflowNode = async (req, res) => {
       demandBefore: demand,
       operatorUserId: req.user.id,
     })
-    await syncMatrixPackageAfterTestAcceptanceCompleted({
+    await syncMatrixPackageAfterProductAcceptanceCompleted({
       demandId,
       fromNodeKey,
       operatorUserId: req.user.id,

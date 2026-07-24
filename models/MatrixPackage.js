@@ -6,10 +6,14 @@ const HEALTH_DICT_KEY = 'matrix_package_health'
 const PLATFORM_DICT_KEY = 'matrix_package_delivery_platform'
 const DELIVERY_STATUS_DICT_KEY = 'matrix_package_delivery_status'
 const PRODUCTION_STAGE_DICT_KEY = 'matrix_package_production_stage'
-const PRODUCTION_STATUS_CODES = ['IN_DEVELOPMENT', 'TESTING', 'COLD_STANDBY']
+const PRODUCTION_STATUS_CODES = ['IN_DEVELOPMENT', 'TESTING']
 const COMPLETION_SIDE_NOTE_TYPES = ['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS']
 const COMPLETION_SIDE_NOTE_TOTAL = COMPLETION_SIDE_NOTE_TYPES.length
 const COMPLETION_SIDE_NOTE_TYPE_SQL = COMPLETION_SIDE_NOTE_TYPES.map(() => '?').join(', ')
+const RELEASE_TYPE_MAP = new Map([
+  ['FIRST_RELEASE', { name: '首次发版', color: 'blue' }],
+  ['VERSION_UPDATE', { name: '版本迭代', color: 'default' }],
+])
 
 function toPositiveInt(value) {
   const numeric = Number.parseInt(value, 10)
@@ -71,6 +75,7 @@ function normalizePlatformCodes(value) {
 function mapRow(row) {
   if (!row) return null
   const sideNoteConfirmedCount = Number(row.side_note_confirmed_count || 0)
+  const releaseType = RELEASE_TYPE_MAP.get(row.release_type || '') || null
   return {
     id: Number(row.id),
     developer_account_id: row.developer_account_id ? Number(row.developer_account_id) : null,
@@ -102,6 +107,9 @@ function mapRow(row) {
     production_checklist: normalizeChecklist(row.production_checklist),
     linked_demand_id: row.linked_demand_id || '',
     linked_demand_name: row.linked_demand_name || '',
+    release_type: row.release_type || '',
+    release_type_name: releaseType?.name || row.release_type || '',
+    release_type_color: releaseType?.color || 'default',
     side_note_confirmed_count: sideNoteConfirmedCount,
     side_note_total: COMPLETION_SIDE_NOTE_TOTAL,
     side_note_completion_percent: Math.round((sideNoteConfirmedCount / COMPLETION_SIDE_NOTE_TOTAL) * 100),
@@ -268,6 +276,7 @@ const MatrixPackage = {
          SUM(CASE WHEN mp.status_code = 'PENDING_REVIEW_SUBMIT' THEN 1 ELSE 0 END) AS pending_review_submit,
          SUM(CASE WHEN mp.status_code = 'DELIVERING' THEN 1 ELSE 0 END) AS delivering,
          SUM(CASE WHEN mp.status_code = 'IN_REVIEW' THEN 1 ELSE 0 END) AS in_review,
+         SUM(CASE WHEN mp.status_code = 'IN_REVIEW' AND latestRelease.release_type = 'FIRST_RELEASE' THEN 1 ELSE 0 END) AS in_review_first_release,
          SUM(CASE WHEN mp.status_code = 'HOT_STANDBY' THEN 1 ELSE 0 END) AS hot_standby,
          SUM(CASE WHEN mp.status_code IN ('HOT_STANDBY', 'COLD_STANDBY') THEN 1 ELSE 0 END) AS standby,
          SUM(CASE WHEN mp.status_code = 'BANNED' OR mp.health_code = 'ABNORMAL' THEN 1 ELSE 0 END) AS abnormal
@@ -277,6 +286,15 @@ const MatrixPackage = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN app_version_releases latestRelease
+         ON latestRelease.id = (
+           SELECT avr.id
+           FROM app_version_releases avr
+           WHERE avr.matrix_package_id = mp.id
+             AND avr.deleted_at IS NULL
+           ORDER BY avr.created_at DESC, avr.id DESC
+           LIMIT 1
+         )
        WHERE ${whereSql}`,
       params,
     )
@@ -296,6 +314,7 @@ const MatrixPackage = {
          mp.delivery_status_code,
          deliveryStatusDict.item_name AS delivery_status_name,
          deliveryStatusDict.color AS delivery_status_color,
+         latestRelease.release_type,
          mp.owner_user_id,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
          mp.owner_name,
@@ -326,6 +345,15 @@ const MatrixPackage = {
         AND da.deleted_at IS NULL
        LEFT JOIN work_demands linkedDemand
          ON linkedDemand.id = mp.linked_demand_id
+       LEFT JOIN app_version_releases latestRelease
+         ON latestRelease.id = (
+           SELECT avr.id
+           FROM app_version_releases avr
+           WHERE avr.matrix_package_id = mp.id
+             AND avr.deleted_at IS NULL
+           ORDER BY avr.created_at DESC, avr.id DESC
+           LIMIT 1
+         )
        LEFT JOIN (
          SELECT
            package_id,
@@ -355,6 +383,12 @@ const MatrixPackage = {
        WHERE ${whereSql}
        ORDER BY
          ${statusOrderSql} ASC,
+         CASE
+           WHEN mp.status_code = 'IN_REVIEW' AND latestRelease.release_type = 'FIRST_RELEASE' THEN 1
+           WHEN mp.status_code = 'IN_REVIEW' AND latestRelease.release_type = 'VERSION_UPDATE' THEN 2
+           WHEN mp.status_code = 'IN_REVIEW' THEN 3
+           ELSE 9
+         END ASC,
          CASE mp.health_code
            WHEN 'ABNORMAL' THEN 1
            WHEN 'WATCH' THEN 2
@@ -389,6 +423,7 @@ const MatrixPackage = {
         pending_review_submit: Number(summaryRows[0]?.pending_review_submit || 0),
         delivering: Number(summaryRows[0]?.delivering || 0),
         in_review: Number(summaryRows[0]?.in_review || 0),
+        in_review_first_release: Number(summaryRows[0]?.in_review_first_release || 0),
         hot_standby: Number(summaryRows[0]?.hot_standby || 0),
         standby: Number(summaryRows[0]?.standby || 0),
         abnormal: Number(summaryRows[0]?.abnormal || 0),
@@ -415,6 +450,7 @@ const MatrixPackage = {
          mp.delivery_status_code,
          deliveryStatusDict.item_name AS delivery_status_name,
          deliveryStatusDict.color AS delivery_status_color,
+         latestRelease.release_type,
          mp.owner_user_id,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
          mp.owner_name,
@@ -445,6 +481,15 @@ const MatrixPackage = {
         AND da.deleted_at IS NULL
        LEFT JOIN work_demands linkedDemand
          ON linkedDemand.id = mp.linked_demand_id
+       LEFT JOIN app_version_releases latestRelease
+         ON latestRelease.id = (
+           SELECT avr.id
+           FROM app_version_releases avr
+           WHERE avr.matrix_package_id = mp.id
+             AND avr.deleted_at IS NULL
+           ORDER BY avr.created_at DESC, avr.id DESC
+           LIMIT 1
+         )
        LEFT JOIN (
          SELECT
            package_id,

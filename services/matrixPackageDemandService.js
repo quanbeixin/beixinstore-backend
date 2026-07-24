@@ -10,6 +10,7 @@ const NODE_KEYS = {
   START: 'START',
   PRODUCTION: 'MATRIX_PRODUCTION',
   TEST_ACCEPTANCE: 'TEST_ACCEPTANCE',
+  PRODUCT_ACCEPTANCE: 'PRODUCT_ACCEPTANCE',
 }
 const PRODUCTION_STATUS_CODES = new Set(['IN_DEVELOPMENT', 'TESTING', 'COLD_STANDBY'])
 
@@ -505,7 +506,7 @@ const MatrixPackageDemandService = {
       demandId,
       nodeKey: NODE_KEYS.PRODUCTION,
       operatorUserId: toPositiveInt(operatorUserId) || toPositiveInt(matrixPackageInput?.owner_user_id) || null,
-      comment: '矩阵包生产完成，自动进入测试验收阶段',
+      comment: '矩阵包生产完成，自动进入测试通测阶段',
       sourceType: 'SYSTEM',
       sourceId: String(packageId),
       skipAssigneeCheck: true,
