@@ -11,3 +11,4 @@ node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-09-matrix-pa
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-21-matrix-package-delivering-label-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-21-matrix-package-delivery-platform-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-21-matrix-package-delivery-status-up.sql
+node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-24-matrix-package-status-testing-up.sql

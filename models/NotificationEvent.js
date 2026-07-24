@@ -223,6 +223,7 @@ const BUSINESS_ROLE_RECEIVER_KEYS = new Set([
   'daily_report_unscheduled',
 ])
 const MATRIX_PACKAGE_GROUP_EVENT_TYPES = new Set([
+  'matrix_package_status_change',
   'matrix_package_upcoming_deadline',
   'matrix_package_overdue_deadline',
   'matrix_package_side_info_deadline',
@@ -286,6 +287,15 @@ function evaluateConditionNode(node, eventData) {
 
   if (items.length === 0) {
     const leftValue = getValueByPath(eventData, node.field)
+    const field = normalizeText(node.field, 128)
+    if (
+      normalizeText(eventData?.from_status, 64).toUpperCase() === 'IN_DEVELOPMENT' &&
+      normalizeText(eventData?.to_status, 64).toUpperCase() === 'TESTING' &&
+      field === 'to_status' &&
+      normalizeText(node.value, 64).toUpperCase() === 'COLD_STANDBY'
+    ) {
+      return true
+    }
     return compareValues(leftValue, node.operator, node.value)
   }
 

@@ -11,7 +11,7 @@ const NODE_KEYS = {
   PRODUCTION: 'MATRIX_PRODUCTION',
   TEST_ACCEPTANCE: 'TEST_ACCEPTANCE',
 }
-const PRODUCTION_STATUS_CODES = new Set(['IN_DEVELOPMENT', 'COLD_STANDBY'])
+const PRODUCTION_STATUS_CODES = new Set(['IN_DEVELOPMENT', 'TESTING', 'COLD_STANDBY'])
 
 function toPositiveInt(value) {
   const numeric = Number.parseInt(value, 10)

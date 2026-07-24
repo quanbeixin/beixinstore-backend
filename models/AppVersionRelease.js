@@ -365,7 +365,16 @@ async function syncReviewPlanByReleaseStatus(existing, nextReleaseStatus, syncCo
   if (!packageId) return
 
   const beforePackage = await MatrixPackage.getById(packageId)
-  await MatrixPackageReviewPlan.transition(packageId, mappedStageCode, {}, userId)
+  const shouldSyncPackageStatus = !(beforePackage && String(beforePackage.status_code || '').trim().toUpperCase() === 'DELIVERING')
+  await MatrixPackageReviewPlan.transition(
+    packageId,
+    mappedStageCode,
+    {},
+    userId,
+    {
+      syncPackageStatus: shouldSyncPackageStatus,
+    },
+  )
   if (shouldSyncSubmitAt) {
     await pool.query(
       `UPDATE matrix_package_review_plans

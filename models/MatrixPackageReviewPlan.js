@@ -459,7 +459,7 @@ const MatrixPackageReviewPlan = {
     return getByPackageId(normalizedPackageId)
   },
 
-  async transition(packageId, stageCode, payload = {}, userId) {
+  async transition(packageId, stageCode, payload = {}, userId, options = {}) {
     const normalizedPackageId = toPositiveInt(packageId)
     const packageRow = await assertPackageExists(normalizedPackageId)
     if (!packageRow) return null
@@ -531,7 +531,8 @@ const MatrixPackageReviewPlan = {
     )
 
     const nextPackageStatus = getPackageStatusForStage(normalizedStageCode)
-    if (nextPackageStatus) {
+    const shouldSyncPackageStatus = options?.syncPackageStatus !== false
+    if (nextPackageStatus && shouldSyncPackageStatus) {
       await pool.query(
         `UPDATE matrix_packages
          SET status_code = ?, health_code = NULL, updated_by = ?

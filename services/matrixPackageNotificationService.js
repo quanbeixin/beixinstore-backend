@@ -54,6 +54,7 @@ const SCENE_DEFINITIONS = Object.freeze([
 
 const SCENE_CODE_SET = new Set(SCENE_DEFINITIONS.map((item) => item.code))
 const MATRIX_PACKAGE_GROUP_SCENE_TYPES = new Set([
+  'STATUS_CHANGE',
   'UPCOMING',
   'OVERDUE',
   'SIDE_DEADLINE',
@@ -675,8 +676,17 @@ async function buildStatusChangeEventData(beforePackage, afterPackage) {
     ? await getLatestListedAtByPackageId(afterPackage?.id)
     : ''
   const fallbackDate = String(afterPackage?.expected_cold_ready_date || '')
-  const statusDateLabel = toStatus === 'HOT_STANDBY' ? '审核通过日期' : '预计冷备完成时间'
-  const statusDate = toStatus === 'HOT_STANDBY' ? listedAt : fallbackDate
+  const updatedAt = String(afterPackage?.updated_at || '')
+  const statusDateLabel = toStatus === 'HOT_STANDBY'
+    ? '审核通过日期'
+    : toStatus === 'TESTING'
+      ? '生产完成时间'
+      : '预计冷备完成时间'
+  const statusDate = toStatus === 'HOT_STANDBY'
+    ? listedAt
+    : toStatus === 'TESTING'
+      ? updatedAt
+      : fallbackDate
   let frontendNoteRows = []
   try {
     const queryResult = await pool.query(

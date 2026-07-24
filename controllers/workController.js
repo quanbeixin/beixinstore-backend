@@ -4,6 +4,9 @@ const Workflow = require('../models/Workflow')
 const ConfigDict = require('../models/ConfigDict')
 const NotificationEvent = require('../models/NotificationEvent')
 const FeishuUserBinding = require('../models/FeishuUserBinding')
+const MatrixPackage = require('../models/MatrixPackage')
+const AppVersionRelease = require('../models/AppVersionRelease')
+const MatrixPackageNotificationService = require('../services/matrixPackageNotificationService')
 const pool = require('../utils/db')
 const { sendNotification, createFeishuDemandChat, addFeishuChatMembers } = require('../utils/notificationSender')
 const {
@@ -509,6 +512,74 @@ async function safeGetDemandWorkflowSnapshot(demandId) {
   } catch (error) {
     console.warn('读取流程快照失败（已忽略）:', {
       demand_id: demandId || null,
+      message: error?.message || String(error || ''),
+    })
+    return null
+  }
+}
+
+async function syncMatrixPackageAfterTestAcceptanceCompleted({ demandId, fromNodeKey, operatorUserId = null } = {}) {
+  const normalizedDemandId = normalizeDemandId(demandId)
+  if (!normalizedDemandId || normalizePhaseKey(fromNodeKey) !== 'TEST_ACCEPTANCE') return null
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT id
+       FROM matrix_packages
+       WHERE linked_demand_id = ?
+         AND deleted_at IS NULL
+       ORDER BY id DESC
+       LIMIT 1`,
+      [normalizedDemandId],
+    )
+    const packageId = toPositiveInt(rows?.[0]?.id)
+    if (!packageId) return null
+
+    const beforePackage = await MatrixPackage.getById(packageId)
+    if (!beforePackage) return null
+    if (String(beforePackage.status_code || '').trim().toUpperCase() !== 'TESTING') {
+      return {
+        skipped: true,
+        reason: 'MATRIX_PACKAGE_NOT_TESTING',
+        package_id: packageId,
+        status_code: beforePackage.status_code || '',
+      }
+    }
+
+    const afterPackage = await MatrixPackage.update(packageId, {
+      package_name: beforePackage.package_name,
+      app_id: beforePackage.app_id || '',
+      new_package_version: beforePackage.new_package_version || '',
+      domain_info: beforePackage.domain_info || '',
+      developer_account_id: beforePackage.developer_account_id || null,
+      platform: beforePackage.platform_codes || beforePackage.platform || '',
+      delivery_status_code: beforePackage.delivery_status_code || null,
+      owner_user_id: beforePackage.owner_user_id || null,
+      status_code: 'COLD_STANDBY',
+      health_code: null,
+      production_stage_code: beforePackage.production_stage_code || null,
+      expected_cold_ready_date: beforePackage.expected_cold_ready_date || null,
+      latest_progress: beforePackage.latest_progress || '',
+      production_checklist: beforePackage.production_checklist || [],
+    }, operatorUserId)
+
+    await MatrixPackageNotificationService.triggerStatusChangeNotifications({
+      beforePackage,
+      afterPackage,
+      operatorUserId,
+    })
+    const release = await AppVersionRelease.ensureFromMatrixPackage(packageId, operatorUserId)
+
+    return {
+      package_id: packageId,
+      from_status: beforePackage.status_code,
+      to_status: afterPackage?.status_code,
+      release_id: release?.id || null,
+    }
+  } catch (error) {
+    console.warn('矩阵包测试验收通过后同步冷备包失败（已忽略）:', {
+      demand_id: normalizedDemandId,
+      from_node_key: fromNodeKey || '',
       message: error?.message || String(error || ''),
     })
     return null
@@ -5233,6 +5304,11 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
       demandBefore: demand,
       operatorUserId: req.user.id,
     })
+    await syncMatrixPackageAfterTestAcceptanceCompleted({
+      demandId,
+      fromNodeKey,
+      operatorUserId: req.user.id,
+    })
 
     await emitWorkflowNodeNotificationEvent({
       eventType: 'node_complete',
@@ -5331,6 +5407,11 @@ const submitDemandWorkflowNode = async (req, res) => {
     await ensureDemandScoringAfterWorkflowCompletion({
       demandId,
       demandBefore: demand,
+      operatorUserId: req.user.id,
+    })
+    await syncMatrixPackageAfterTestAcceptanceCompleted({
+      demandId,
+      fromNodeKey,
       operatorUserId: req.user.id,
     })
 
@@ -5608,6 +5689,11 @@ const forceCompleteDemandWorkflowCurrentNode = async (req, res) => {
       demandBefore: demand,
       operatorUserId: req.user.id,
     })
+    await syncMatrixPackageAfterTestAcceptanceCompleted({
+      demandId,
+      fromNodeKey,
+      operatorUserId: req.user.id,
+    })
 
     await emitWorkflowNodeNotificationEvent({
       eventType: 'node_complete',
@@ -5701,6 +5787,11 @@ const forceCompleteDemandWorkflowNode = async (req, res) => {
     await ensureDemandScoringAfterWorkflowCompletion({
       demandId,
       demandBefore: demand,
+      operatorUserId: req.user.id,
+    })
+    await syncMatrixPackageAfterTestAcceptanceCompleted({
+      demandId,
+      fromNodeKey,
       operatorUserId: req.user.id,
     })
 

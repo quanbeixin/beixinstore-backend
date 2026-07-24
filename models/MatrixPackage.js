@@ -6,7 +6,7 @@ const HEALTH_DICT_KEY = 'matrix_package_health'
 const PLATFORM_DICT_KEY = 'matrix_package_delivery_platform'
 const DELIVERY_STATUS_DICT_KEY = 'matrix_package_delivery_status'
 const PRODUCTION_STAGE_DICT_KEY = 'matrix_package_production_stage'
-const PRODUCTION_STATUS_CODES = ['IN_DEVELOPMENT', 'COLD_STANDBY']
+const PRODUCTION_STATUS_CODES = ['IN_DEVELOPMENT', 'TESTING', 'COLD_STANDBY']
 const COMPLETION_SIDE_NOTE_TYPES = ['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS']
 const COMPLETION_SIDE_NOTE_TOTAL = COMPLETION_SIDE_NOTE_TYPES.length
 const COMPLETION_SIDE_NOTE_TYPE_SQL = COMPLETION_SIDE_NOTE_TYPES.map(() => '?').join(', ')
@@ -227,7 +227,8 @@ const MatrixPackage = {
     const statusOrderSql = productionOnly
       ? `CASE mp.status_code
            WHEN 'IN_DEVELOPMENT' THEN 1
-           WHEN 'COLD_STANDBY' THEN 2
+           WHEN 'TESTING' THEN 2
+           WHEN 'COLD_STANDBY' THEN 3
            ELSE 9
          END`
       : `CASE mp.status_code
@@ -237,10 +238,11 @@ const MatrixPackage = {
            WHEN 'HOT_STANDBY' THEN 4
            WHEN 'PENDING_REVIEW_SUBMIT' THEN 5
            WHEN 'COLD_STANDBY' THEN 6
-           WHEN 'IN_DEVELOPMENT' THEN 7
-           WHEN 'PENDING_DEV' THEN 8
-           WHEN 'BANNED' THEN 9
-           WHEN 'ARCHIVED' THEN 10
+           WHEN 'TESTING' THEN 7
+           WHEN 'IN_DEVELOPMENT' THEN 8
+           WHEN 'PENDING_DEV' THEN 9
+           WHEN 'BANNED' THEN 10
+           WHEN 'ARCHIVED' THEN 11
            ELSE 99
          END`
 
@@ -261,6 +263,7 @@ const MatrixPackage = {
          COUNT(*) AS total,
          SUM(CASE WHEN mp.status_code = 'PENDING_DEV' THEN 1 ELSE 0 END) AS pending_dev,
          SUM(CASE WHEN mp.status_code = 'IN_DEVELOPMENT' THEN 1 ELSE 0 END) AS in_development,
+         SUM(CASE WHEN mp.status_code = 'TESTING' THEN 1 ELSE 0 END) AS testing,
          SUM(CASE WHEN mp.status_code = 'COLD_STANDBY' THEN 1 ELSE 0 END) AS cold_standby,
          SUM(CASE WHEN mp.status_code = 'PENDING_REVIEW_SUBMIT' THEN 1 ELSE 0 END) AS pending_review_submit,
          SUM(CASE WHEN mp.status_code = 'DELIVERING' THEN 1 ELSE 0 END) AS delivering,

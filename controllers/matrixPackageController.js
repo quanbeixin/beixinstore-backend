@@ -1,5 +1,4 @@
 const MatrixPackage = require('../models/MatrixPackage')
-const AppVersionRelease = require('../models/AppVersionRelease')
 const MatrixPackageProductionNode = require('../models/MatrixPackageProductionNode')
 const MatrixPackageSideNote = require('../models/MatrixPackageSideNote')
 const MatrixPackageNotificationService = require('../services/matrixPackageNotificationService')
@@ -622,7 +621,7 @@ async function completeMatrixPackageProduction(req, res) {
       platform: beforePackage.platform_codes || beforePackage.platform || '',
       delivery_status_code: beforePackage.delivery_status_code || null,
       owner_user_id: beforePackage.owner_user_id || null,
-      status_code: 'COLD_STANDBY',
+      status_code: 'TESTING',
       health_code: null,
       production_stage_code: beforePackage.production_stage_code || null,
       expected_cold_ready_date: beforePackage.expected_cold_ready_date || null,
@@ -644,14 +643,11 @@ async function completeMatrixPackageProduction(req, res) {
       req.user?.id || null,
     )
 
-    const release = await AppVersionRelease.ensureFromMatrixPackage(req.params.id, req.user?.id)
-
     return res.json({
       success: true,
-      message: '生产已完成，APP发版记录已创建',
+      message: '生产已完成，已进入测试中',
       data: {
         package: afterPackage,
-        release,
         demand_workflow_advance: demandWorkflowAdvance,
       },
     })
