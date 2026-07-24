@@ -43,6 +43,16 @@ function normalizeText(value, maxLength = 255) {
   return text.length > maxLength ? text.slice(0, maxLength) : text
 }
 
+function formatOperationValue(value, fallback = '-') {
+  const text = normalizeText(value, 120)
+  return text || fallback
+}
+
+function formatOperationDate(value) {
+  const text = normalizeText(value, 32)
+  return text ? text.slice(0, 10) : ''
+}
+
 function normalizeOptionalCode(value) {
   const text = String(value || '').trim().toUpperCase()
   return text || null
@@ -127,9 +137,51 @@ function mapRow(row) {
     owner_user_id: row.owner_user_id ? Number(row.owner_user_id) : null,
     owner_name: row.owner_display_name || row.owner_name || '',
     remark: row.remark || '',
+    last_operation_summary: row.last_operation_summary || '',
+    last_operation_user_id: row.last_operation_user_id ? Number(row.last_operation_user_id) : null,
+    last_operation_user_name: row.last_operation_user_name || '',
+    last_operation_at: row.last_operation_at || null,
     created_at: row.created_at || null,
     updated_at: row.updated_at || null,
   }
+}
+
+function buildOperationSummary(existing, next) {
+  const changes = []
+  const pushCodeChange = (label, beforeCode, afterCode, optionMap) => {
+    const before = normalizeOptionalCode(beforeCode)
+    const after = normalizeOptionalCode(afterCode)
+    if (before === after) return
+    changes.push(`${label}：${formatOperationValue(optionMap.get(before || '')?.name || before)} -> ${formatOperationValue(optionMap.get(after || '')?.name || after)}`)
+  }
+  const pushTextChange = (label, beforeValue, afterValue) => {
+    const before = normalizeText(beforeValue, 255)
+    const after = normalizeText(afterValue, 255)
+    if (before === after) return
+    changes.push(`${label}：${formatOperationValue(before)} -> ${formatOperationValue(after)}`)
+  }
+  const pushDateChange = (label, beforeValue, afterValue) => {
+    const before = formatOperationDate(beforeValue)
+    const after = formatOperationDate(afterValue)
+    if (before === after) return
+    changes.push(`${label}：${formatOperationValue(before)} -> ${formatOperationValue(after)}`)
+  }
+
+  pushCodeChange('发版类型', existing?.release_type, next?.release_type, RELEASE_TYPE_MAP)
+  pushCodeChange('发版进度', existing?.release_status, next?.release_status, RELEASE_STATUS_MAP)
+  pushCodeChange('紧急程度', existing?.urgency_code, next?.urgency_code, URGENCY_MAP)
+  pushDateChange('送审预期', existing?.expected_submit_at, next?.expected_submit_at)
+  pushDateChange('送审日期', existing?.submitted_at, next?.submitted_at)
+  pushDateChange('上架日期', existing?.listed_at, next?.listed_at)
+  pushTextChange('发版负责人', existing?.owner_name, next?.owner_name)
+  pushTextChange('前序发版', existing?.previous_release_info, next?.previous_release_info)
+
+  if (normalizeText(existing?.remark, 1000) !== normalizeText(next?.remark, 1000)) {
+    changes.push('备注：已更新')
+  }
+
+  const summary = changes.length > 0 ? changes.join('；') : '保存记录（无字段变化）'
+  return normalizeText(summary, 1000)
 }
 
 function buildWhere(filters = {}) {
@@ -249,6 +301,7 @@ async function getByMatrixPackageId(packageId) {
        DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d') AS expected_submit_at,
        DATE_FORMAT(avr.submitted_at, '%Y-%m-%d') AS submitted_at,
        DATE_FORMAT(avr.listed_at, '%Y-%m-%d') AS listed_at,
+       DATE_FORMAT(avr.last_operation_at, '%Y-%m-%d %H:%i:%s') AS last_operation_at,
        DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
        DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
        COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name
@@ -464,6 +517,7 @@ const AppVersionRelease = {
          DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d') AS expected_submit_at,
          DATE_FORMAT(avr.submitted_at, '%Y-%m-%d') AS submitted_at,
          DATE_FORMAT(avr.listed_at, '%Y-%m-%d') AS listed_at,
+         DATE_FORMAT(avr.last_operation_at, '%Y-%m-%d %H:%i:%s') AS last_operation_at,
          DATE_FORMAT(avr.requested_at, '%Y-%m-%d') AS requested_at,
          DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
@@ -501,6 +555,7 @@ const AppVersionRelease = {
          DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d') AS expected_submit_at,
          DATE_FORMAT(avr.submitted_at, '%Y-%m-%d') AS submitted_at,
          DATE_FORMAT(avr.listed_at, '%Y-%m-%d') AS listed_at,
+         DATE_FORMAT(avr.last_operation_at, '%Y-%m-%d %H:%i:%s') AS last_operation_at,
          DATE_FORMAT(avr.requested_at, '%Y-%m-%d') AS requested_at,
          DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
@@ -612,6 +667,7 @@ const AppVersionRelease = {
          DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d') AS expected_submit_at,
          DATE_FORMAT(avr.submitted_at, '%Y-%m-%d') AS submitted_at,
          DATE_FORMAT(avr.listed_at, '%Y-%m-%d') AS listed_at,
+         DATE_FORMAT(avr.last_operation_at, '%Y-%m-%d %H:%i:%s') AS last_operation_at,
          DATE_FORMAT(avr.requested_at, '%Y-%m-%d') AS requested_at,
          DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
@@ -678,6 +734,18 @@ const AppVersionRelease = {
     const remark = Object.prototype.hasOwnProperty.call(payload, 'remark')
       ? normalizeText(payload.remark, 1000)
       : existing.remark
+    const operator = await resolveUserInfo(userId)
+    const operationSummary = buildOperationSummary(existing, {
+      release_type: releaseType,
+      release_status: releaseStatus,
+      urgency_code: urgencyCode,
+      expected_submit_at: expectedSubmitAt,
+      submitted_at: submittedAt,
+      listed_at: listedAt,
+      owner_name: owner.name || '',
+      previous_release_info: previousReleaseInfo,
+      remark,
+    })
 
     await pool.query(
       `UPDATE app_version_releases
@@ -691,6 +759,10 @@ const AppVersionRelease = {
            owner_name = ?,
            previous_release_info = ?,
            remark = ?,
+           last_operation_summary = ?,
+           last_operation_user_id = ?,
+           last_operation_user_name = ?,
+           last_operation_at = NOW(),
            updated_by = ?
        WHERE id = ? AND deleted_at IS NULL`,
       [
@@ -704,6 +776,9 @@ const AppVersionRelease = {
         owner.name || null,
         previousReleaseInfo || null,
         remark || null,
+        operationSummary || null,
+        operator.id || userId || null,
+        operator.name || null,
         userId || null,
         releaseId,
       ],
@@ -804,11 +879,12 @@ const AppVersionRelease = {
           throw err
         }
         const releaseOwner = await resolveDefaultReleaseOwnerInfo(packageDetail)
+        const operationSummary = '创建发版申请'
 
         const [result] = await connection.query(
           `INSERT INTO app_version_releases
-           (matrix_package_id, release_type, release_status, urgency_code, app_version, app_name, app_developer, app_company_subject, app_console_url, app_id, domain_info, related_demand_id, related_demand_name, applicant_user_id, applicant_name, requested_at, owner_user_id, owner_name, expected_submit_at, remark, created_by, updated_by)
-           VALUES (?, ?, 'PENDING_PLAN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?)`,
+           (matrix_package_id, release_type, release_status, urgency_code, app_version, app_name, app_developer, app_company_subject, app_console_url, app_id, domain_info, related_demand_id, related_demand_name, applicant_user_id, applicant_name, requested_at, owner_user_id, owner_name, expected_submit_at, remark, last_operation_summary, last_operation_user_id, last_operation_user_name, last_operation_at, created_by, updated_by)
+           VALUES (?, ?, 'PENDING_PLAN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?)`,
           [
             packageDetail.id,
             releaseType,
@@ -828,6 +904,9 @@ const AppVersionRelease = {
             releaseOwner.name || null,
             applicationItem.expected_submit_at,
             remark || null,
+            operationSummary,
+            applicant.id || userId || null,
+            applicant.name || null,
             userId || null,
             userId || null,
           ],
@@ -869,17 +948,21 @@ const AppVersionRelease = {
     const appVersion = normalizeText(frontendContent.appVersion, 80)
     const appConsoleUrl = normalizeText(frontendContent.appConsoleUrl, 1000)
     const releaseOwner = await resolveDefaultReleaseOwnerInfo(packageDetail)
+    const operationSummary = '系统创建发版记录'
+    const operator = userId ? await resolveUserInfo(userId) : applicant
+    const urgencyCode = releaseType === 'FIRST_RELEASE' ? 'P0' : 'P1'
 
     const [result] = await pool.query(
       `INSERT INTO app_version_releases
-       (matrix_package_id, release_type, release_status, urgency_code, app_version, app_name, app_developer, app_company_subject, app_console_url, app_id, domain_info, applicant_user_id, applicant_name, requested_at, owner_user_id, owner_name, created_by, updated_by)
-       VALUES (?, ?, 'PENDING_PLAN', 'P1', ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?)
+       (matrix_package_id, release_type, release_status, urgency_code, app_version, app_name, app_developer, app_company_subject, app_console_url, app_id, domain_info, applicant_user_id, applicant_name, requested_at, owner_user_id, owner_name, last_operation_summary, last_operation_user_id, last_operation_user_name, last_operation_at, created_by, updated_by)
+       VALUES (?, ?, 'PENDING_PLAN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, NOW(), ?, ?)
        ON DUPLICATE KEY UPDATE
          updated_by = VALUES(updated_by),
          updated_at = CURRENT_TIMESTAMP`,
       [
         normalizedPackageId,
         releaseType,
+        urgencyCode,
         appVersion,
         appName,
         normalizeText(packageDetail.developer_account_name, 160),
@@ -891,6 +974,9 @@ const AppVersionRelease = {
         applicant.name || null,
         releaseOwner.id || null,
         releaseOwner.name || null,
+        operationSummary,
+        operator.id || applicant.id || null,
+        operator.name || applicant.name || null,
         userId || applicant.id || null,
         userId || null,
       ],

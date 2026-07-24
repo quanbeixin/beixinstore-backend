@@ -8,3 +8,4 @@ node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-13-app-versi
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-14-app-version-release-related-demand-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-14-app-version-release-application-meta-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-17-app-version-release-previous-release-up.sql
+node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-24-app-version-release-last-operation-up.sql
