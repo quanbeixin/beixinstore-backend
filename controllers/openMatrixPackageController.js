@@ -3,6 +3,9 @@ const {
   buildSignedGetObjectUrl,
   getOssConfigFromEnv,
 } = require('../utils/oss')
+const {
+  buildMatrixPackageSideNotePolicyPayload,
+} = require('../services/matrixPackageSideNoteUploadService')
 
 const SIDE_NOTE_SECTIONS = [
   { type: 'DELIVERY', key: 'delivery', description: 'PUSH信息补充' },
@@ -54,6 +57,7 @@ const FIELD_DEFINITIONS = {
   FRONTEND: [
     { name: 'appVersion', description: 'APP版本号' },
     { name: 'appConsoleUrl', description: 'APP谷歌平台发版地址' },
+    { name: 'pushFcmFile', description: 'push-fcm文件' },
     { name: 'googleServiceJsonFile', description: 'google-service.json文件' },
     { name: 'prodGooglePlatformAppId', description: '生产环境Google平台应用ID' },
     { name: 'prodSha1Fingerprint', description: '生产环境sha1指纹' },
@@ -83,7 +87,6 @@ const FIELD_DEFINITIONS = {
     { name: 'testGooglePayCertificateUrl', description: '测试环境谷歌支付证书地址' },
     { name: 'testGooglePayCertificateContent', description: '测试环境谷歌支付证书内容' },
     { name: 'testGooglePayPackageName', description: '测试环境谷歌支付包名' },
-    { name: 'pushFcmFile', description: 'push-fcm文件' },
   ],
   ADVERTISING: [
     { name: 'MATRIX_FACEBOOK_INSTALL_DECRYPT_SECRET', description: 'Facebook 投放解析安装来源密钥' },
@@ -122,6 +125,33 @@ const PRODUCTION_NODE_STATUS_NAMES = {
   COMPLETED: '已完成',
   BLOCKED: '阻塞',
 }
+
+const OPEN_WRITE_SECTION_MAP = {
+  frontend: 'FRONTEND',
+}
+
+const OPEN_FRONTEND_TEXT_FIELDS = new Set([
+  'appVersion',
+  'appConsoleUrl',
+  'prodGooglePlatformAppId',
+  'prodSha1Fingerprint',
+  'prodSha256Fingerprint',
+  'prodReleaseDownloadUrl',
+  'testGooglePlatformAppId',
+  'testSha1Fingerprint',
+  'testSha256Fingerprint',
+  'testReleaseDownloadUrl',
+])
+
+const OPEN_FRONTEND_FILE_FIELDS = new Set([
+  'googleServiceJsonFile',
+  'pushFcmFile',
+])
+
+const OPEN_FRONTEND_FIELDS = new Set([
+  ...OPEN_FRONTEND_TEXT_FIELDS,
+  ...OPEN_FRONTEND_FILE_FIELDS,
+])
 
 function normalizeText(value, maxLength = 255) {
   const text = String(value || '').trim()
@@ -212,6 +242,175 @@ function verifyOpenApiToken(req, res) {
     return false
   }
   return true
+}
+
+function getRequestMatch(req) {
+  const source = req.body?.match && typeof req.body.match === 'object' && !Array.isArray(req.body.match)
+    ? req.body.match
+    : {}
+  return {
+    package_id: Number.parseInt(source.package_id || req.body?.package_id || req.query?.package_id || 0, 10) || 0,
+    app_id: normalizeText(source.app_id || req.body?.app_id || req.query?.app_id, 120),
+    package_name: normalizeText(source.package_name || req.body?.package_name || req.query?.package_name, 120),
+    domain: normalizeDomainForMatch(
+      source.domain ||
+      source.domain_info ||
+      req.body?.domain ||
+      req.body?.domain_info ||
+      req.query?.domain ||
+      req.query?.domain_info,
+    ),
+  }
+}
+
+async function resolveOpenMatrixPackageByMatch(req, res) {
+  const match = getRequestMatch(req)
+  if (!match.package_id && !match.app_id && !match.package_name && !match.domain) {
+    res.status(400).json({ success: false, message: '请提供 match.package_id / match.app_id / match.package_name / match.domain_info 之一' })
+    return null
+  }
+
+  const where = ['deleted_at IS NULL']
+  const params = []
+  if (match.package_id) {
+    where.push('id = ?')
+    params.push(match.package_id)
+  }
+  if (match.app_id) {
+    where.push('app_id = ?')
+    params.push(match.app_id)
+  }
+  if (match.package_name) {
+    where.push('package_name = ?')
+    params.push(match.package_name)
+  }
+
+  const [rows] = await pool.query(
+    `SELECT id, package_name, app_id, domain_info
+     FROM matrix_packages
+     WHERE ${where.join(' AND ')}
+     ORDER BY id DESC`,
+    params,
+  )
+
+  const candidates = match.domain
+    ? (rows || []).filter((row) => extractDomainCandidates(row.domain_info).includes(match.domain))
+    : (rows || [])
+
+  if (candidates.length === 0) {
+    res.status(404).json({ success: false, message: '未找到匹配的矩阵包' })
+    return null
+  }
+  if (candidates.length > 1) {
+    res.status(409).json({
+      success: false,
+      message: '匹配到多个矩阵包，请补充更精确的匹配条件',
+      data: candidates.map((row) => ({
+        package_id: Number(row.id),
+        package_name: row.package_name || '',
+        app_id: row.app_id || '',
+        domain_info: row.domain_info || '',
+      })),
+    })
+    return null
+  }
+
+  return candidates[0]
+}
+
+function normalizeOpenSection(value) {
+  const key = normalizeText(value, 50).toLowerCase()
+  return OPEN_WRITE_SECTION_MAP[key] || ''
+}
+
+function normalizeOpenFileFieldValue(value, { packageId, noteType, fieldName } = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    const err = new Error(`${fieldName} 必须是文件对象`)
+    err.statusCode = 400
+    throw err
+  }
+
+  const oss = getOssConfigFromEnv()
+  const objectKey = normalizeText(value.object_key, 1000).replace(/^\/+/, '')
+  const expectedPrefix = `${normalizeText(oss?.uploadDir, 255).replace(/^\/+|\/+$/g, '')}/matrix-packages/${packageId}/${String(noteType || '').toLowerCase()}/${fieldName}/`
+    .replace(/^\/+/, '')
+  if (!oss || !objectKey || !objectKey.startsWith(expectedPrefix)) {
+    const err = new Error(`${fieldName} 文件未使用本接口生成的上传凭证`)
+    err.statusCode = 400
+    throw err
+  }
+
+  return {
+    file_name: normalizeText(value.file_name || value.filename || objectKey.split('/').pop(), 255),
+    mime_type: normalizeText(value.mime_type || value.content_type, 100),
+    file_size: Number(value.file_size || value.size || 0) || null,
+    storage_provider: 'ALIYUN_OSS',
+    bucket_name: normalizeText(value.bucket_name, 100) || oss.bucketName,
+    object_key: objectKey,
+    object_url: normalizeText(value.object_url || value.url, 1000) || null,
+    uploaded_at: normalizeText(value.uploaded_at, 50) || new Date().toISOString(),
+  }
+}
+
+function normalizeOpenFrontendFields(fields, packageId) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    const err = new Error('sections.frontend 必须是对象')
+    err.statusCode = 400
+    throw err
+  }
+
+  const nextFields = {}
+  Object.entries(fields).forEach(([fieldName, value]) => {
+    if (!OPEN_FRONTEND_FIELDS.has(fieldName)) {
+      const err = new Error(`字段不允许写入：frontend.${fieldName}`)
+      err.statusCode = 400
+      throw err
+    }
+    if (OPEN_FRONTEND_FILE_FIELDS.has(fieldName)) {
+      nextFields[fieldName] = normalizeOpenFileFieldValue(value, {
+        packageId,
+        noteType: 'FRONTEND',
+        fieldName,
+      })
+      return
+    }
+    nextFields[fieldName] = normalizeText(value, 10000)
+  })
+  return nextFields
+}
+
+async function mergeOpenSideNoteContent({ packageId, noteType, fields }) {
+  const [noteRows] = await pool.query(
+    `SELECT content
+     FROM matrix_package_side_notes
+     WHERE package_id = ? AND note_type = ?
+     LIMIT 1`,
+    [packageId, noteType],
+  )
+  const currentContent = parseJsonObject(noteRows?.[0]?.content)
+  const nextContent = {
+    ...currentContent,
+    ...fields,
+  }
+  const serializedContent = JSON.stringify(nextContent)
+  await pool.query(
+    `INSERT INTO matrix_package_side_notes
+     (package_id, note_type, content, created_by, updated_by)
+     VALUES (?, ?, ?, NULL, NULL)
+     ON DUPLICATE KEY UPDATE
+      content = VALUES(content),
+      updated_by = VALUES(updated_by),
+      updated_at = CURRENT_TIMESTAMP`,
+    [packageId, noteType, serializedContent],
+  )
+  const [[updatedRow]] = await pool.query(
+    `SELECT DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+     FROM matrix_package_side_notes
+     WHERE package_id = ? AND note_type = ?
+     LIMIT 1`,
+    [packageId, noteType],
+  )
+  return updatedRow?.updated_at || null
 }
 
 function parseCompanyEnglishName(rawExtraJson) {
@@ -562,6 +761,117 @@ async function listOpenMatrixPackages(req, res) {
   }
 }
 
+async function getOpenMatrixPackageUploadPolicy(req, res) {
+  if (!verifyOpenApiToken(req, res)) return undefined
+
+  const section = normalizeOpenSection(req.body?.section || req.query?.section)
+  const fieldName = normalizeText(req.body?.field || req.body?.field_name || req.query?.field || req.query?.field_name, 80)
+  const fileName = normalizeText(req.body?.file_name || req.body?.filename || req.query?.file_name || req.query?.filename, 255)
+
+  if (section !== 'FRONTEND') {
+    return res.status(400).json({ success: false, message: 'section 目前仅支持 frontend' })
+  }
+  if (!OPEN_FRONTEND_FILE_FIELDS.has(fieldName)) {
+    return res.status(400).json({ success: false, message: `field 目前仅支持 ${Array.from(OPEN_FRONTEND_FILE_FIELDS).join(' / ')}` })
+  }
+  if (!fileName) {
+    return res.status(400).json({ success: false, message: 'file_name 不能为空' })
+  }
+  if (!/\.json$/i.test(fileName)) {
+    return res.status(400).json({ success: false, message: '当前文件字段仅支持 .json 文件' })
+  }
+
+  try {
+    const matchedPackage = await resolveOpenMatrixPackageByMatch(req, res)
+    if (!matchedPackage) return undefined
+
+    const policyResult = buildMatrixPackageSideNotePolicyPayload({
+      packageId: Number(matchedPackage.id),
+      noteType: section,
+      fieldName,
+      fileName,
+      fileSize: req.body?.file_size || req.body?.size || req.query?.file_size || req.query?.size,
+    })
+    if (!policyResult.ok) {
+      return res.status(policyResult.status || 400).json({
+        success: false,
+        message: policyResult.message || '获取上传凭证失败',
+      })
+    }
+
+    return res.json({
+      success: true,
+      message: '上传凭证已生成',
+      data: {
+        package_id: Number(matchedPackage.id),
+        package_name: matchedPackage.package_name || '',
+        section: 'frontend',
+        field: fieldName,
+        upload: policyResult.data,
+      },
+    })
+  } catch (error) {
+    console.error('开放接口生成矩阵包上传凭证失败:', {
+      section,
+      field: fieldName,
+      file_name: fileName,
+      message: error?.message || error,
+    })
+    return res.status(error?.statusCode || 500).json({ success: false, message: error?.message || '生成上传凭证失败' })
+  }
+}
+
+async function updateOpenMatrixPackageFields(req, res) {
+  if (!verifyOpenApiToken(req, res)) return undefined
+
+  try {
+    const matchedPackage = await resolveOpenMatrixPackageByMatch(req, res)
+    if (!matchedPackage) return undefined
+
+    const sections = req.body?.sections && typeof req.body.sections === 'object' && !Array.isArray(req.body.sections)
+      ? req.body.sections
+      : {}
+    const frontendFields = sections.frontend || req.body?.frontend || null
+    if (!frontendFields) {
+      return res.status(400).json({ success: false, message: '请提供 sections.frontend 写入内容' })
+    }
+
+    const packageId = Number(matchedPackage.id)
+    const normalizedFrontendFields = normalizeOpenFrontendFields(frontendFields, packageId)
+    if (Object.keys(normalizedFrontendFields).length === 0) {
+      return res.status(400).json({ success: false, message: 'sections.frontend 至少需要提供一个字段' })
+    }
+    const updatedAt = await mergeOpenSideNoteContent({
+      packageId,
+      noteType: 'FRONTEND',
+      fields: normalizedFrontendFields,
+    })
+
+    const updatedFields = Object.keys(normalizedFrontendFields)
+    console.info('开放接口保存矩阵包前端补充信息成功', {
+      package_id: packageId,
+      fields: updatedFields,
+    })
+
+    return res.json({
+      success: true,
+      message: '保存成功',
+      data: {
+        package_id: packageId,
+        package_name: matchedPackage.package_name || '',
+        section: 'frontend',
+        updated_fields: updatedFields,
+        updated_at: updatedAt,
+      },
+    })
+  } catch (error) {
+    console.error('开放接口保存矩阵包字段失败:', {
+      message: error?.message || error,
+    })
+    return res.status(error?.statusCode || 500).json({ success: false, message: error?.message || '保存矩阵包字段失败' })
+  }
+}
+
 async function updateGooglePayCertificateContent(req, res) {
   if (!verifyOpenApiToken(req, res)) return undefined
 
@@ -672,5 +982,7 @@ async function updateGooglePayCertificateContent(req, res) {
 
 module.exports = {
   listOpenMatrixPackages,
+  getOpenMatrixPackageUploadPolicy,
+  updateOpenMatrixPackageFields,
   updateGooglePayCertificateContent,
 }

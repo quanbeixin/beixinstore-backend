@@ -316,6 +316,7 @@ curl \
 |------|-------------|------|
 | `appVersion` | APP版本号 | 文本 |
 | `appConsoleUrl` | APP谷歌平台发版地址 | 文本/链接 |
+| `pushFcmFile` | push-fcm文件 | 附件 |
 | `googleServiceJsonFile` | google-service.json文件 | 附件 |
 | `prodGooglePlatformAppId` | 生产环境Google平台应用ID | 文本 |
 | `prodSha1Fingerprint` | 生产环境sha1指纹 | 文本 |
@@ -338,7 +339,6 @@ curl \
 | `testGooglePayCertificateUrl` | 测试环境谷歌支付证书地址 | 文本/链接 |
 | `testGooglePayCertificateContent` | 测试环境谷歌支付证书内容 | 文本 |
 | `testGooglePayPackageName` | 测试环境谷歌支付包名 | 文本 |
-| `pushFcmFile` | push-fcm文件 | 附件 |
 
 ### 11.6 投放侧补充
 
