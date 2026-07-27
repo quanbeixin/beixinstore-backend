@@ -15,3 +15,4 @@ node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-27-matrix-pa
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-24-matrix-package-status-testing-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-24-matrix-package-product-acceptance-node-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-27-matrix-package-parallel-acceptance-nodes-up.sql
+node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-27-matrix-package-product-acceptance-gate-up.sql

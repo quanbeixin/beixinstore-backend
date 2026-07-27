@@ -518,40 +518,12 @@ async function safeGetDemandWorkflowSnapshot(demandId) {
   }
 }
 
-const MATRIX_PACKAGE_ACCEPTANCE_NODE_KEYS = new Set([
-  'PRODUCT_ACCEPTANCE',
-  'OPERATION_ACCEPTANCE',
-  'DESIGN_ACCEPTANCE',
-])
-
-function isMatrixPackageAcceptanceAllDone(workflow) {
-  const nodeStatusMap = new Map(
-    (Array.isArray(workflow?.nodes) ? workflow.nodes : []).map((node) => [
-      normalizePhaseKey(node?.node_key),
-      normalizePhaseKey(node?.status),
-    ]),
-  )
-  return Array.from(MATRIX_PACKAGE_ACCEPTANCE_NODE_KEYS).every(
-    (nodeKey) => nodeStatusMap.get(nodeKey) === 'DONE',
-  )
-}
-
 async function syncMatrixPackageAfterAcceptanceCompleted({ demandId, fromNodeKey, operatorUserId = null } = {}) {
   const normalizedDemandId = normalizeDemandId(demandId)
   const normalizedFromNodeKey = normalizePhaseKey(fromNodeKey)
-  if (!normalizedDemandId || !MATRIX_PACKAGE_ACCEPTANCE_NODE_KEYS.has(normalizedFromNodeKey)) return null
+  if (!normalizedDemandId || normalizedFromNodeKey !== 'PRODUCT_ACCEPTANCE') return null
 
   try {
-    const workflow = await safeGetDemandWorkflowSnapshot(normalizedDemandId)
-    if (!isMatrixPackageAcceptanceAllDone(workflow)) {
-      return {
-        skipped: true,
-        reason: 'MATRIX_PACKAGE_ACCEPTANCE_NOT_ALL_DONE',
-        demand_id: normalizedDemandId,
-        from_node_key: normalizedFromNodeKey,
-      }
-    }
-
     const [rows] = await pool.query(
       `SELECT id
        FROM matrix_packages

@@ -12,6 +12,7 @@ const DEMAND_BIZ_TYPE = 'DEMAND'
 const DEFAULT_TEMPLATE_KEY = 'DEMAND_STD_FLOW'
 const DEFAULT_TEMPLATE_NAME = '需求标准流程'
 const DEMAND_PHASE_DICT_KEY = 'demand_phase_type'
+const MATRIX_PACKAGE_PRODUCTION_TEMPLATE_NAME = '矩阵包生产流程'
 
 const INSTANCE_STATUS = {
   NOT_STARTED: 'NOT_STARTED',
@@ -211,6 +212,23 @@ async function findActiveDemandInstance(conn, demandId, { forUpdate = false } = 
     [DEMAND_BIZ_TYPE, demandId, INSTANCE_STATUS.IN_PROGRESS, INSTANCE_STATUS.NOT_STARTED],
   )
   return rows[0] || null
+}
+
+async function isMatrixPackageProductionDemand(conn, demandId) {
+  const normalizedDemandId = normalizeText(demandId, 64).toUpperCase()
+  if (!normalizedDemandId) return false
+
+  const [rows] = await conn.query(
+    `SELECT d.id
+     FROM work_demands d
+     INNER JOIN project_templates pt
+       ON pt.id = d.template_id
+     WHERE d.id = ?
+       AND pt.name = ?
+     LIMIT 1`,
+    [normalizedDemandId, MATRIX_PACKAGE_PRODUCTION_TEMPLATE_NAME],
+  )
+  return rows.length > 0
 }
 
 async function ensureDefaultTemplate(conn, { createdBy = null, forceRebuild = false } = {}) {
@@ -4178,6 +4196,7 @@ const Workflow = {
       const doneManualLogs = Number(manualLogSummaryRow?.done_logs || 0)
       const activeChildTasks = activeTasks + activeManualLogs
       const doneChildTasks = doneTasks + doneManualLogs
+      const disableNodeAutoSubmit = await isMatrixPackageProductionDemand(conn, normalizedDemandId)
 
       // 仅在“存在有效子任务(非 CANCELLED)”且“有效子任务均为 DONE”时，自动推进节点。
       if (activeChildTasks <= 0) {
@@ -4198,6 +4217,16 @@ const Workflow = {
           instance_id: instance.id,
           node_key: currentNode.node_key,
           reason: 'NODE_HAS_NON_DONE_TASKS',
+        }
+      }
+      if (disableNodeAutoSubmit) {
+        await conn.commit()
+        return {
+          triggered: true,
+          node_completed: false,
+          instance_id: instance.id,
+          node_key: currentNode.node_key,
+          reason: 'NODE_AUTO_SUBMIT_DISABLED_FOR_MATRIX_PACKAGE',
         }
       }
 

@@ -297,6 +297,10 @@ curl \
 | `appName` | 应用名称 |
 | `shortDescription` | 简短说明 |
 | `fullDescription` | 完整说明 |
+| `prodGooglePayPackageName` | 生产环境谷歌支付包名 |
+| `testGooglePayPackageName` | 测试环境谷歌支付包名 |
+
+说明：`prodGooglePayPackageName` 按包ID（应用ID）自动生成；`testGooglePayPackageName` 为包ID（应用ID）后追加 `.test`。
 
 ### 11.3 设计侧补充
 
@@ -333,12 +337,10 @@ curl \
 | `prodGoogleAuthClientSecret` | 生产环境谷歌鉴权认证ClientSecret | 文本 |
 | `prodGooglePayCertificateUrl` | 生产环境谷歌支付证书地址 | 文本/链接 |
 | `prodGooglePayCertificateContent` | 生产环境谷歌支付证书内容 | 文本 |
-| `prodGooglePayPackageName` | 生产环境谷歌支付包名 | 文本 |
 | `testGoogleAuthClientId` | 测试环境谷歌鉴权认证ClientId | 文本 |
 | `testGoogleAuthClientSecret` | 测试环境谷歌鉴权认证ClientSecret | 文本 |
 | `testGooglePayCertificateUrl` | 测试环境谷歌支付证书地址 | 文本/链接 |
 | `testGooglePayCertificateContent` | 测试环境谷歌支付证书内容 | 文本 |
-| `testGooglePayPackageName` | 测试环境谷歌支付包名 | 文本 |
 
 ### 11.6 投放侧补充
 

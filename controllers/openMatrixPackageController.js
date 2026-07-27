@@ -44,6 +44,8 @@ const FIELD_DEFINITIONS = {
     { name: 'appName', description: '应用名称' },
     { name: 'shortDescription', description: '简短说明' },
     { name: 'fullDescription', description: '完整说明' },
+    { name: 'prodGooglePayPackageName', description: '生产环境谷歌支付包名' },
+    { name: 'testGooglePayPackageName', description: '测试环境谷歌支付包名' },
   ],
   DESIGN: [
     { name: 'dynamicWatermarkImage', description: '动态水印图' },
@@ -81,12 +83,10 @@ const FIELD_DEFINITIONS = {
     { name: 'prodGoogleAuthClientSecret', description: '生产环境谷歌鉴权认证ClientSecret' },
     { name: 'prodGooglePayCertificateUrl', description: '生产环境谷歌支付证书地址' },
     { name: 'prodGooglePayCertificateContent', description: '生产环境谷歌支付证书内容' },
-    { name: 'prodGooglePayPackageName', description: '生产环境谷歌支付包名' },
     { name: 'testGoogleAuthClientId', description: '测试环境谷歌鉴权认证ClientId' },
     { name: 'testGoogleAuthClientSecret', description: '测试环境谷歌鉴权认证ClientSecret' },
     { name: 'testGooglePayCertificateUrl', description: '测试环境谷歌支付证书地址' },
     { name: 'testGooglePayCertificateContent', description: '测试环境谷歌支付证书内容' },
-    { name: 'testGooglePayPackageName', description: '测试环境谷歌支付包名' },
   ],
   ADVERTISING: [
     { name: 'MATRIX_FACEBOOK_INSTALL_DECRYPT_SECRET', description: 'Facebook 投放解析安装来源密钥' },
@@ -201,6 +201,14 @@ function buildGeneratedH5Values(row) {
   return {
     prodH5Url: packageName && domain ? `https://${packageName}.app.${domain}` : '',
     testH5Url: packageName ? `https://${packageName}-itest.a1aws.geesdev.com` : '',
+  }
+}
+
+function buildGeneratedGooglePayPackageValues(row) {
+  const appId = normalizeText(row?.app_id, 120)
+  return {
+    prodGooglePayPackageName: appId,
+    testGooglePayPackageName: appId ? `${appId}.test` : '',
   }
 }
 
@@ -549,10 +557,19 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
     sections[section.key].is_confirmed = Boolean(note?.is_confirmed)
   })
   const generatedH5Values = buildGeneratedH5Values(row)
+  const generatedGooglePayPackageValues = buildGeneratedGooglePayPackageValues(row)
   if (sections.frontend?.value && typeof sections.frontend.value === 'object') {
     Object.entries(generatedH5Values).forEach(([key, value]) => {
       sections.frontend.value[key] = field(
         key === 'prodH5Url' ? 'H5生产环境' : 'H5测试环境',
+        value,
+      )
+    })
+  }
+  if (sections.operation?.value && typeof sections.operation.value === 'object') {
+    Object.entries(generatedGooglePayPackageValues).forEach(([key, value]) => {
+      sections.operation.value[key] = field(
+        key === 'prodGooglePayPackageName' ? '生产环境谷歌支付包名' : '测试环境谷歌支付包名',
         value,
       )
     })

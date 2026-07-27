@@ -12,6 +12,8 @@ const pool = require('../utils/db')
 
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 const PREPARATION_NODE_CODES = new Set(['OPERATION_MATERIAL', 'DESIGN_PRODUCTION', 'BACKEND_SCRIPT'])
+const AUTO_COMPLETE_PRODUCTION_NODE_CODES = ['DESIGN_PRODUCTION', 'BACKEND_SCRIPT']
+const AUTO_COMPLETE_PRODUCTION_ALLOWED_STATUS_CODES = new Set(['IN_DEVELOPMENT', 'TESTING'])
 const SIDE_CHECK_NOTIFICATION_NOTE_TYPES = new Set(['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS'])
 const REQUIRED_PRODUCTION_COMPLETE_SIDE_CHECK_TYPES = ['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS']
 
@@ -421,6 +423,99 @@ async function updateMatrixPackage(req, res) {
   }
 }
 
+function areProductionBuildNodesCompleted(nodes = []) {
+  const statusMap = new Map(
+    (Array.isArray(nodes) ? nodes : []).map((item) => [
+      String(item?.node_code || '').trim().toUpperCase(),
+      String(item?.status_code || '').trim().toUpperCase(),
+    ]),
+  )
+  return AUTO_COMPLETE_PRODUCTION_NODE_CODES.every((nodeCode) => statusMap.get(nodeCode) === 'COMPLETED')
+}
+
+async function completeMatrixPackageProductionStageCore(beforePackage, operatorUserId = null) {
+  if (!beforePackage?.id) return null
+
+  const beforeStatusCode = String(beforePackage.status_code || '').trim().toUpperCase()
+  if (!AUTO_COMPLETE_PRODUCTION_ALLOWED_STATUS_CODES.has(beforeStatusCode)) {
+    return {
+      advanced: false,
+      reason: 'PACKAGE_STATUS_NOT_ALLOWED',
+      package_id: beforePackage.id,
+      status_code: beforePackage.status_code || '',
+    }
+  }
+
+  let afterPackage = beforePackage
+  if (beforeStatusCode === 'IN_DEVELOPMENT') {
+    const packagePayload = {
+      package_name: beforePackage.package_name,
+      app_id: beforePackage.app_id || '',
+      new_package_version: beforePackage.new_package_version || '',
+      domain_info: beforePackage.domain_info || '',
+      developer_account_id: beforePackage.developer_account_id || null,
+      platform: beforePackage.platform_codes || beforePackage.platform || '',
+      delivery_channel_code: beforePackage.delivery_channel_code || null,
+      delivery_status_code: beforePackage.delivery_status_code || null,
+      owner_user_id: beforePackage.owner_user_id || null,
+      status_code: 'TESTING',
+      health_code: null,
+      production_stage_code: beforePackage.production_stage_code || null,
+      expected_cold_ready_date: beforePackage.expected_cold_ready_date || null,
+      latest_progress: beforePackage.latest_progress || '',
+      production_checklist: beforePackage.production_checklist || [],
+    }
+    afterPackage = await MatrixPackage.update(beforePackage.id, packagePayload, operatorUserId)
+    await MatrixPackageNotificationService.triggerStatusChangeNotifications({
+      beforePackage,
+      afterPackage,
+      operatorUserId,
+    })
+  }
+
+  if (MatrixPackageDemandService.shouldEnsureDemand(afterPackage)) {
+    await MatrixPackageDemandService.ensureProductionDemand(afterPackage, operatorUserId)
+    afterPackage = await MatrixPackage.getById(afterPackage.id)
+  }
+  const demandWorkflowAdvance = await MatrixPackageDemandService.completeProductionStage(
+    afterPackage,
+    operatorUserId,
+  )
+
+  return {
+    advanced: Boolean(demandWorkflowAdvance?.advanced),
+    package: afterPackage,
+    demand_workflow_advance: demandWorkflowAdvance,
+  }
+}
+
+async function autoCompleteProductionStageIfReady({
+  packageDetail,
+  nodes,
+  operatorUserId = null,
+} = {}) {
+  if (!packageDetail?.id || !areProductionBuildNodesCompleted(nodes)) {
+    return {
+      advanced: false,
+      reason: 'PRODUCTION_BUILD_NODES_NOT_COMPLETED',
+    }
+  }
+
+  try {
+    return await completeMatrixPackageProductionStageCore(packageDetail, operatorUserId)
+  } catch (error) {
+    console.warn('矩阵包生产阶段自动完成失败（已忽略）:', {
+      packageId: packageDetail?.id,
+      message: error?.message || error,
+    })
+    return {
+      advanced: false,
+      reason: 'AUTO_COMPLETE_PRODUCTION_STAGE_ERROR',
+      error_message: error?.message || '生产阶段自动完成异常',
+    }
+  }
+}
+
 async function completeMatrixPackageProduction(req, res) {
   try {
     const beforePackage = await MatrixPackage.getById(req.params.id)
@@ -446,44 +541,14 @@ async function completeMatrixPackageProduction(req, res) {
       })
     }
 
-    const packagePayload = {
-      package_name: beforePackage.package_name,
-      app_id: beforePackage.app_id || '',
-      new_package_version: beforePackage.new_package_version || '',
-      domain_info: beforePackage.domain_info || '',
-      developer_account_id: beforePackage.developer_account_id || null,
-      platform: beforePackage.platform_codes || beforePackage.platform || '',
-      delivery_channel_code: beforePackage.delivery_channel_code || null,
-      delivery_status_code: beforePackage.delivery_status_code || null,
-      owner_user_id: beforePackage.owner_user_id || null,
-      status_code: 'TESTING',
-      health_code: null,
-      production_stage_code: beforePackage.production_stage_code || null,
-      expected_cold_ready_date: beforePackage.expected_cold_ready_date || null,
-      latest_progress: beforePackage.latest_progress || '',
-      production_checklist: beforePackage.production_checklist || [],
-    }
-    let afterPackage = await MatrixPackage.update(req.params.id, packagePayload, req.user?.id)
-    await MatrixPackageNotificationService.triggerStatusChangeNotifications({
-      beforePackage,
-      afterPackage,
-      operatorUserId: req.user?.id || null,
-    })
-    if (MatrixPackageDemandService.shouldEnsureDemand(afterPackage)) {
-      await MatrixPackageDemandService.ensureProductionDemand(afterPackage, req.user?.id || null)
-      afterPackage = await MatrixPackage.getById(afterPackage.id)
-    }
-    const demandWorkflowAdvance = await MatrixPackageDemandService.completeProductionStage(
-      afterPackage,
-      req.user?.id || null,
-    )
+    const completionResult = await completeMatrixPackageProductionStageCore(beforePackage, req.user?.id || null)
 
     return res.json({
       success: true,
       message: '生产已完成，已进入测试中',
       data: {
-        package: afterPackage,
-        demand_workflow_advance: demandWorkflowAdvance,
+        package: completionResult?.package || beforePackage,
+        demand_workflow_advance: completionResult?.demand_workflow_advance || null,
       },
     })
   } catch (error) {
@@ -572,7 +637,17 @@ async function updateMatrixPackageProductionNode(req, res) {
       nodes: data,
       operatorUserId: req.user?.id || null,
     })
-    return res.json({ success: true, message: '生产节点已更新', data })
+    const autoProductionCompletion = await autoCompleteProductionStageIfReady({
+      packageDetail,
+      nodes: data,
+      operatorUserId: req.user?.id || null,
+    })
+    return res.json({
+      success: true,
+      message: '生产节点已更新',
+      data,
+      auto_production_completion: autoProductionCompletion,
+    })
   } catch (error) {
     return handleError(res, error, '更新矩阵包生产节点失败')
   }
