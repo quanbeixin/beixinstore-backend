@@ -11,8 +11,12 @@ const NODE_KEYS = {
   PRODUCTION: 'MATRIX_PRODUCTION',
   TEST_ACCEPTANCE: 'TEST_ACCEPTANCE',
   PRODUCT_ACCEPTANCE: 'PRODUCT_ACCEPTANCE',
+  OPERATION_ACCEPTANCE: 'OPERATION_ACCEPTANCE',
+  DESIGN_ACCEPTANCE: 'DESIGN_ACCEPTANCE',
+  DELIVERY_REVIEW: 'DELIVERY_REVIEW',
 }
 const PRODUCTION_STATUS_CODES = new Set(['IN_DEVELOPMENT', 'TESTING', 'COLD_STANDBY'])
+const PRODUCTION_DEMAND_PARTICIPANT_ROLES = ['DEMAND_OWNER', 'QA', 'PRODUCT_MANAGER', 'OPERATIONS', 'DESIGNER']
 
 function toPositiveInt(value) {
   const numeric = Number.parseInt(value, 10)
@@ -434,8 +438,10 @@ const MatrixPackageDemandService = {
       err.message = '矩阵包缺少负责人，无法自动创建项目管理需求'
       throw err
     }
-    const participantRoles = ['DEMAND_OWNER']
-    const participantRoleUserMap = ownerUserId ? { DEMAND_OWNER: [ownerUserId] } : {}
+    const participantRoles = PRODUCTION_DEMAND_PARTICIPANT_ROLES
+    const participantRoleUserMap = ownerUserId
+      ? Object.fromEntries(participantRoles.map((role) => [role, [ownerUserId]]))
+      : {}
     const demandId = await Work.createDemand({
       name: `【矩阵包生产】${normalizeText(latestMatrixPackage.package_name, 100) || packageId}`,
       ownerUserId,

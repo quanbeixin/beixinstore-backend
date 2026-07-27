@@ -5,6 +5,7 @@ const STATUS_DICT_KEY = 'matrix_package_status'
 const HEALTH_DICT_KEY = 'matrix_package_health'
 const PLATFORM_DICT_KEY = 'matrix_package_delivery_platform'
 const DELIVERY_STATUS_DICT_KEY = 'matrix_package_delivery_status'
+const DELIVERY_CHANNEL_DICT_KEY = 'matrix_package_delivery_channel'
 const PRODUCTION_STAGE_DICT_KEY = 'matrix_package_production_stage'
 const PRODUCTION_STATUS_CODES = ['IN_DEVELOPMENT', 'TESTING']
 const COMPLETION_SIDE_NOTE_TYPES = ['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS']
@@ -88,6 +89,9 @@ function mapRow(row) {
     domain_info: row.domain_info || '',
     platform: row.platform || '',
     platform_codes: normalizePlatformCodes(row.platform),
+    delivery_channel_code: row.delivery_channel_code || '',
+    delivery_channel_name: row.delivery_channel_name || row.delivery_channel_code || '',
+    delivery_channel_color: row.delivery_channel_color || '',
     delivery_status_code: row.delivery_status_code || '',
     delivery_status_name: row.delivery_status_name || row.delivery_status_code || '',
     delivery_status_color: row.delivery_status_color || '',
@@ -195,6 +199,12 @@ function buildWhere(filters = {}) {
   if (deliveryStatusCode) {
     clauses.push('mp.delivery_status_code = ?')
     params.push(deliveryStatusCode)
+  }
+
+  const deliveryChannelCode = normalizeOptionalCode(filters.delivery_channel_code)
+  if (deliveryChannelCode) {
+    clauses.push('mp.delivery_channel_code = ?')
+    params.push(deliveryChannelCode)
   }
 
   const ownerName = normalizeText(filters.owner_name, 80)
@@ -311,6 +321,9 @@ const MatrixPackage = {
          mp.new_package_version,
          mp.domain_info,
          mp.platform,
+         mp.delivery_channel_code,
+         deliveryChannelDict.item_name AS delivery_channel_name,
+         deliveryChannelDict.color AS delivery_channel_color,
          mp.delivery_status_code,
          deliveryStatusDict.item_name AS delivery_status_name,
          deliveryStatusDict.color AS delivery_status_color,
@@ -377,9 +390,12 @@ const MatrixPackage = {
        LEFT JOIN config_dict_items productionStageDict
          ON productionStageDict.type_key = ?
         AND productionStageDict.item_code = mp.production_stage_code
-       LEFT JOIN config_dict_items deliveryStatusDict
-         ON deliveryStatusDict.type_key = ?
-        AND deliveryStatusDict.item_code = mp.delivery_status_code
+      LEFT JOIN config_dict_items deliveryStatusDict
+        ON deliveryStatusDict.type_key = ?
+       AND deliveryStatusDict.item_code = mp.delivery_status_code
+      LEFT JOIN config_dict_items deliveryChannelDict
+        ON deliveryChannelDict.type_key = ?
+       AND deliveryChannelDict.item_code = mp.delivery_channel_code
        WHERE ${whereSql}
        ORDER BY
          ${statusOrderSql} ASC,
@@ -404,6 +420,7 @@ const MatrixPackage = {
         HEALTH_DICT_KEY,
         PRODUCTION_STAGE_DICT_KEY,
         DELIVERY_STATUS_DICT_KEY,
+        DELIVERY_CHANNEL_DICT_KEY,
         ...params,
         pageSize,
         offset,
@@ -447,6 +464,9 @@ const MatrixPackage = {
          mp.new_package_version,
          mp.domain_info,
          mp.platform,
+         mp.delivery_channel_code,
+         deliveryChannelDict.item_name AS delivery_channel_name,
+         deliveryChannelDict.color AS delivery_channel_color,
          mp.delivery_status_code,
          deliveryStatusDict.item_name AS delivery_status_name,
          deliveryStatusDict.color AS delivery_status_color,
@@ -513,9 +533,12 @@ const MatrixPackage = {
        LEFT JOIN config_dict_items productionStageDict
          ON productionStageDict.type_key = ?
         AND productionStageDict.item_code = mp.production_stage_code
-       LEFT JOIN config_dict_items deliveryStatusDict
-         ON deliveryStatusDict.type_key = ?
-        AND deliveryStatusDict.item_code = mp.delivery_status_code
+      LEFT JOIN config_dict_items deliveryStatusDict
+        ON deliveryStatusDict.type_key = ?
+       AND deliveryStatusDict.item_code = mp.delivery_status_code
+      LEFT JOIN config_dict_items deliveryChannelDict
+        ON deliveryChannelDict.type_key = ?
+       AND deliveryChannelDict.item_code = mp.delivery_channel_code
        WHERE mp.id = ? AND mp.deleted_at IS NULL
        LIMIT 1`,
       [
@@ -524,6 +547,7 @@ const MatrixPackage = {
         HEALTH_DICT_KEY,
         PRODUCTION_STAGE_DICT_KEY,
         DELIVERY_STATUS_DICT_KEY,
+        DELIVERY_CHANNEL_DICT_KEY,
         packageId,
       ],
     )
@@ -534,8 +558,8 @@ const MatrixPackage = {
     const normalized = await this.normalizePayload(payload)
     const [result] = await pool.query(
       `INSERT INTO matrix_packages
-       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, delivery_status_code, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, latest_progress, production_checklist, created_by, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, delivery_channel_code, delivery_status_code, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, latest_progress, production_checklist, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         normalized.developer_account_id,
         normalized.package_name,
@@ -543,6 +567,7 @@ const MatrixPackage = {
         normalized.new_package_version,
         normalized.domain_info,
         normalized.platform,
+        normalized.delivery_channel_code,
         normalized.delivery_status_code,
         normalized.owner_user_id,
         normalized.owner_name,
@@ -575,6 +600,7 @@ const MatrixPackage = {
            domain_info = ?,
            developer_account_id = ?,
            platform = ?,
+           delivery_channel_code = ?,
            delivery_status_code = ?,
            owner_user_id = ?,
            owner_name = ?,
@@ -593,6 +619,7 @@ const MatrixPackage = {
         normalized.domain_info,
         normalized.developer_account_id,
         normalized.platform,
+        normalized.delivery_channel_code,
         normalized.delivery_status_code,
         normalized.owner_user_id,
         normalized.owner_name,
@@ -755,6 +782,18 @@ const MatrixPackage = {
       throw err
     }
 
+    const hasDeliveryChannel = Object.prototype.hasOwnProperty.call(payload, 'delivery_channel_code')
+    const rawDeliveryChannelCode = hasDeliveryChannel
+      ? normalizeOptionalCode(payload.delivery_channel_code)
+      : normalizeOptionalCode(existing.delivery_channel_code)
+    const deliveryChannelCode = statusCode === 'DELIVERING' ? rawDeliveryChannelCode : null
+    if (deliveryChannelCode && !(await validateDictCode(DELIVERY_CHANNEL_DICT_KEY, deliveryChannelCode, { allowNull: true }))) {
+      const err = new Error('delivery_channel_invalid')
+      err.statusCode = 400
+      err.message = '投放渠道不合法'
+      throw err
+    }
+
     const hasOwnerUser = Object.prototype.hasOwnProperty.call(payload, 'owner_user_id')
     const ownerUser = hasOwnerUser
       ? await this.getUserDisplayName(payload.owner_user_id)
@@ -770,6 +809,7 @@ const MatrixPackage = {
       new_package_version: newPackageVersion || null,
       domain_info: domainInfo || null,
       platform: platformCodes.join(',') || null,
+      delivery_channel_code: deliveryChannelCode || null,
       delivery_status_code: deliveryStatusCode || null,
       owner_user_id: ownerUser.id,
       owner_name: normalizeText(ownerUser.displayName, 80),

@@ -518,11 +518,40 @@ async function safeGetDemandWorkflowSnapshot(demandId) {
   }
 }
 
-async function syncMatrixPackageAfterProductAcceptanceCompleted({ demandId, fromNodeKey, operatorUserId = null } = {}) {
+const MATRIX_PACKAGE_ACCEPTANCE_NODE_KEYS = new Set([
+  'PRODUCT_ACCEPTANCE',
+  'OPERATION_ACCEPTANCE',
+  'DESIGN_ACCEPTANCE',
+])
+
+function isMatrixPackageAcceptanceAllDone(workflow) {
+  const nodeStatusMap = new Map(
+    (Array.isArray(workflow?.nodes) ? workflow.nodes : []).map((node) => [
+      normalizePhaseKey(node?.node_key),
+      normalizePhaseKey(node?.status),
+    ]),
+  )
+  return Array.from(MATRIX_PACKAGE_ACCEPTANCE_NODE_KEYS).every(
+    (nodeKey) => nodeStatusMap.get(nodeKey) === 'DONE',
+  )
+}
+
+async function syncMatrixPackageAfterAcceptanceCompleted({ demandId, fromNodeKey, operatorUserId = null } = {}) {
   const normalizedDemandId = normalizeDemandId(demandId)
-  if (!normalizedDemandId || normalizePhaseKey(fromNodeKey) !== 'PRODUCT_ACCEPTANCE') return null
+  const normalizedFromNodeKey = normalizePhaseKey(fromNodeKey)
+  if (!normalizedDemandId || !MATRIX_PACKAGE_ACCEPTANCE_NODE_KEYS.has(normalizedFromNodeKey)) return null
 
   try {
+    const workflow = await safeGetDemandWorkflowSnapshot(normalizedDemandId)
+    if (!isMatrixPackageAcceptanceAllDone(workflow)) {
+      return {
+        skipped: true,
+        reason: 'MATRIX_PACKAGE_ACCEPTANCE_NOT_ALL_DONE',
+        demand_id: normalizedDemandId,
+        from_node_key: normalizedFromNodeKey,
+      }
+    }
+
     const [rows] = await pool.query(
       `SELECT id
        FROM matrix_packages
@@ -553,6 +582,7 @@ async function syncMatrixPackageAfterProductAcceptanceCompleted({ demandId, from
       domain_info: beforePackage.domain_info || '',
       developer_account_id: beforePackage.developer_account_id || null,
       platform: beforePackage.platform_codes || beforePackage.platform || '',
+      delivery_channel_code: beforePackage.delivery_channel_code || null,
       delivery_status_code: beforePackage.delivery_status_code || null,
       owner_user_id: beforePackage.owner_user_id || null,
       status_code: 'COLD_STANDBY',
@@ -577,7 +607,7 @@ async function syncMatrixPackageAfterProductAcceptanceCompleted({ demandId, from
       release_id: release?.id || null,
     }
   } catch (error) {
-    console.warn('矩阵包产品验收通过后同步冷备包失败（已忽略）:', {
+    console.warn('矩阵包验收全部通过后同步冷备包失败（已忽略）:', {
       demand_id: normalizedDemandId,
       from_node_key: fromNodeKey || '',
       message: error?.message || String(error || ''),
@@ -5304,7 +5334,7 @@ const submitDemandWorkflowCurrentNode = async (req, res) => {
       demandBefore: demand,
       operatorUserId: req.user.id,
     })
-    await syncMatrixPackageAfterProductAcceptanceCompleted({
+    await syncMatrixPackageAfterAcceptanceCompleted({
       demandId,
       fromNodeKey,
       operatorUserId: req.user.id,
@@ -5409,7 +5439,7 @@ const submitDemandWorkflowNode = async (req, res) => {
       demandBefore: demand,
       operatorUserId: req.user.id,
     })
-    await syncMatrixPackageAfterProductAcceptanceCompleted({
+    await syncMatrixPackageAfterAcceptanceCompleted({
       demandId,
       fromNodeKey,
       operatorUserId: req.user.id,
@@ -5689,7 +5719,7 @@ const forceCompleteDemandWorkflowCurrentNode = async (req, res) => {
       demandBefore: demand,
       operatorUserId: req.user.id,
     })
-    await syncMatrixPackageAfterProductAcceptanceCompleted({
+    await syncMatrixPackageAfterAcceptanceCompleted({
       demandId,
       fromNodeKey,
       operatorUserId: req.user.id,
@@ -5789,7 +5819,7 @@ const forceCompleteDemandWorkflowNode = async (req, res) => {
       demandBefore: demand,
       operatorUserId: req.user.id,
     })
-    await syncMatrixPackageAfterProductAcceptanceCompleted({
+    await syncMatrixPackageAfterAcceptanceCompleted({
       demandId,
       fromNodeKey,
       operatorUserId: req.user.id,

@@ -619,6 +619,7 @@ async function completeMatrixPackageProduction(req, res) {
       domain_info: beforePackage.domain_info || '',
       developer_account_id: beforePackage.developer_account_id || null,
       platform: beforePackage.platform_codes || beforePackage.platform || '',
+      delivery_channel_code: beforePackage.delivery_channel_code || null,
       delivery_status_code: beforePackage.delivery_status_code || null,
       owner_user_id: beforePackage.owner_user_id || null,
       status_code: 'TESTING',

@@ -365,6 +365,10 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
     app_id: field('包ID（应用ID）', row.app_id || ''),
     domain_info: field('域名信息', row.domain_info || ''),
     delivery_platform: field('投放平台', normalizePlatformCodes(row.platform)),
+    delivery_channel: field('投放渠道', {
+      code: row.delivery_channel_code || '',
+      name: row.delivery_channel_name || row.delivery_channel_code || '',
+    }),
     delivery_status: field('投放状态', {
       code: row.delivery_status_code || '',
       name: row.delivery_status_name || row.delivery_status_code || '',
@@ -425,6 +429,8 @@ async function listOpenMatrixPackages(req, res) {
          mp.app_id,
          mp.domain_info,
          mp.platform,
+         mp.delivery_channel_code,
+         deliveryChannelDict.item_name AS delivery_channel_name,
          mp.delivery_status_code,
          deliveryStatusDict.item_name AS delivery_status_name,
          mp.new_package_version,
@@ -462,9 +468,12 @@ async function listOpenMatrixPackages(req, res) {
        LEFT JOIN config_dict_items healthDict
          ON healthDict.type_key = 'matrix_package_health'
         AND healthDict.item_code = mp.health_code
-       LEFT JOIN config_dict_items deliveryStatusDict
-         ON deliveryStatusDict.type_key = 'matrix_package_delivery_status'
-        AND deliveryStatusDict.item_code = mp.delivery_status_code
+      LEFT JOIN config_dict_items deliveryStatusDict
+        ON deliveryStatusDict.type_key = 'matrix_package_delivery_status'
+       AND deliveryStatusDict.item_code = mp.delivery_status_code
+      LEFT JOIN config_dict_items deliveryChannelDict
+        ON deliveryChannelDict.type_key = 'matrix_package_delivery_channel'
+       AND deliveryChannelDict.item_code = mp.delivery_channel_code
        LEFT JOIN config_dict_items accountStatusDict
          ON accountStatusDict.type_key = 'developer_account_status'
         AND accountStatusDict.item_code = da.status_code

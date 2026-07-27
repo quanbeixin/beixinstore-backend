@@ -142,6 +142,13 @@ curl \
         "description": "投放平台",
         "value": ["META", "GOOGLE"]
       },
+      "delivery_channel": {
+        "description": "投放渠道",
+        "value": {
+          "code": "SELF",
+          "name": "自投"
+        }
+      },
       "delivery_status": {
         "description": "投放状态",
         "value": {
@@ -202,6 +209,7 @@ curl \
 | `app_id` | 包ID（应用ID） | 应用包 ID |
 | `domain_info` | 域名信息 | 矩阵包域名 |
 | `delivery_platform` | 投放平台 | 返回平台编码数组，如 `["META", "GOOGLE"]` |
+| `delivery_channel` | 投放渠道 | 返回 `{ code, name }`，当前枚举为 `SELF`/自投、`AGENCY`/代理 |
 | `delivery_status` | 投放状态 | 返回 `{ code, name }`，当前枚举为 `ACTIVE`/在投、`STOPPED`/停投 |
 | `new_package_version` | 新包版本 | 新包版本 |
 | `status` | 包状态 | 返回 `{ code, name }` |

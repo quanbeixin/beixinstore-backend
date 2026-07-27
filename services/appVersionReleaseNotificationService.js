@@ -134,6 +134,18 @@ function buildStatusChangeContent(release, previousStatusName = '') {
   ].filter(Boolean).join('\n')
 }
 
+function buildStatusChangeTitle(release) {
+  const statusName = formatValue(release?.release_status_name || release?.release_status, '')
+  const releaseTypeCode = normalizeText(release?.release_type, 64).toUpperCase()
+  const releaseTypeName = formatValue(release?.release_type_name || release?.release_type, '')
+  const typeText = releaseTypeName || (releaseTypeCode === 'FIRST_RELEASE' ? '首次发版' : '版本迭代')
+  const typePrefix = releaseTypeCode === 'FIRST_RELEASE' || typeText === '首次发版'
+    ? '🟢🟢🟢'
+    : '🔵🔵🔵'
+  const statusSuffix = statusName ? `（${statusName}）` : ''
+  return `${typePrefix} ${typeText}：APP 发版状态更新${statusSuffix}`
+}
+
 async function listAppReleaseManagers() {
   const [rows] = await pool.query(
     `SELECT DISTINCT
@@ -255,7 +267,7 @@ const AppVersionReleaseNotificationService = {
 
     return sendNotification({
       channelType: 'feishu',
-      title: 'APP版本发布状态更新',
+      title: buildStatusChangeTitle(afterRelease),
       content: buildStatusChangeContent(afterRelease, beforeRelease?.release_status_name || beforeStatus),
       targets: [target],
       metadata: {
