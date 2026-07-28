@@ -3,6 +3,7 @@ const MatrixPackageProductionNode = require('../models/MatrixPackageProductionNo
 const MatrixPackageSideNote = require('../models/MatrixPackageSideNote')
 const MatrixPackageNotificationService = require('../services/matrixPackageNotificationService')
 const MatrixPackageDemandService = require('../services/matrixPackageDemandService')
+const MatrixPackageScheduleService = require('../services/matrixPackageScheduleService')
 const {
   buildMatrixPackageSideNotePolicyPayload,
   decorateMatrixPackageSideNotes,
@@ -12,7 +13,7 @@ const pool = require('../utils/db')
 
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 const PREPARATION_NODE_CODES = new Set(['OPERATION_MATERIAL', 'DESIGN_PRODUCTION', 'BACKEND_SCRIPT'])
-const AUTO_COMPLETE_PRODUCTION_NODE_CODES = ['DESIGN_PRODUCTION', 'BACKEND_SCRIPT']
+const AUTO_COMPLETE_PRODUCTION_NODE_CODES = ['FRONTEND_BUILD', 'BACKEND_SCRIPT']
 const AUTO_COMPLETE_PRODUCTION_ALLOWED_STATUS_CODES = new Set(['IN_DEVELOPMENT', 'TESTING'])
 const SIDE_CHECK_NOTIFICATION_NOTE_TYPES = new Set(['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS'])
 const REQUIRED_PRODUCTION_COMPLETE_SIDE_CHECK_TYPES = ['DELIVERY', 'DESIGN', 'OPERATION', 'FRONTEND', 'DEVOPS']
@@ -394,6 +395,14 @@ async function createMatrixPackage(req, res) {
       await MatrixPackageDemandService.ensureProductionDemand(data, req.user?.id || null)
       data = await MatrixPackage.getById(data.id)
     }
+    if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'expected_cold_ready_date') && data?.expected_cold_ready_date) {
+      await MatrixPackageScheduleService.syncFromFrontendBuildT({
+        packageId: data.id,
+        frontendBuildAt: data.expected_cold_ready_date,
+        operatorUserId: req.user?.id || null,
+      })
+      data = await MatrixPackage.getById(data.id)
+    }
     return res.status(201).json({ success: true, message: '矩阵包已新增', data })
   } catch (error) {
     return handleError(res, error, '新增矩阵包失败')
@@ -415,6 +424,14 @@ async function updateMatrixPackage(req, res) {
     })
     if (MatrixPackageDemandService.shouldEnsureDemand(data)) {
       await MatrixPackageDemandService.ensureProductionDemand(data, req.user?.id || null)
+      data = await MatrixPackage.getById(data.id)
+    }
+    if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'expected_cold_ready_date') && data?.expected_cold_ready_date) {
+      await MatrixPackageScheduleService.syncFromFrontendBuildT({
+        packageId: data.id,
+        frontendBuildAt: data.expected_cold_ready_date,
+        operatorUserId: req.user?.id || null,
+      })
       data = await MatrixPackage.getById(data.id)
     }
     return res.json({ success: true, message: '矩阵包已更新', data })
@@ -603,7 +620,7 @@ async function updateMatrixPackageProductionNode(req, res) {
       return res.status(404).json({ success: false, message: '矩阵包不存在' })
     }
     const beforeNode = beforeNodes.find((item) => item.node_code === nodeCode) || null
-    const data = await MatrixPackageProductionNode.updateStatus(
+    let data = await MatrixPackageProductionNode.updateStatus(
       req.params.id,
       nodeCode,
       req.body || {},
@@ -637,6 +654,20 @@ async function updateMatrixPackageProductionNode(req, res) {
       nodes: data,
       operatorUserId: req.user?.id || null,
     })
+    let scheduleSync = null
+    if (
+      nodeCode === 'FRONTEND_BUILD' &&
+      req.body &&
+      Object.prototype.hasOwnProperty.call(req.body, 'expected_delivery_date') &&
+      afterNode?.expected_delivery_date
+    ) {
+      scheduleSync = await MatrixPackageScheduleService.syncFromFrontendBuildT({
+        packageId: packageDetail.id,
+        frontendBuildAt: afterNode.expected_delivery_date,
+        operatorUserId: req.user?.id || null,
+      })
+      data = await MatrixPackageProductionNode.listByPackageId(packageDetail.id)
+    }
     const autoProductionCompletion = await autoCompleteProductionStageIfReady({
       packageDetail,
       nodes: data,
@@ -646,6 +677,7 @@ async function updateMatrixPackageProductionNode(req, res) {
       success: true,
       message: '生产节点已更新',
       data,
+      schedule_sync: scheduleSync,
       auto_production_completion: autoProductionCompletion,
     })
   } catch (error) {
@@ -793,7 +825,7 @@ async function remindMatrixPackageSideNote(req, res) {
       receiverUserId,
       sceneTitle: getSideNoteTitle(note.note_type),
       dueLabel: '统一截止时间',
-      dueValue: detail.expected_cold_ready_date || '',
+      dueValue: detail.side_check_deadline_at || '',
     })
     return res.json({
       success: true,

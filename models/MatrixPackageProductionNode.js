@@ -24,6 +24,13 @@ const NODE_DEFINITIONS = [
     sort_order: 30,
     depends_on: [],
   },
+  {
+    node_code: 'FRONTEND_BUILD',
+    node_name: '前端构建',
+    owner_side: '前端',
+    sort_order: 40,
+    depends_on: [],
+  },
 ]
 
 const NODE_CODES = NODE_DEFINITIONS.map((item) => item.node_code)
@@ -58,6 +65,12 @@ function normalizeOptionalDate(value) {
   return /^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}$/.test(text) ? text : null
 }
 
+function normalizeScheduleSource(value, fallback = '') {
+  const text = String(value || '').trim().toUpperCase()
+  if (text === 'AUTO_T' || text === 'MANUAL') return text
+  return fallback
+}
+
 function parseStructuredContent(content) {
   const text = String(content || '').trim()
   if (!text) return {}
@@ -80,6 +93,7 @@ function mapRow(row) {
     owner_user_id: row.owner_user_id ? Number(row.owner_user_id) : null,
     owner_name: row.owner_name || '',
     expected_delivery_date: row.expected_delivery_date || null,
+    expected_delivery_date_source: row.expected_delivery_date_source || '',
     started_by: row.started_by ? Number(row.started_by) : null,
     started_at: row.started_at || null,
     completed_by: row.completed_by ? Number(row.completed_by) : null,
@@ -130,6 +144,7 @@ const MatrixPackageProductionNode = {
          owner_user_id,
          owner_name,
          DATE_FORMAT(expected_delivery_date, '%Y-%m-%d %H:%i:%s') AS expected_delivery_date,
+         expected_delivery_date_source,
          started_by,
          DATE_FORMAT(started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
          completed_by,
@@ -138,7 +153,7 @@ const MatrixPackageProductionNode = {
          DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
        FROM matrix_package_production_nodes
        WHERE package_id = ? AND node_code IN (?)
-       ORDER BY FIELD(node_code, 'OPERATION_MATERIAL', 'DESIGN_PRODUCTION', 'BACKEND_SCRIPT')`,
+       ORDER BY FIELD(node_code, 'OPERATION_MATERIAL', 'DESIGN_PRODUCTION', 'BACKEND_SCRIPT', 'FRONTEND_BUILD')`,
       [matrixPackage.id, NODE_CODES],
     )
     const rowMap = new Map(rows.map((row) => [row.node_code, row]))
@@ -219,6 +234,7 @@ const MatrixPackageProductionNode = {
     const expectedDeliveryDate = Object.prototype.hasOwnProperty.call(payload, 'expected_delivery_date')
       ? normalizeOptionalDate(payload?.expected_delivery_date)
       : undefined
+    const expectedDeliveryDateSource = normalizeScheduleSource(payload?.expected_delivery_date_source)
     let ownerName = undefined
 
     if (ownerUserId !== undefined) {
@@ -245,9 +261,9 @@ const MatrixPackageProductionNode = {
 
     await pool.query(
       `INSERT INTO matrix_package_production_nodes
-       (package_id, node_code, status_code, block_reason, owner_user_id, owner_name, expected_delivery_date, started_by, started_at, completed_by, completed_at, updated_by)
+       (package_id, node_code, status_code, block_reason, owner_user_id, owner_name, expected_delivery_date, expected_delivery_date_source, started_by, started_at, completed_by, completed_at, updated_by)
        VALUES (
-         ?, ?, ?, ?, ?, ?, ?,
+         ?, ?, ?, ?, ?, ?, ?, ?,
          CASE WHEN ? IN ('IN_PROGRESS', 'COMPLETED') THEN ? ELSE NULL END,
          CASE WHEN ? IN ('IN_PROGRESS', 'COMPLETED') THEN NOW() ELSE NULL END,
          CASE WHEN ? = 'COMPLETED' THEN ? ELSE NULL END,
@@ -269,6 +285,10 @@ const MatrixPackageProductionNode = {
          expected_delivery_date = CASE
            WHEN ? = 1 THEN VALUES(expected_delivery_date)
            ELSE expected_delivery_date
+         END,
+         expected_delivery_date_source = CASE
+           WHEN ? = 1 THEN VALUES(expected_delivery_date_source)
+           ELSE expected_delivery_date_source
          END,
          started_by = CASE
            WHEN VALUES(status_code) IN ('IN_PROGRESS', 'COMPLETED') AND started_at IS NULL THEN VALUES(started_by)
@@ -298,6 +318,9 @@ const MatrixPackageProductionNode = {
         ownerUserId || null,
         ownerName || '',
         expectedDeliveryDate,
+        expectedDeliveryDate === undefined
+          ? ''
+          : (expectedDeliveryDate ? (expectedDeliveryDateSource || 'MANUAL') : null),
         statusCode,
         userId || null,
         statusCode,
@@ -307,6 +330,7 @@ const MatrixPackageProductionNode = {
         userId || null,
         ownerUserId !== undefined ? 1 : 0,
         ownerUserId === null ? 1 : 0,
+        expectedDeliveryDate !== undefined ? 1 : 0,
         expectedDeliveryDate !== undefined ? 1 : 0,
       ],
     )

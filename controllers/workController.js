@@ -2700,6 +2700,11 @@ const updateDemand = async (req, res) => {
         expectedReleaseDate = normalized
       }
     }
+    const expectedReleaseDateSource =
+      req.body.expected_release_date !== undefined &&
+      String(expectedReleaseDate || '') !== String(existing.expected_release_date || '')
+        ? 'MANUAL'
+        : (existing.expected_release_date_source || null)
     if (isDemandOpen(status) === false && !expectedReleaseDate) {
       return res.status(400).json({ success: false, message: '需求进入已完成前，预期上线日期必填' })
     }
@@ -2792,6 +2797,7 @@ const updateDemand = async (req, res) => {
       businessValueExpectation,
       businessGroupCode,
       expectedReleaseDate,
+      expectedReleaseDateSource,
       status,
       priority,
       description,

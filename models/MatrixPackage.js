@@ -45,6 +45,12 @@ function normalizeOptionalDate(value) {
   return null
 }
 
+function normalizeScheduleSource(value, fallback = '') {
+  const text = String(value || '').trim().toUpperCase()
+  if (text === 'AUTO_T' || text === 'MANUAL') return text
+  return fallback
+}
+
 function normalizeChecklist(value) {
   if (Array.isArray(value)) {
     return value.map((item) => String(item || '').trim()).filter(Boolean)
@@ -107,6 +113,9 @@ function mapRow(row) {
     production_stage_name: row.production_stage_name || row.production_stage_code || '',
     production_stage_color: row.production_stage_color || '',
     expected_cold_ready_date: row.expected_cold_ready_date || null,
+    expected_cold_ready_date_source: row.expected_cold_ready_date_source || '',
+    side_check_deadline_at: row.side_check_deadline_at || null,
+    side_check_deadline_source: row.side_check_deadline_source || '',
     latest_progress: row.latest_progress || '',
     production_checklist: normalizeChecklist(row.production_checklist),
     linked_demand_id: row.linked_demand_id || '',
@@ -340,7 +349,10 @@ const MatrixPackage = {
          mp.production_stage_code,
          productionStageDict.item_name AS production_stage_name,
          productionStageDict.color AS production_stage_color,
-         DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d') AS expected_cold_ready_date,
+         DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d %H:%i:%s') AS expected_cold_ready_date,
+         mp.expected_cold_ready_date_source,
+         DATE_FORMAT(mp.side_check_deadline_at, '%Y-%m-%d %H:%i:%s') AS side_check_deadline_at,
+         mp.side_check_deadline_source,
          mp.latest_progress,
          mp.production_checklist,
          mp.linked_demand_id,
@@ -483,7 +495,10 @@ const MatrixPackage = {
          mp.production_stage_code,
          productionStageDict.item_name AS production_stage_name,
          productionStageDict.color AS production_stage_color,
-         DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d') AS expected_cold_ready_date,
+         DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d %H:%i:%s') AS expected_cold_ready_date,
+         mp.expected_cold_ready_date_source,
+         DATE_FORMAT(mp.side_check_deadline_at, '%Y-%m-%d %H:%i:%s') AS side_check_deadline_at,
+         mp.side_check_deadline_source,
          mp.latest_progress,
          mp.production_checklist,
          mp.linked_demand_id,
@@ -558,8 +573,8 @@ const MatrixPackage = {
     const normalized = await this.normalizePayload(payload)
     const [result] = await pool.query(
       `INSERT INTO matrix_packages
-       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, delivery_channel_code, delivery_status_code, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, latest_progress, production_checklist, created_by, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, delivery_channel_code, delivery_status_code, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, expected_cold_ready_date_source, side_check_deadline_at, side_check_deadline_source, latest_progress, production_checklist, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         normalized.developer_account_id,
         normalized.package_name,
@@ -575,6 +590,9 @@ const MatrixPackage = {
         normalized.health_code,
         normalized.production_stage_code,
         normalized.expected_cold_ready_date,
+        normalized.expected_cold_ready_date_source,
+        normalized.side_check_deadline_at,
+        normalized.side_check_deadline_source,
         normalized.latest_progress,
         JSON.stringify(normalized.production_checklist),
         userId || null,
@@ -608,6 +626,9 @@ const MatrixPackage = {
            health_code = ?,
            production_stage_code = ?,
            expected_cold_ready_date = ?,
+           expected_cold_ready_date_source = ?,
+           side_check_deadline_at = ?,
+           side_check_deadline_source = ?,
            latest_progress = ?,
            production_checklist = ?,
            updated_by = ?
@@ -627,6 +648,9 @@ const MatrixPackage = {
         normalized.health_code,
         normalized.production_stage_code,
         normalized.expected_cold_ready_date,
+        normalized.expected_cold_ready_date_source,
+        normalized.side_check_deadline_at,
+        normalized.side_check_deadline_source,
         normalized.latest_progress,
         JSON.stringify(normalized.production_checklist),
         userId || null,
@@ -728,6 +752,31 @@ const MatrixPackage = {
       err.message = '预计冷备完成时间格式错误'
       throw err
     }
+    const explicitReadyDateSource = normalizeScheduleSource(payload.expected_cold_ready_date_source)
+    const existingReadyDate = normalizeOptionalDate(existing.expected_cold_ready_date)
+    const expectedColdReadyDateSource = explicitReadyDateSource || (
+      hasReadyDate && expectedColdReadyDate !== existingReadyDate
+        ? 'MANUAL'
+        : normalizeScheduleSource(existing.expected_cold_ready_date_source)
+    )
+
+    const hasSideCheckDeadline = Object.prototype.hasOwnProperty.call(payload, 'side_check_deadline_at')
+    const sideCheckDeadlineAt = hasSideCheckDeadline
+      ? normalizeOptionalDate(payload.side_check_deadline_at)
+      : normalizeOptionalDate(existing.side_check_deadline_at)
+    if (hasSideCheckDeadline && payload.side_check_deadline_at && !sideCheckDeadlineAt) {
+      const err = new Error('side_check_deadline_at_invalid')
+      err.statusCode = 400
+      err.message = '统一截止时间格式错误'
+      throw err
+    }
+    const explicitSideCheckDeadlineSource = normalizeScheduleSource(payload.side_check_deadline_source)
+    const existingSideCheckDeadline = normalizeOptionalDate(existing.side_check_deadline_at)
+    const sideCheckDeadlineSource = explicitSideCheckDeadlineSource || (
+      hasSideCheckDeadline && sideCheckDeadlineAt !== existingSideCheckDeadline
+        ? 'MANUAL'
+        : normalizeScheduleSource(existing.side_check_deadline_source)
+    )
 
     const latestProgress = Object.prototype.hasOwnProperty.call(payload, 'latest_progress')
       ? normalizeText(payload.latest_progress, 500)
@@ -817,6 +866,9 @@ const MatrixPackage = {
       health_code: healthCode,
       production_stage_code: productionStageCode,
       expected_cold_ready_date: expectedColdReadyDate,
+      expected_cold_ready_date_source: expectedColdReadyDate ? expectedColdReadyDateSource : null,
+      side_check_deadline_at: sideCheckDeadlineAt,
+      side_check_deadline_source: sideCheckDeadlineAt ? sideCheckDeadlineSource : null,
       latest_progress: latestProgress,
       production_checklist: productionChecklist,
     }

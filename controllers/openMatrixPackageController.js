@@ -117,6 +117,13 @@ const PRODUCTION_NODE_DEFINITIONS = [
     owner_side: '后端',
     sort_order: 30,
   },
+  {
+    node_code: 'FRONTEND_BUILD',
+    node_name: '前端构建',
+    description: '前端构建',
+    owner_side: '前端',
+    sort_order: 40,
+  },
 ]
 
 const PRODUCTION_NODE_STATUS_NAMES = {
@@ -598,7 +605,8 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
       code: row.health_code || '',
       name: row.health_name || row.health_code || '',
     }),
-    expected_cold_ready_date: field('统一截止时间', row.expected_cold_ready_date || null),
+    expected_cold_ready_date: field('预计生产完成时间', row.expected_cold_ready_date || null),
+    side_check_deadline_at: field('统一截止时间', row.side_check_deadline_at || null),
     owner_name: field('矩阵包负责人', row.owner_display_name || row.owner_name || ''),
     linked_demand: field('关联项目管理需求', {
       demand_id: field('需求ID', row.linked_demand_id || ''),
@@ -655,6 +663,7 @@ async function listOpenMatrixPackages(req, res) {
          mp.health_code,
          healthDict.item_name AS health_name,
          DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d %H:%i:%s') AS expected_cold_ready_date,
+         DATE_FORMAT(mp.side_check_deadline_at, '%Y-%m-%d %H:%i:%s') AS side_check_deadline_at,
          mp.owner_name,
          mp.linked_demand_id,
          linkedDemand.name AS linked_demand_name,

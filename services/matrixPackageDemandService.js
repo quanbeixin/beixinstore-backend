@@ -3,6 +3,7 @@ const Work = require('../models/Work')
 const Workflow = require('../models/Workflow')
 const MatrixPackage = require('../models/MatrixPackage')
 const FeishuUserBinding = require('../models/FeishuUserBinding')
+const MatrixPackageScheduleService = require('./matrixPackageScheduleService')
 const { addFeishuChatMembers, createFeishuDemandChat } = require('../utils/notificationSender')
 
 const TEMPLATE_NAME = '矩阵包生产流程'
@@ -313,6 +314,25 @@ async function unlinkPackageDemand(packageId, demandId) {
   )
 }
 
+async function syncPackageScheduleQuietly(matrixPackage, operatorUserId = null) {
+  const packageId = toPositiveInt(matrixPackage?.id)
+  const frontendBuildAt = normalizeText(matrixPackage?.expected_cold_ready_date, 32)
+  if (!packageId || !frontendBuildAt) return null
+  try {
+    return await MatrixPackageScheduleService.syncFromFrontendBuildT({
+      packageId,
+      frontendBuildAt,
+      operatorUserId,
+    })
+  } catch (error) {
+    console.warn('矩阵包生产排期初始化失败（已忽略）:', {
+      packageId,
+      message: error?.message || error,
+    })
+    return null
+  }
+}
+
 async function advanceStartNodeIfNeeded(demandId, packageId, operatorUserId) {
   const workflow = await Workflow.getDemandWorkflowByDemandId(demandId, { includeActionsLimit: 0 })
   const currentNodeKey = normalizeText(workflow?.current_node?.node_key, 64).toUpperCase()
@@ -375,6 +395,7 @@ const MatrixPackageDemandService = {
           existingLinkedDemandId,
           linkedDemand.owner_user_id || matrixPackage.owner_user_id,
         )
+        await syncPackageScheduleQuietly(matrixPackage, operatorUserId)
         return {
           demand_id: existingLinkedDemandId,
           created: false,
@@ -395,6 +416,7 @@ const MatrixPackageDemandService = {
         latestLinkedDemandId,
         latestMatrixPackage.owner_user_id || operatorUserId,
       )
+      await syncPackageScheduleQuietly(latestMatrixPackage, operatorUserId)
       return {
         demand_id: latestLinkedDemandId,
         created: false,
@@ -418,6 +440,7 @@ const MatrixPackageDemandService = {
         existingDemand.id,
         latestMatrixPackage.owner_user_id || operatorUserId,
       )
+      await syncPackageScheduleQuietly(latestMatrixPackage, operatorUserId)
       return {
         demand_id: existingDemand.id,
         created: false,
@@ -471,6 +494,7 @@ const MatrixPackageDemandService = {
     )
 
     await linkPackageDemand(packageId, demandId)
+    await syncPackageScheduleQuietly(latestMatrixPackage, operatorUserId)
     const groupChat = await ensureDemandAutoGroupChatQuietly(demandId, ownerUserId)
 
     return {

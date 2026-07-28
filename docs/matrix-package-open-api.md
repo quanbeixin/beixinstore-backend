@@ -214,7 +214,8 @@ curl \
 | `new_package_version` | 新包版本 | 新包版本 |
 | `status` | 包状态 | 返回 `{ code, name }` |
 | `health` | 健康度 | 返回 `{ code, name }` |
-| `expected_cold_ready_date` | 统一截止时间 | 信息录入统一截止时间 |
+| `expected_cold_ready_date` | 预计生产完成时间 | 冷备包生产线里的预计生产完成时间 |
+| `side_check_deadline_at` | 统一截止时间 | 各侧信息 check 的统一截止时间 |
 | `owner_name` | 矩阵包负责人 | 矩阵包总负责人 |
 | `linked_demand` | 关联项目管理需求 | 自动创建的项目管理需求信息 |
 | `developer_account` | 开发者账号 | 开发者账号信息 |
@@ -396,6 +397,7 @@ curl \
 | `OPERATION_MATERIAL` | 运营物料信息提供 |
 | `DESIGN_PRODUCTION` | 前端空包构建上传 |
 | `BACKEND_SCRIPT` | 后端脚本 |
+| `FRONTEND_BUILD` | 前端构建 |
 
 每个节点结构：
 

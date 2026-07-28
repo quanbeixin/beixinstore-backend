@@ -991,7 +991,7 @@ async function listPendingSideDeadlineNotes() {
        da.account_name AS developer_account_name,
        mp.status_code,
        statusDict.item_name AS status_name,
-       DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d') AS expected_cold_ready_date,
+       DATE_FORMAT(COALESCE(mp.side_check_deadline_at, mp.expected_cold_ready_date), '%Y-%m-%d %H:%i:%s') AS expected_cold_ready_date,
        mpn.note_type AS side_type,
        mpn.owner_user_id AS side_owner_user_id,
        COALESCE(NULLIF(noteOwner.real_name, ''), noteOwner.username, mpn.owner_name, '') AS side_owner_name,
@@ -1015,7 +1015,7 @@ async function listPendingSideDeadlineNotes() {
      LEFT JOIN config_dict_items statusDict
        ON statusDict.type_key = ?
       AND statusDict.item_code = mp.status_code
-     WHERE mp.expected_cold_ready_date IS NOT NULL
+     WHERE COALESCE(mp.side_check_deadline_at, mp.expected_cold_ready_date) IS NOT NULL
        AND mpn.note_type <> 'ADVERTISING'`,
     [MatrixPackage.STATUS_DICT_KEY],
   )
@@ -1060,6 +1060,7 @@ function getProductionNodeDisplayName(nodeCode) {
     OPERATION_MATERIAL: '运营物料信息提供',
     DESIGN_PRODUCTION: '前端空包构建上传',
     BACKEND_SCRIPT: '后端脚本',
+    FRONTEND_BUILD: '前端构建',
   }
   return map[String(nodeCode || '').trim().toUpperCase()] || nodeCode || ''
 }

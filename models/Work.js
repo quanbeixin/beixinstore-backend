@@ -2937,6 +2937,7 @@ const Work = {
         d.business_group_code,
         bg.item_name AS business_group_name,
         DATE_FORMAT(d.expected_release_date, '%Y-%m-%d') AS expected_release_date,
+        d.expected_release_date_source,
         ci.current_node_key,
         ci.current_node_name,
         ci.current_phase_key,
@@ -3395,6 +3396,7 @@ const Work = {
     businessValueExpectation = null,
     businessGroupCode = null,
     expectedReleaseDate = null,
+    expectedReleaseDateSource = null,
     status = 'TODO',
     priority = 'P2',
     description = '',
@@ -3410,8 +3412,8 @@ const Work = {
         participant_role_user_map_json,
         group_chat_mode, group_chat_id, actual_start_time, actual_end_time, doc_link, ui_design_link, test_case_link,
         frontend_tech_solution, backend_tech_solution, business_group_code,
-        code_branch, release_note, business_value_expectation, expected_release_date, status, priority, description, created_by
-      ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        code_branch, release_note, business_value_expectation, expected_release_date, expected_release_date_source, status, priority, description, created_by
+      ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       const insertParams = [
         finalDemandId,
         name,
@@ -3441,6 +3443,7 @@ const Work = {
         normalizeText(releaseNote, 2000) || null,
         normalizeText(businessValueExpectation, 2000) || null,
         expectedReleaseDate || null,
+        expectedReleaseDate ? (expectedReleaseDateSource || null) : null,
         normalizeStatus(status),
         normalizePriority(priority),
         description || null,
@@ -3455,8 +3458,8 @@ const Work = {
           participant_role_user_map_json,
           group_chat_mode, group_chat_id, actual_start_time, actual_end_time, doc_link, ui_design_link, test_case_link,
           frontend_tech_solution, backend_tech_solution, business_group_code,
-          code_branch, release_note, expected_release_date, status, priority, description, created_by
-        ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          code_branch, release_note, expected_release_date, expected_release_date_source, status, priority, description, created_by
+        ) VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         const fallbackInsertParams = insertParams.filter((_, index) => index !== 21)
         await conn.query(fallbackInsertSql, fallbackInsertParams)
       }
@@ -3504,6 +3507,7 @@ const Work = {
       businessValueExpectation = null,
       businessGroupCode = null,
       expectedReleaseDate = null,
+      expectedReleaseDateSource = null,
       status,
       priority,
       description,
@@ -3556,6 +3560,7 @@ const Work = {
          release_note = ?,
          business_value_expectation = ?,
          expected_release_date = ?,
+         expected_release_date_source = ?,
          status = ?,
          priority = ?,
          description = ?,
@@ -3584,6 +3589,7 @@ const Work = {
         normalizeText(releaseNote, 2000) || null,
         normalizeText(businessValueExpectation, 2000) || null,
         expectedReleaseDate || null,
+        expectedReleaseDate ? (expectedReleaseDateSource || null) : null,
         normalizeStatus(status),
         normalizePriority(priority),
         description || null,
@@ -3619,6 +3625,7 @@ const Work = {
            code_branch = ?,
            release_note = ?,
            expected_release_date = ?,
+           expected_release_date_source = ?,
            status = ?,
            priority = ?,
            description = ?,
