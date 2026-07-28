@@ -43,6 +43,8 @@ const FIELD_DEFINITIONS = {
     { name: 'reviewAccount', description: '送审账号' },
     { name: 'appName', description: '应用名称' },
     { name: 'shortDescription', description: '简短说明' },
+    { name: 'prodGooglePlatformAppId', description: '生产环境Google平台应用ID' },
+    { name: 'testGooglePlatformAppId', description: '测试环境Google平台应用ID' },
     { name: 'fullDescription', description: '完整说明' },
     { name: 'prodGooglePayPackageName', description: '生产环境谷歌支付包名' },
     { name: 'testGooglePayPackageName', description: '测试环境谷歌支付包名' },
@@ -61,12 +63,10 @@ const FIELD_DEFINITIONS = {
     { name: 'appConsoleUrl', description: 'APP谷歌平台发版地址' },
     { name: 'pushFcmFile', description: 'push-fcm文件' },
     { name: 'googleServiceJsonFile', description: 'google-service.json文件' },
-    { name: 'prodGooglePlatformAppId', description: '生产环境Google平台应用ID' },
     { name: 'prodSha1Fingerprint', description: '生产环境sha1指纹' },
     { name: 'prodSha256Fingerprint', description: '生产环境sha256指纹' },
     { name: 'prodReleaseDownloadUrl', description: '生产环境包下载地址' },
     { name: 'prodH5Url', description: 'H5生产环境' },
-    { name: 'testGooglePlatformAppId', description: '测试环境Google平台应用ID' },
     { name: 'testSha1Fingerprint', description: '测试环境sha1指纹' },
     { name: 'testSha256Fingerprint', description: '测试环境sha256指纹' },
     { name: 'testReleaseDownloadUrl', description: '测试环境包下载地址' },
@@ -135,16 +135,20 @@ const PRODUCTION_NODE_STATUS_NAMES = {
 
 const OPEN_WRITE_SECTION_MAP = {
   frontend: 'FRONTEND',
+  operation: 'OPERATION',
 }
+
+const OPEN_OPERATION_TEXT_FIELDS = new Set([
+  'prodGooglePlatformAppId',
+  'testGooglePlatformAppId',
+])
 
 const OPEN_FRONTEND_TEXT_FIELDS = new Set([
   'appVersion',
   'appConsoleUrl',
-  'prodGooglePlatformAppId',
   'prodSha1Fingerprint',
   'prodSha256Fingerprint',
   'prodReleaseDownloadUrl',
-  'testGooglePlatformAppId',
   'testSha1Fingerprint',
   'testSha256Fingerprint',
   'testReleaseDownloadUrl',
@@ -216,6 +220,18 @@ function buildGeneratedGooglePayPackageValues(row) {
   return {
     prodGooglePayPackageName: appId,
     testGooglePayPackageName: appId ? `${appId}.test` : '',
+  }
+}
+
+function buildGeneratedOperationValues(row) {
+  const packageName = normalizeH5PackageName(row?.package_name)
+  const domain = normalizeH5Domain(row?.domain_info)
+  return {
+    contactEmail: domain ? `contact@${domain}` : '',
+    officialEmail: domain ? `service@${domain}` : '',
+    privacyPolicyUrl: packageName && domain ? `https://${packageName}.app.${domain}/privacy-policy` : '',
+    termsUrl: packageName && domain ? `https://${packageName}.app.${domain}/privacy-terms` : '',
+    dataDeletionUrl: packageName && domain ? `https://${packageName}.app.${domain}/faq` : '',
   }
 }
 
@@ -394,6 +410,25 @@ function normalizeOpenFrontendFields(fields, packageId) {
   return nextFields
 }
 
+function normalizeOpenOperationFields(fields) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    const err = new Error('sections.operation 必须是对象')
+    err.statusCode = 400
+    throw err
+  }
+
+  const nextFields = {}
+  Object.entries(fields).forEach(([fieldName, value]) => {
+    if (!OPEN_OPERATION_TEXT_FIELDS.has(fieldName)) {
+      const err = new Error(`字段不允许写入：operation.${fieldName}`)
+      err.statusCode = 400
+      throw err
+    }
+    nextFields[fieldName] = normalizeText(value, 10000)
+  })
+  return nextFields
+}
+
 async function mergeOpenSideNoteContent({ packageId, noteType, fields }) {
   const [noteRows] = await pool.query(
     `SELECT content
@@ -564,6 +599,7 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
     sections[section.key].is_confirmed = Boolean(note?.is_confirmed)
   })
   const generatedH5Values = buildGeneratedH5Values(row)
+  const generatedOperationValues = buildGeneratedOperationValues(row)
   const generatedGooglePayPackageValues = buildGeneratedGooglePayPackageValues(row)
   if (sections.frontend?.value && typeof sections.frontend.value === 'object') {
     Object.entries(generatedH5Values).forEach(([key, value]) => {
@@ -574,6 +610,21 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
     })
   }
   if (sections.operation?.value && typeof sections.operation.value === 'object') {
+    Object.entries(generatedOperationValues).forEach(([key, value]) => {
+      const definition = FIELD_DEFINITIONS.OPERATION.find((item) => item.name === key)
+      sections.operation.value[key] = field(definition?.description || key, value)
+    })
+    if (sections.frontend?.value && typeof sections.frontend.value === 'object') {
+      ;['prodGooglePlatformAppId', 'testGooglePlatformAppId'].forEach((key) => {
+        if (!sections.operation.value[key]?.value && sections.frontend.value[key]?.value) {
+          sections.operation.value[key] = field(
+            key === 'prodGooglePlatformAppId' ? '生产环境Google平台应用ID' : '测试环境Google平台应用ID',
+            sections.frontend.value[key].value,
+          )
+        }
+        delete sections.frontend.value[key]
+      })
+    }
     Object.entries(generatedGooglePayPackageValues).forEach(([key, value]) => {
       sections.operation.value[key] = field(
         key === 'prodGooglePayPackageName' ? '生产环境谷歌支付包名' : '测试环境谷歌支付包名',
@@ -858,25 +909,39 @@ async function updateOpenMatrixPackageFields(req, res) {
       ? req.body.sections
       : {}
     const frontendFields = sections.frontend || req.body?.frontend || null
-    if (!frontendFields) {
-      return res.status(400).json({ success: false, message: '请提供 sections.frontend 写入内容' })
+    const operationFields = sections.operation || req.body?.operation || null
+    if (!frontendFields && !operationFields) {
+      return res.status(400).json({ success: false, message: '请提供 sections.frontend 或 sections.operation 写入内容' })
     }
 
     const packageId = Number(matchedPackage.id)
-    const normalizedFrontendFields = normalizeOpenFrontendFields(frontendFields, packageId)
-    if (Object.keys(normalizedFrontendFields).length === 0) {
-      return res.status(400).json({ success: false, message: 'sections.frontend 至少需要提供一个字段' })
+    const normalizedFrontendFields = frontendFields ? normalizeOpenFrontendFields(frontendFields, packageId) : {}
+    const normalizedOperationFields = operationFields ? normalizeOpenOperationFields(operationFields) : {}
+    const updateJobs = [
+      { section: 'frontend', noteType: 'FRONTEND', fields: normalizedFrontendFields },
+      { section: 'operation', noteType: 'OPERATION', fields: normalizedOperationFields },
+    ].filter((item) => Object.keys(item.fields).length > 0)
+    if (updateJobs.length === 0) {
+      return res.status(400).json({ success: false, message: '至少需要提供一个允许写入的字段' })
     }
-    const updatedAt = await mergeOpenSideNoteContent({
-      packageId,
-      noteType: 'FRONTEND',
-      fields: normalizedFrontendFields,
-    })
 
-    const updatedFields = Object.keys(normalizedFrontendFields)
-    console.info('开放接口保存矩阵包前端补充信息成功', {
+    const updatedSections = []
+    for (const job of updateJobs) {
+      const updatedAt = await mergeOpenSideNoteContent({
+        packageId,
+        noteType: job.noteType,
+        fields: job.fields,
+      })
+      updatedSections.push({
+        section: job.section,
+        updated_fields: Object.keys(job.fields),
+        updated_at: updatedAt,
+      })
+    }
+
+    console.info('开放接口保存矩阵包补充信息成功', {
       package_id: packageId,
-      fields: updatedFields,
+      sections: updatedSections,
     })
 
     return res.json({
@@ -885,9 +950,7 @@ async function updateOpenMatrixPackageFields(req, res) {
       data: {
         package_id: packageId,
         package_name: matchedPackage.package_name || '',
-        section: 'frontend',
-        updated_fields: updatedFields,
-        updated_at: updatedAt,
+        sections: updatedSections,
       },
     })
   } catch (error) {

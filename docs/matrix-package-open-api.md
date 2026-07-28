@@ -297,11 +297,15 @@ curl \
 | `reviewAccount` | 送审账号 |
 | `appName` | 应用名称 |
 | `shortDescription` | 简短说明 |
+| `prodGooglePlatformAppId` | 生产环境Google平台应用ID |
+| `testGooglePlatformAppId` | 测试环境Google平台应用ID |
 | `fullDescription` | 完整说明 |
 | `prodGooglePayPackageName` | 生产环境谷歌支付包名 |
 | `testGooglePayPackageName` | 测试环境谷歌支付包名 |
 
 说明：`prodGooglePayPackageName` 按包ID（应用ID）自动生成；`testGooglePayPackageName` 为包ID（应用ID）后追加 `.test`。
+
+说明：`contactEmail` / `officialEmail` / `privacyPolicyUrl` / `termsUrl` / `dataDeletionUrl` 为系统自动生成字段；URL 中的包名前缀沿用 H5 地址规则，统一转小写并移除不符合规则的字符。
 
 ### 11.3 设计侧补充
 
@@ -323,10 +327,8 @@ curl \
 | `appConsoleUrl` | APP谷歌平台发版地址 | 文本/链接 |
 | `pushFcmFile` | push-fcm文件 | 附件 |
 | `googleServiceJsonFile` | google-service.json文件 | 附件 |
-| `prodGooglePlatformAppId` | 生产环境Google平台应用ID | 文本 |
 | `prodSha1Fingerprint` | 生产环境sha1指纹 | 文本 |
 | `prodSha256Fingerprint` | 生产环境sha256指纹 | 文本 |
-| `testGooglePlatformAppId` | 测试环境Google平台应用ID | 文本 |
 | `testSha1Fingerprint` | 测试环境sha1指纹 | 文本 |
 | `testSha256Fingerprint` | 测试环境sha256指纹 | 文本 |
 

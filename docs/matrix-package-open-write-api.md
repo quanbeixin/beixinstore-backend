@@ -145,13 +145,13 @@ POST http://39.97.253.194/api/open/matrix-packages/update-fields
 
 | section | 字段 | 说明 | 类型 |
 |---------|------|------|------|
+| `operation` | `prodGooglePlatformAppId` | 生产环境Google平台应用ID | 文本 |
+| `operation` | `testGooglePlatformAppId` | 测试环境Google平台应用ID | 文本 |
 | `frontend` | `appVersion` | APP版本号 | 文本 |
 | `frontend` | `appConsoleUrl` | APP谷歌平台发版地址 | 文本 |
-| `frontend` | `prodGooglePlatformAppId` | 生产环境Google平台应用ID | 文本 |
 | `frontend` | `prodSha1Fingerprint` | 生产环境sha1指纹 | 文本 |
 | `frontend` | `prodSha256Fingerprint` | 生产环境sha256指纹 | 文本 |
 | `frontend` | `prodReleaseDownloadUrl` | 正式包下载地址 | 文本 |
-| `frontend` | `testGooglePlatformAppId` | 测试环境Google平台应用ID | 文本 |
 | `frontend` | `testSha1Fingerprint` | 测试环境sha1指纹 | 文本 |
 | `frontend` | `testSha256Fingerprint` | 测试环境sha256指纹 | 文本 |
 | `frontend` | `testReleaseDownloadUrl` | 测试包下载地址 | 文本 |
@@ -173,7 +173,9 @@ curl -X POST "http://39.97.253.194/api/open/matrix-packages/update-fields" \
     "sections": {
       "frontend": {
         "appVersion": "1.0.3",
-        "appConsoleUrl": "https://play.google.com/console/...",
+        "appConsoleUrl": "https://play.google.com/console/..."
+      },
+      "operation": {
         "prodGooglePlatformAppId": "1:xxx:android:xxx",
         "testGooglePlatformAppId": "1:yyy:android:yyy"
       }
