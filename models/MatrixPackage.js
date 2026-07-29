@@ -143,6 +143,7 @@ function mapRow(row) {
     delivery_status_code: row.delivery_status_code || '',
     delivery_status_name: row.delivery_status_name || row.delivery_status_code || '',
     delivery_status_color: row.delivery_status_color || '',
+    has_operated: Number(row.has_operated || 0) === 1,
     owner_user_id: row.owner_user_id ? Number(row.owner_user_id) : null,
     owner_name: row.owner_display_name || row.owner_name || '',
     status_code: row.status_code || '',
@@ -393,6 +394,7 @@ const MatrixPackage = {
          mp.delivery_status_code,
          deliveryStatusDict.item_name AS delivery_status_name,
          deliveryStatusDict.color AS delivery_status_color,
+         mp.has_operated,
          latestRelease.release_type,
          mp.owner_user_id,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
@@ -565,6 +567,7 @@ const MatrixPackage = {
          mp.delivery_status_code,
          deliveryStatusDict.item_name AS delivery_status_name,
          deliveryStatusDict.color AS delivery_status_color,
+         mp.has_operated,
          latestRelease.release_type,
          mp.owner_user_id,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
@@ -662,8 +665,8 @@ const MatrixPackage = {
     const normalized = await this.normalizePayload(payload)
     const [result] = await pool.query(
       `INSERT INTO matrix_packages
-       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, delivery_channel_code, delivery_status_code, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, expected_cold_ready_date_source, side_check_deadline_at, side_check_deadline_source, latest_progress, production_checklist, created_by, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, delivery_channel_code, delivery_status_code, has_operated, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, expected_cold_ready_date_source, side_check_deadline_at, side_check_deadline_source, latest_progress, production_checklist, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         normalized.developer_account_id,
         normalized.package_name,
@@ -673,6 +676,7 @@ const MatrixPackage = {
         normalized.platform,
         normalized.delivery_channel_code,
         normalized.delivery_status_code,
+        normalized.has_operated ? 1 : 0,
         normalized.owner_user_id,
         normalized.owner_name,
         normalized.status_code,
@@ -709,6 +713,7 @@ const MatrixPackage = {
            platform = ?,
            delivery_channel_code = ?,
            delivery_status_code = ?,
+           has_operated = ?,
            owner_user_id = ?,
            owner_name = ?,
            status_code = ?,
@@ -731,6 +736,7 @@ const MatrixPackage = {
         normalized.platform,
         normalized.delivery_channel_code,
         normalized.delivery_status_code,
+        normalized.has_operated ? 1 : 0,
         normalized.owner_user_id,
         normalized.owner_name,
         normalized.status_code,
@@ -932,6 +938,12 @@ const MatrixPackage = {
       throw err
     }
 
+    const hasOperated = statusCode === 'DELIVERING'
+      ? true
+      : (Object.prototype.hasOwnProperty.call(payload, 'has_operated')
+        ? payload.has_operated === true || payload.has_operated === 1 || payload.has_operated === '1'
+        : Boolean(existing.has_operated))
+
     const hasOwnerUser = Object.prototype.hasOwnProperty.call(payload, 'owner_user_id')
     const ownerUser = hasOwnerUser
       ? await this.getUserDisplayName(payload.owner_user_id)
@@ -949,6 +961,7 @@ const MatrixPackage = {
       platform: platformCodes.join(',') || null,
       delivery_channel_code: deliveryChannelCode || null,
       delivery_status_code: deliveryStatusCode || null,
+      has_operated: hasOperated,
       owner_user_id: ownerUser.id,
       owner_name: normalizeText(ownerUser.displayName, 80),
       status_code: statusCode,

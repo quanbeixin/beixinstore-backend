@@ -682,6 +682,7 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
       code: row.delivery_status_code || '',
       name: row.delivery_status_name || row.delivery_status_code || '',
     }),
+    has_operated: field('是否运营过', Number(row.has_operated || 0) === 1),
     new_package_version: field('新包版本', row.new_package_version || ''),
     status: field('包状态', {
       code: row.status_code || '',
@@ -743,6 +744,7 @@ async function listOpenMatrixPackages(req, res) {
          deliveryChannelDict.item_name AS delivery_channel_name,
          mp.delivery_status_code,
          deliveryStatusDict.item_name AS delivery_status_name,
+         mp.has_operated,
          mp.new_package_version,
          mp.status_code,
          statusDict.item_name AS status_name,

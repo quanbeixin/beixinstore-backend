@@ -156,6 +156,10 @@ curl \
           "name": "在投"
         }
       },
+      "has_operated": {
+        "description": "是否运营过",
+        "value": true
+      },
       "linked_demand": {
         "description": "关联项目管理需求",
         "value": {
@@ -211,6 +215,7 @@ curl \
 | `delivery_platform` | 投放平台 | 返回平台编码数组，如 `["META", "GOOGLE"]` |
 | `delivery_channel` | 投放渠道 | 返回 `{ code, name }`，当前枚举为 `SELF`/自投、`AGENCY`/代理 |
 | `delivery_status` | 投放状态 | 返回 `{ code, name }`，当前枚举为 `ACTIVE`/在投、`STOPPED`/停投 |
+| `has_operated` | 是否运营过 | 布尔值，表示该矩阵包是否曾进入运营状态 |
 | `new_package_version` | 新包版本 | 新包版本 |
 | `status` | 包状态 | 返回 `{ code, name }` |
 | `health` | 健康度 | 返回 `{ code, name }` |

@@ -111,6 +111,10 @@ function getSideNoteTitle(noteType) {
   return map[String(noteType || '').trim().toUpperCase()] || String(noteType || '').trim()
 }
 
+function getSideNoteSideLabel(noteType) {
+  return String(getSideNoteTitle(noteType) || noteType || '').replace(/补充$/, '')
+}
+
 async function sendMatrixPackageManualReminder({
   packageDetail,
   receiverUserId,
@@ -289,8 +293,10 @@ async function sendSideNoteConfirmedNotification({ packageDetail, note, operator
   }
 
   const detailUrl = buildMatrixPackageProductionDetailUrl(latestPackageDetail.id)
+  const sideLabel = getSideNoteSideLabel(noteType)
+  const notificationTitle = `【${sideLabel}】信息check完成`
   const content = [
-    '**各侧信息check已确认完成**',
+    `**${notificationTitle}**`,
     `矩阵包：${latestPackageDetail.package_name || '-'}`,
     `完成模块：${getSideNoteTitle(noteType) || '-'}`,
     note.owner_name ? `负责人：${note.owner_name}` : '',
@@ -301,7 +307,7 @@ async function sendSideNoteConfirmedNotification({ packageDetail, note, operator
 
   return sendNotification({
     channelType: 'feishu',
-    title: '矩阵包各侧信息check完成',
+    title: notificationTitle,
     content,
     targets: [chatTarget],
     metadata: {

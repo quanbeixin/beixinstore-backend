@@ -7,4 +7,5 @@ node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-06-matrix-pa
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-06-matrix-package-side-note-confirm-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-09-matrix-package-side-note-owner-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-29-matrix-package-side-note-stage-schedule-up.sql
+node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-29-matrix-package-has-operated-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-27-matrix-package-google-pay-package-name-operation-up.sql

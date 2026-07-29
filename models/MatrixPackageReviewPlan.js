@@ -87,6 +87,14 @@ function getPackageStatusForStage(stageCode) {
   return ''
 }
 
+function getPackageStatusForStageAndPackage(stageCode, packageRow = {}) {
+  const code = normalizeOptionalCode(stageCode)
+  const currentStatusCode = normalizeOptionalCode(packageRow.status_code)
+  if (currentStatusCode === 'BANNED' || currentStatusCode === 'ARCHIVED') return ''
+  if (code === 'HOT_STANDBY' && Number(packageRow.has_operated || 0) === 1) return 'DELIVERING'
+  return getPackageStatusForStage(code)
+}
+
 function mapRow(row, defaultOwner = null) {
   if (!row) return null
   const defaultOwnerId = defaultOwner?.id ? Number(defaultOwner.id) : null
@@ -171,7 +179,7 @@ async function assertPackageExists(packageId) {
   const normalizedPackageId = toPositiveInt(packageId)
   if (!normalizedPackageId) return null
   const [rows] = await pool.query(
-    `SELECT id, package_name, status_code
+    `SELECT id, package_name, status_code, has_operated
      FROM matrix_packages
      WHERE id = ? AND deleted_at IS NULL
      LIMIT 1`,
@@ -464,13 +472,16 @@ const MatrixPackageReviewPlan = {
       ],
     )
 
-    const nextPackageStatus = getPackageStatusForStage(stageCode)
+    const nextPackageStatus = getPackageStatusForStageAndPackage(stageCode, packageRow)
     if (nextPackageStatus) {
       await pool.query(
         `UPDATE matrix_packages
-         SET status_code = ?, health_code = NULL, updated_by = ?
+         SET status_code = ?,
+             health_code = CASE WHEN ? = 'DELIVERING' THEN COALESCE(health_code, 'NORMAL') ELSE NULL END,
+             has_operated = CASE WHEN ? = 'DELIVERING' THEN 1 ELSE has_operated END,
+             updated_by = ?
          WHERE id = ? AND deleted_at IS NULL`,
-        [nextPackageStatus, userId || null, normalizedPackageId],
+        [nextPackageStatus, nextPackageStatus, nextPackageStatus, userId || null, normalizedPackageId],
       )
     }
 
@@ -548,14 +559,17 @@ const MatrixPackageReviewPlan = {
       ],
     )
 
-    const nextPackageStatus = getPackageStatusForStage(normalizedStageCode)
+    const nextPackageStatus = getPackageStatusForStageAndPackage(normalizedStageCode, packageRow)
     const shouldSyncPackageStatus = options?.syncPackageStatus !== false
     if (nextPackageStatus && shouldSyncPackageStatus) {
       await pool.query(
         `UPDATE matrix_packages
-         SET status_code = ?, health_code = NULL, updated_by = ?
+         SET status_code = ?,
+             health_code = CASE WHEN ? = 'DELIVERING' THEN COALESCE(health_code, 'NORMAL') ELSE NULL END,
+             has_operated = CASE WHEN ? = 'DELIVERING' THEN 1 ELSE has_operated END,
+             updated_by = ?
          WHERE id = ? AND deleted_at IS NULL`,
-        [nextPackageStatus, userId || null, normalizedPackageId],
+        [nextPackageStatus, nextPackageStatus, nextPackageStatus, userId || null, normalizedPackageId],
       )
     }
 
