@@ -79,6 +79,48 @@ function normalizePlatformCodes(value) {
   ))
 }
 
+function parseCsvCodes(value) {
+  return Array.from(new Set(
+    String(value || '')
+      .split(',')
+      .map((item) => normalizeOptionalCode(item))
+      .filter(Boolean),
+  ))
+}
+
+function parseProductionNodeStatusMap(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.split(':'))
+    .reduce((acc, [nodeCode, statusCode]) => {
+      const normalizedNodeCode = normalizeOptionalCode(nodeCode)
+      if (normalizedNodeCode) {
+        acc[normalizedNodeCode] = normalizeOptionalCode(statusCode) || ''
+      }
+      return acc
+    }, {})
+}
+
+function parseJsonObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  const text = String(value || '').trim()
+  if (!text) return {}
+  try {
+    const parsed = JSON.parse(text)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function isBackendSelfCheckCompleted(content) {
+  const parsed = parseJsonObject(content)
+  return ['coldStartInfo', 'productDetail', 'addOnPackage', 'subscription'].every((key) => {
+    const value = parsed[key]
+    return value === true || value === 'true' || value === 1
+  })
+}
+
 function mapRow(row) {
   if (!row) return null
   const sideNoteConfirmedCount = Number(row.side_note_confirmed_count || 0)
@@ -126,6 +168,9 @@ function mapRow(row) {
     side_note_confirmed_count: sideNoteConfirmedCount,
     side_note_total: COMPLETION_SIDE_NOTE_TOTAL,
     side_note_completion_percent: Math.round((sideNoteConfirmedCount / COMPLETION_SIDE_NOTE_TOTAL) * 100),
+    confirmed_side_note_types: parseCsvCodes(row.confirmed_side_note_types),
+    production_node_status_map: parseProductionNodeStatusMap(row.production_node_status_map),
+    backend_self_check_completed: isBackendSelfCheckCompleted(row.backend_side_note_content),
     created_by: row.created_by ? Number(row.created_by) : null,
     updated_by: row.updated_by ? Number(row.updated_by) : null,
     created_at: row.created_at || null,
@@ -370,6 +415,9 @@ const MatrixPackage = {
          mp.linked_demand_id,
          linkedDemand.name AS linked_demand_name,
          COALESCE(sideNoteStats.side_note_confirmed_count, 0) AS side_note_confirmed_count,
+         COALESCE(sideNoteStats.confirmed_side_note_types, '') AS confirmed_side_note_types,
+         COALESCE(productionNodeStats.production_node_status_map, '') AS production_node_status_map,
+         COALESCE(backendSideNote.content, '') AS backend_side_note_content,
          mp.created_by,
          mp.updated_by,
          DATE_FORMAT(mp.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
@@ -406,11 +454,28 @@ const MatrixPackage = {
              THEN 1
              ELSE 0
            END) AS side_note_confirmed_count
+          ,GROUP_CONCAT(CASE
+             WHEN COALESCE(TRIM(content), '') <> ''
+              AND COALESCE(content, '') = COALESCE(confirmed_content, '')
+             THEN note_type
+             ELSE NULL
+           END) AS confirmed_side_note_types
          FROM matrix_package_side_notes
          WHERE note_type IN (${COMPLETION_SIDE_NOTE_TYPE_SQL})
          GROUP BY package_id
        ) sideNoteStats
          ON sideNoteStats.package_id = mp.id
+       LEFT JOIN (
+         SELECT
+           package_id,
+           GROUP_CONCAT(CONCAT(node_code, ':', status_code)) AS production_node_status_map
+         FROM matrix_package_production_nodes
+         GROUP BY package_id
+       ) productionNodeStats
+         ON productionNodeStats.package_id = mp.id
+       LEFT JOIN matrix_package_side_notes backendSideNote
+         ON backendSideNote.package_id = mp.id
+        AND backendSideNote.note_type = 'BACKEND'
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = ?
         AND statusDict.item_code = mp.status_code

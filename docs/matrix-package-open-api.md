@@ -324,7 +324,7 @@ curl \
 | 字段 | description | 类型 |
 |------|-------------|------|
 | `appVersion` | APP版本号 | 文本 |
-| `appConsoleUrl` | APP谷歌平台发版地址 | 文本/链接 |
+| `appConsoleUrl` | APP谷歌平台发版地址，按 `https://play.google.com/console/u/0/developers/{谷歌开发者账号ID}/app/{生产环境Google平台应用ID}/publishing` 自动生成 | 文本/链接 |
 | `pushFcmFile` | push-fcm文件 | 附件 |
 | `googleServiceJsonFile` | google-service.json文件 | 附件 |
 | `prodSha1Fingerprint` | 生产环境sha1指纹 | 文本 |

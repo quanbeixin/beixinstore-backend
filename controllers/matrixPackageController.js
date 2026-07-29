@@ -769,6 +769,40 @@ async function saveMatrixPackageSideNotes(req, res) {
   }
 }
 
+async function patchMatrixPackageSideNoteFields(req, res) {
+  try {
+    const noteType = normalizeText(req.params.noteType, 50).toUpperCase()
+    const [packageDetail, beforeNotes] = await Promise.all([
+      MatrixPackage.getById(req.params.id),
+      MatrixPackageSideNote.listByPackageId(req.params.id),
+    ])
+    if (!packageDetail || !Array.isArray(beforeNotes)) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+
+    const data = await MatrixPackageSideNote.patchFields(req.params.id, noteType, req.body || {}, req.user?.id)
+    if (!data) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+
+    const beforeNote = beforeNotes.find((item) => String(item?.note_type || '').trim().toUpperCase() === noteType)
+    const afterNote = (Array.isArray(data) ? data : []).find((item) => String(item?.note_type || '').trim().toUpperCase() === noteType)
+    const beforeOwnerUserId = toPositiveInt(beforeNote?.owner_user_id)
+    const afterOwnerUserId = toPositiveInt(afterNote?.owner_user_id)
+    if (afterOwnerUserId && afterOwnerUserId !== beforeOwnerUserId) {
+      await MatrixPackageDemandService.syncProductionGroupMembers(
+        packageDetail,
+        [afterOwnerUserId],
+        req.user?.id || null,
+      )
+    }
+
+    return res.json({ success: true, message: '补充信息已保存', data: decorateMatrixPackageSideNotes(data) })
+  } catch (error) {
+    return handleError(res, error, '保存矩阵包补充信息失败')
+  }
+}
+
 async function confirmMatrixPackageSideNote(req, res) {
   try {
     const noteType = normalizeText(req.params.noteType, 50).toUpperCase()
@@ -825,8 +859,8 @@ async function remindMatrixPackageSideNote(req, res) {
       packageDetail: detail,
       receiverUserId,
       sceneTitle: getSideNoteTitle(note.note_type),
-      dueLabel: '统一截止时间',
-      dueValue: detail.side_check_deadline_at || '',
+      dueLabel: '预期完成时间',
+      dueValue: note.expected_delivery_date || detail.side_check_deadline_at || '',
     })
     return res.json({
       success: true,
@@ -909,6 +943,7 @@ module.exports = {
   remindMatrixPackageProductionNode,
   listMatrixPackageSideNotes,
   saveMatrixPackageSideNotes,
+  patchMatrixPackageSideNoteFields,
   confirmMatrixPackageSideNote,
   remindMatrixPackageSideNote,
   getMatrixPackageSideNoteUploadPolicy,

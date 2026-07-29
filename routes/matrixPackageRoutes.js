@@ -13,6 +13,7 @@ const {
   getMatrixPackageSideNoteUploadPolicy,
   listMatrixPackageSideNotes,
   listMatrixPackages,
+  patchMatrixPackageSideNoteFields,
   saveMatrixPackageSideNotes,
   updateMatrixPackageProductionNode,
   updateMatrixPackage,
@@ -31,6 +32,7 @@ router.post('/:id/production-nodes/:nodeCode/remind', authMiddleware.requirePerm
 router.get('/:id/side-notes', authMiddleware.requirePermission('matrix_package.view'), listMatrixPackageSideNotes)
 router.get('/:id/data-safety-file', authMiddleware.requirePermission('matrix_package.view'), downloadMatrixPackageDataSafetyFile)
 router.put('/:id/side-notes', authMiddleware.requirePermission('matrix_package.manage'), saveMatrixPackageSideNotes)
+router.patch('/:id/side-notes/:noteType/fields', authMiddleware.requirePermission('matrix_package.manage'), patchMatrixPackageSideNoteFields)
 router.post('/:id/side-notes/upload-policy', authMiddleware.requirePermission('matrix_package.manage'), getMatrixPackageSideNoteUploadPolicy)
 router.post('/:id/side-notes/:noteType/confirm', authMiddleware.requirePermission('matrix_package.manage'), confirmMatrixPackageSideNote)
 router.post('/:id/side-notes/:noteType/remind', authMiddleware.requirePermission('matrix_package.view'), remindMatrixPackageSideNote)

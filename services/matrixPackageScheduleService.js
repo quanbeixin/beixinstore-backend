@@ -6,6 +6,15 @@ const DERIVED_NODE_OFFSETS = {
   OPERATION_MATERIAL: -2,
   DESIGN_PRODUCTION: -2,
 }
+const DERIVED_SIDE_NOTE_OFFSETS = {
+  DESIGN: -2,
+  OPERATION: -2,
+  DEVOPS: -2,
+  FRONTEND: -1,
+  DELIVERY: -1,
+  BACKEND: -1,
+  ADVERTISING: 0,
+}
 
 function normalizeText(value, maxLength = 255) {
   const text = String(value || '').trim()
@@ -98,6 +107,47 @@ async function upsertProductionNodeAutoDate(conn, packageId, nodeCode, expectedD
   )
 }
 
+async function upsertSideNoteAutoDate(conn, packageId, noteType, expectedDeliveryDate, operatorUserId = null, { force = false } = {}) {
+  await conn.query(
+    `INSERT INTO matrix_package_side_notes
+       (package_id, note_type, content, expected_delivery_date, expected_delivery_date_source, created_by, updated_by)
+     VALUES (?, ?, '', ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       expected_delivery_date = CASE
+         WHEN ? = 1 OR expected_delivery_date IS NULL OR expected_delivery_date_source = ? THEN VALUES(expected_delivery_date)
+         ELSE expected_delivery_date
+       END,
+       expected_delivery_date_source = CASE
+         WHEN ? = 1 OR expected_delivery_date IS NULL OR expected_delivery_date_source = ? THEN VALUES(expected_delivery_date_source)
+         ELSE expected_delivery_date_source
+       END,
+       updated_by = CASE
+         WHEN ? = 1 OR expected_delivery_date IS NULL OR expected_delivery_date_source = ? THEN VALUES(updated_by)
+         ELSE updated_by
+       END,
+       updated_at = CASE
+         WHEN ? = 1 OR expected_delivery_date IS NULL OR expected_delivery_date_source = ? THEN CURRENT_TIMESTAMP
+         ELSE updated_at
+       END`,
+    [
+      packageId,
+      noteType,
+      expectedDeliveryDate,
+      SOURCE_AUTO_T,
+      operatorUserId || null,
+      operatorUserId || null,
+      force ? 1 : 0,
+      SOURCE_AUTO_T,
+      force ? 1 : 0,
+      SOURCE_AUTO_T,
+      force ? 1 : 0,
+      SOURCE_AUTO_T,
+      force ? 1 : 0,
+      SOURCE_AUTO_T,
+    ],
+  )
+}
+
 async function syncFromFrontendBuildT({ packageId, frontendBuildAt, operatorUserId = null } = {}) {
   const normalizedPackageId = toPositiveInt(packageId)
   const tParts = parseScheduleDate(frontendBuildAt)
@@ -148,6 +198,16 @@ async function syncFromFrontendBuildT({ packageId, frontendBuildAt, operatorUser
         conn,
         normalizedPackageId,
         nodeCode,
+        formatDateTime(addDays(tParts, offset)),
+        operatorUserId,
+      )
+    }
+
+    for (const [noteType, offset] of Object.entries(DERIVED_SIDE_NOTE_OFFSETS)) {
+      await upsertSideNoteAutoDate(
+        conn,
+        normalizedPackageId,
+        noteType,
         formatDateTime(addDays(tParts, offset)),
         operatorUserId,
       )

@@ -215,6 +215,14 @@ function buildGeneratedH5Values(row) {
   }
 }
 
+function buildGeneratedAppConsoleUrl(row, operationValues = {}) {
+  const developerAccountId = normalizeText(row?.developer_account_platform_id, 120)
+  const prodGooglePlatformAppId = normalizeText(operationValues?.prodGooglePlatformAppId?.value || operationValues?.prodGooglePlatformAppId, 120)
+  return developerAccountId && prodGooglePlatformAppId
+    ? `https://play.google.com/console/u/0/developers/${developerAccountId}/app/${prodGooglePlatformAppId}/publishing`
+    : ''
+}
+
 function buildGeneratedGooglePayPackageValues(row) {
   const appId = normalizeText(row?.app_id, 120)
   return {
@@ -259,6 +267,30 @@ function parseJsonObject(value) {
   } catch {
     return {}
   }
+}
+
+function hasMeaningfulOpenFieldValue(value) {
+  if (value === false || value === true || Number.isFinite(value)) return true
+  if (Array.isArray(value)) return value.some((item) => hasMeaningfulOpenFieldValue(item))
+  if (value && typeof value === 'object') {
+    if (value.object_key || value.object_url || value.file_name || value.url || value.download_url || value.preview_url) return true
+    return Object.values(value).some((item) => hasMeaningfulOpenFieldValue(item))
+  }
+  return Boolean(String(value || '').trim())
+}
+
+function mergeFieldsPreservingExisting(currentContent = {}, fields = {}) {
+  const nextContent = { ...currentContent }
+  Object.entries(fields || {}).forEach(([key, value]) => {
+    if (
+      hasMeaningfulOpenFieldValue(currentContent[key]) &&
+      !hasMeaningfulOpenFieldValue(value)
+    ) {
+      return
+    }
+    nextContent[key] = value
+  })
+  return nextContent
 }
 
 function verifyOpenApiToken(req, res) {
@@ -438,10 +470,7 @@ async function mergeOpenSideNoteContent({ packageId, noteType, fields }) {
     [packageId, noteType],
   )
   const currentContent = parseJsonObject(noteRows?.[0]?.content)
-  const nextContent = {
-    ...currentContent,
-    ...fields,
-  }
+  const nextContent = mergeFieldsPreservingExisting(currentContent, fields)
   const serializedContent = JSON.stringify(nextContent)
   await pool.query(
     `INSERT INTO matrix_package_side_notes
@@ -631,6 +660,12 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
         value,
       )
     })
+  }
+  if (sections.frontend?.value && typeof sections.frontend.value === 'object') {
+    sections.frontend.value.appConsoleUrl = field(
+      'APP谷歌平台发版地址',
+      buildGeneratedAppConsoleUrl(row, sections.operation?.value || {}),
+    )
   }
 
   return {

@@ -45,6 +45,87 @@ function normalizeOptionalId(value) {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null
 }
 
+function normalizeOptionalDate(value) {
+  const text = String(value || '').trim()
+  if (!text) return null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return `${text} 00:00:00`
+  if (/^\d{4}-\d{2}-\d{2}\s\d{2}$/.test(text)) return `${text}:00:00`
+  if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$/.test(text)) return `${text}:00`
+  return /^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}$/.test(text) ? text : null
+}
+
+async function resolveOwnerName(ownerUserId) {
+  if (!ownerUserId) return ''
+  const [userRows] = await pool.query(
+    `SELECT id, COALESCE(NULLIF(real_name, ''), username) AS display_name
+     FROM users
+     WHERE id = ?
+     LIMIT 1`,
+    [ownerUserId],
+  )
+  const ownerUser = userRows[0]
+  if (!ownerUser) {
+    const err = new Error('side_note_owner_invalid')
+    err.statusCode = 400
+    err.message = '侧信息负责人用户不存在'
+    throw err
+  }
+  return ownerUser.display_name || `用户${ownerUserId}`
+}
+
+function normalizeScheduleSource(value, fallback = '') {
+  const text = String(value || '').trim().toUpperCase()
+  if (text === 'AUTO_T' || text === 'MANUAL') return text
+  return fallback
+}
+
+function parseJsonObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  const text = String(value || '').trim()
+  if (!text) return null
+  try {
+    const parsed = JSON.parse(text)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function hasMeaningfulContent(value) {
+  const text = String(value || '').trim()
+  if (!text) return false
+  const parsed = parseJsonObject(text)
+  if (!parsed) return true
+  return Object.values(parsed).some((item) => hasMeaningfulFieldValue(item))
+}
+
+function hasMeaningfulFieldValue(value) {
+  if (value === false || value === true || Number.isFinite(value)) return true
+  if (Array.isArray(value)) return value.some((item) => hasMeaningfulFieldValue(item))
+  if (value && typeof value === 'object') {
+    if (value.object_key || value.object_url || value.file_name || value.download_url || value.preview_url) return true
+    return Object.values(value).some((item) => hasMeaningfulFieldValue(item))
+  }
+  return Boolean(String(value || '').trim())
+}
+
+function mergeJsonContentPreservingExisting(nextContent, existingContent) {
+  const nextParsed = parseJsonObject(nextContent)
+  const existingParsed = parseJsonObject(existingContent)
+  if (!nextParsed || !existingParsed) return nextContent
+
+  const merged = { ...nextParsed }
+  Object.entries(existingParsed).forEach(([key, existingValue]) => {
+    if (
+      hasMeaningfulFieldValue(existingValue) &&
+      !hasMeaningfulFieldValue(nextParsed[key])
+    ) {
+      merged[key] = existingValue
+    }
+  })
+  return JSON.stringify(stripTransientAttachmentFields(merged))
+}
+
 function mapRow(row) {
   if (!row) return null
   return {
@@ -55,6 +136,8 @@ function mapRow(row) {
     confirmed_content: row.confirmed_content || '',
     owner_user_id: row.owner_user_id ? Number(row.owner_user_id) : null,
     owner_name: row.owner_display_name || row.owner_name || '',
+    expected_delivery_date: row.expected_delivery_date || null,
+    expected_delivery_date_source: row.expected_delivery_date_source || '',
     is_confirmed: Number(row.is_confirmed || 0) === 1,
     confirmed_by: row.confirmed_by ? Number(row.confirmed_by) : null,
     confirmed_at: row.confirmed_at || null,
@@ -83,6 +166,8 @@ const MatrixPackageSideNote = {
          mpn.owner_user_id,
          mpn.owner_name,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
+         DATE_FORMAT(mpn.expected_delivery_date, '%Y-%m-%d %H:%i:%s') AS expected_delivery_date,
+         mpn.expected_delivery_date_source,
          CASE
            WHEN COALESCE(TRIM(mpn.content), '') <> ''
             AND COALESCE(mpn.content, '') = COALESCE(mpn.confirmed_content, '')
@@ -119,6 +204,10 @@ const MatrixPackageSideNote = {
           note_type: normalizeNoteType(item?.note_type),
           content: normalizeNoteContent(item?.content),
           owner_user_id: normalizeOptionalId(item?.owner_user_id),
+          expected_delivery_date: Object.prototype.hasOwnProperty.call(item || {}, 'expected_delivery_date')
+            ? normalizeOptionalDate(item?.expected_delivery_date)
+            : undefined,
+          expected_delivery_date_source: normalizeScheduleSource(item?.expected_delivery_date_source),
         }))
         .filter((item) => item.note_type)
       : []
@@ -135,41 +224,128 @@ const MatrixPackageSideNote = {
 
     for (const note of normalizedNotes) {
       const existingContent = existingContentMap.get(note.note_type) || ''
-      if (!note.content && existingContent) {
+      if (!hasMeaningfulContent(note.content) && hasMeaningfulContent(existingContent)) {
         note.content = existingContent
+      } else if (hasMeaningfulContent(existingContent)) {
+        note.content = mergeJsonContentPreservingExisting(note.content, existingContent)
       }
 
-      let ownerName = ''
-      if (note.owner_user_id) {
-        const [userRows] = await pool.query(
-          `SELECT id, COALESCE(NULLIF(real_name, ''), username) AS display_name
-           FROM users
-           WHERE id = ?
-           LIMIT 1`,
-          [note.owner_user_id],
-        )
-        const ownerUser = userRows[0]
-        if (!ownerUser) {
-          const err = new Error('side_note_owner_invalid')
-          err.statusCode = 400
-          err.message = '侧信息负责人用户不存在'
-          throw err
-        }
-        ownerName = ownerUser.display_name || `用户${note.owner_user_id}`
-      }
+      const ownerName = await resolveOwnerName(note.owner_user_id)
       await pool.query(
         `INSERT INTO matrix_package_side_notes
-         (package_id, note_type, content, owner_user_id, owner_name, created_by, updated_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+         (package_id, note_type, content, owner_user_id, owner_name, expected_delivery_date, expected_delivery_date_source, created_by, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
           content = VALUES(content),
           owner_user_id = VALUES(owner_user_id),
           owner_name = VALUES(owner_name),
+          expected_delivery_date = CASE
+            WHEN ? = 1 THEN VALUES(expected_delivery_date)
+            ELSE expected_delivery_date
+          END,
+          expected_delivery_date_source = CASE
+            WHEN ? = 1 THEN VALUES(expected_delivery_date_source)
+            ELSE expected_delivery_date_source
+          END,
           updated_by = VALUES(updated_by),
           updated_at = CURRENT_TIMESTAMP`,
-        [matrixPackage.id, note.note_type, note.content, note.owner_user_id, ownerName, userId || null, userId || null],
+        [
+          matrixPackage.id,
+          note.note_type,
+          note.content,
+          note.owner_user_id,
+          ownerName,
+          note.expected_delivery_date === undefined ? null : note.expected_delivery_date,
+          note.expected_delivery_date === undefined
+            ? null
+            : (note.expected_delivery_date ? (note.expected_delivery_date_source || 'MANUAL') : null),
+          userId || null,
+          userId || null,
+          note.expected_delivery_date !== undefined ? 1 : 0,
+          note.expected_delivery_date !== undefined ? 1 : 0,
+        ],
       )
     }
+
+    return this.listByPackageId(matrixPackage.id)
+  },
+
+  async patchFields(packageId, noteType, payload = {}, userId) {
+    const matrixPackage = await MatrixPackage.getById(packageId)
+    if (!matrixPackage) return null
+
+    const normalizedType = normalizeNoteType(noteType)
+    if (!normalizedType) {
+      const err = new Error('note_type_invalid')
+      err.statusCode = 400
+      err.message = '补充信息类型不合法'
+      throw err
+    }
+
+    const hasFields = payload && Object.prototype.hasOwnProperty.call(payload, 'fields')
+    const fields = hasFields && payload.fields && typeof payload.fields === 'object' && !Array.isArray(payload.fields)
+      ? payload.fields
+      : null
+    const hasOwner = Object.prototype.hasOwnProperty.call(payload || {}, 'owner_user_id')
+    const hasExpectedDate = Object.prototype.hasOwnProperty.call(payload || {}, 'expected_delivery_date')
+    const hasExpectedDateSource = Object.prototype.hasOwnProperty.call(payload || {}, 'expected_delivery_date_source')
+
+    if (!fields && !hasOwner && !hasExpectedDate && !hasExpectedDateSource) {
+      const err = new Error('side_note_patch_empty')
+      err.statusCode = 400
+      err.message = '请提供需要保存的字段'
+      throw err
+    }
+
+    const [rows] = await pool.query(
+      `SELECT content, owner_user_id, owner_name, expected_delivery_date, expected_delivery_date_source
+       FROM matrix_package_side_notes
+       WHERE package_id = ? AND note_type = ?
+       LIMIT 1`,
+      [matrixPackage.id, normalizedType],
+    )
+    const existing = rows[0] || {}
+    const existingContent = parseJsonObject(existing.content) || {}
+    const nextContent = fields ? { ...existingContent, ...stripTransientAttachmentFields(fields) } : existingContent
+    const normalizedContent = fields
+      ? normalizeNoteContent(JSON.stringify(nextContent))
+      : normalizeNoteContent(existing.content || '')
+
+    const ownerUserId = hasOwner ? normalizeOptionalId(payload.owner_user_id) : normalizeOptionalId(existing.owner_user_id)
+    const ownerName = hasOwner ? await resolveOwnerName(ownerUserId) : (existing.owner_name || '')
+    const expectedDeliveryDate = hasExpectedDate
+      ? normalizeOptionalDate(payload.expected_delivery_date)
+      : (existing.expected_delivery_date || null)
+    const expectedDeliveryDateSource = hasExpectedDate
+      ? (expectedDeliveryDate ? normalizeScheduleSource(payload.expected_delivery_date_source, 'MANUAL') : null)
+      : (hasExpectedDateSource
+        ? normalizeScheduleSource(payload.expected_delivery_date_source)
+        : (existing.expected_delivery_date_source || null))
+
+    await pool.query(
+      `INSERT INTO matrix_package_side_notes
+       (package_id, note_type, content, owner_user_id, owner_name, expected_delivery_date, expected_delivery_date_source, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+        content = VALUES(content),
+        owner_user_id = VALUES(owner_user_id),
+        owner_name = VALUES(owner_name),
+        expected_delivery_date = VALUES(expected_delivery_date),
+        expected_delivery_date_source = VALUES(expected_delivery_date_source),
+        updated_by = VALUES(updated_by),
+        updated_at = CURRENT_TIMESTAMP`,
+      [
+        matrixPackage.id,
+        normalizedType,
+        normalizedContent,
+        ownerUserId,
+        ownerName,
+        expectedDeliveryDate,
+        expectedDeliveryDateSource,
+        userId || null,
+        userId || null,
+      ],
+    )
 
     return this.listByPackageId(matrixPackage.id)
   },
