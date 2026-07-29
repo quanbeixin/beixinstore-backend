@@ -190,7 +190,7 @@ function buildWhere(filters = {}, defaultOwnerId = null) {
 
   const keyword = normalizeText(filters.keyword, 100)
   if (keyword) {
-    clauses.push('(mp.package_name LIKE ? OR mp.app_id LIKE ? OR mp.domain_info LIKE ? OR da.account_name LIKE ? OR da.company_name LIKE ? OR plan.owner_name LIKE ?)')
+    clauses.push('(mp.package_name LIKE ? OR mp.app_id LIKE ? OR mp.domain_info LIKE ? OR da.account_name LIKE ? OR COALESCE(developerCompanyDict.item_name, da.company_name) LIKE ? OR plan.owner_name LIKE ?)')
     const like = `%${keyword}%`
     params.push(like, like, like, like, like, like)
   }
@@ -250,7 +250,7 @@ async function getByPackageId(packageId) {
        plan.id AS plan_id,
        mp.developer_account_id,
        da.account_name AS developer_account_name,
-       da.company_name AS developer_company_name,
+       COALESCE(developerCompanyDict.item_name, da.company_name) AS developer_company_name,
        mp.package_name,
        mp.app_id,
        mp.domain_info,
@@ -286,6 +286,12 @@ async function getByPackageId(packageId) {
      LEFT JOIN developer_accounts da
        ON da.id = mp.developer_account_id
       AND da.deleted_at IS NULL
+     LEFT JOIN config_dict_items developerCompanyDict
+       ON developerCompanyDict.type_key = 'developer_company_subject'
+      AND (
+        developerCompanyDict.item_code = da.company_code
+        OR (da.company_code IS NULL AND developerCompanyDict.item_name = da.company_name)
+      )
      LEFT JOIN config_dict_items statusDict
        ON statusDict.type_key = 'matrix_package_status'
       AND statusDict.item_code = mp.status_code
@@ -316,6 +322,12 @@ const MatrixPackageReviewPlan = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN config_dict_items developerCompanyDict
+         ON developerCompanyDict.type_key = 'developer_company_subject'
+        AND (
+          developerCompanyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND developerCompanyDict.item_name = da.company_name)
+        )
        WHERE ${whereSql}`,
       params,
     )
@@ -326,7 +338,7 @@ const MatrixPackageReviewPlan = {
          plan.id AS plan_id,
          mp.developer_account_id,
          da.account_name AS developer_account_name,
-         da.company_name AS developer_company_name,
+         COALESCE(developerCompanyDict.item_name, da.company_name) AS developer_company_name,
          mp.package_name,
          mp.app_id,
          mp.domain_info,
@@ -358,6 +370,12 @@ const MatrixPackageReviewPlan = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN config_dict_items developerCompanyDict
+         ON developerCompanyDict.type_key = 'developer_company_subject'
+        AND (
+          developerCompanyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND developerCompanyDict.item_name = da.company_name)
+        )
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = 'matrix_package_status'
         AND statusDict.item_code = mp.status_code

@@ -167,7 +167,7 @@ function buildWhere(filters = {}) {
 
   const keyword = normalizeText(filters.keyword, 100)
   if (keyword) {
-    clauses.push('(mp.package_name LIKE ? OR mp.app_id LIKE ? OR mp.new_package_version LIKE ? OR mp.domain_info LIKE ? OR mp.platform LIKE ? OR mp.owner_name LIKE ? OR ownerUser.real_name LIKE ? OR ownerUser.username LIKE ? OR da.account_name LIKE ? OR da.company_name LIKE ?)')
+    clauses.push('(mp.package_name LIKE ? OR mp.app_id LIKE ? OR mp.new_package_version LIKE ? OR mp.domain_info LIKE ? OR mp.platform LIKE ? OR mp.owner_name LIKE ? OR ownerUser.real_name LIKE ? OR ownerUser.username LIKE ? OR da.account_name LIKE ? OR COALESCE(developerCompanyDict.item_name, da.company_name) LIKE ?)')
     const like = `%${keyword}%`
     params.push(like, like, like, like, like, like, like, like, like, like)
   }
@@ -281,6 +281,12 @@ const MatrixPackage = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN config_dict_items developerCompanyDict
+         ON developerCompanyDict.type_key = 'developer_company_subject'
+        AND (
+          developerCompanyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND developerCompanyDict.item_name = da.company_name)
+        )
        WHERE ${whereSql}`,
       params,
     )
@@ -305,6 +311,12 @@ const MatrixPackage = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN config_dict_items developerCompanyDict
+         ON developerCompanyDict.type_key = 'developer_company_subject'
+        AND (
+          developerCompanyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND developerCompanyDict.item_name = da.company_name)
+        )
        LEFT JOIN app_version_releases latestRelease
          ON latestRelease.id = (
            SELECT avr.id
@@ -324,7 +336,7 @@ const MatrixPackage = {
          mp.developer_account_id,
          da.account_name AS developer_account_name,
          da.account_id AS developer_account_account_id,
-         da.company_name AS developer_company_name,
+         COALESCE(developerCompanyDict.item_name, da.company_name) AS developer_company_name,
          mp.package_name,
          mp.app_id,
          mp.new_package_version,
@@ -368,6 +380,12 @@ const MatrixPackage = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN config_dict_items developerCompanyDict
+         ON developerCompanyDict.type_key = 'developer_company_subject'
+        AND (
+          developerCompanyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND developerCompanyDict.item_name = da.company_name)
+        )
        LEFT JOIN work_demands linkedDemand
          ON linkedDemand.id = mp.linked_demand_id
        LEFT JOIN app_version_releases latestRelease
@@ -470,7 +488,7 @@ const MatrixPackage = {
          mp.developer_account_id,
          da.account_name AS developer_account_name,
          da.account_id AS developer_account_account_id,
-         da.company_name AS developer_company_name,
+         COALESCE(developerCompanyDict.item_name, da.company_name) AS developer_company_name,
          mp.package_name,
          mp.app_id,
          mp.new_package_version,
@@ -514,6 +532,12 @@ const MatrixPackage = {
        LEFT JOIN developer_accounts da
          ON da.id = mp.developer_account_id
         AND da.deleted_at IS NULL
+       LEFT JOIN config_dict_items developerCompanyDict
+         ON developerCompanyDict.type_key = 'developer_company_subject'
+        AND (
+          developerCompanyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND developerCompanyDict.item_name = da.company_name)
+        )
        LEFT JOIN work_demands linkedDemand
          ON linkedDemand.id = mp.linked_demand_id
        LEFT JOIN app_version_releases latestRelease

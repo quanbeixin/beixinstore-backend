@@ -615,7 +615,7 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
       sections.operation.value[key] = field(definition?.description || key, value)
     })
     if (sections.frontend?.value && typeof sections.frontend.value === 'object') {
-      ;['prodGooglePlatformAppId', 'testGooglePlatformAppId'].forEach((key) => {
+      ['prodGooglePlatformAppId', 'testGooglePlatformAppId'].forEach((key) => {
         if (!sections.operation.value[key]?.value && sections.frontend.value[key]?.value) {
           sections.operation.value[key] = field(
             key === 'prodGooglePlatformAppId' ? '生产环境Google平台应用ID' : '测试环境Google平台应用ID',
@@ -719,7 +719,7 @@ async function listOpenMatrixPackages(req, res) {
          mp.linked_demand_id,
          linkedDemand.name AS linked_demand_name,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
-         da.company_name AS developer_company_name,
+         COALESCE(companyDict.item_name, da.company_name) AS developer_company_name,
          companyDict.extra_json AS developer_company_extra_json,
          da.account_name AS developer_account_name,
          da.account_id AS developer_account_platform_id,
@@ -737,7 +737,10 @@ async function listOpenMatrixPackages(req, res) {
         AND da.deleted_at IS NULL
        LEFT JOIN config_dict_items companyDict
          ON companyDict.type_key = 'developer_company_subject'
-        AND companyDict.item_name = da.company_name
+        AND (
+          companyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND companyDict.item_name = da.company_name)
+        )
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = 'matrix_package_status'
         AND statusDict.item_code = mp.status_code

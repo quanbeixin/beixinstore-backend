@@ -23,11 +23,31 @@ function normalizeOptionalId(value) {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null
 }
 
+function parseCompanyEnglishName(rawExtra) {
+  if (!rawExtra) return ''
+  if (typeof rawExtra === 'object' && !Array.isArray(rawExtra)) {
+    return normalizeText(rawExtra.englishName || rawExtra.english_name || rawExtra.enName || '', 160)
+  }
+  try {
+    const parsed = JSON.parse(String(rawExtra || ''))
+    if (typeof parsed === 'string') return normalizeText(parsed, 160)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return normalizeText(parsed.englishName || parsed.english_name || parsed.enName || '', 160)
+    }
+  } catch {
+    return normalizeText(rawExtra, 160)
+  }
+  return ''
+}
+
 function mapRow(row) {
   if (!row) return null
   return {
     id: Number(row.id),
-    company_name: row.company_name || '',
+    company_code: row.company_code || '',
+    company_name: row.company_display_name || row.company_name || '',
+    company_snapshot_name: row.company_name || '',
+    company_english_name: row.company_english_name || parseCompanyEnglishName(row.company_extra_json),
     account_name: row.account_name || '',
     account_id: row.account_id || '',
     status_code: row.status_code || '',
@@ -57,18 +77,18 @@ async function validateDictCode(typeKey, itemCode) {
   return rows.length > 0
 }
 
-async function validateDictName(typeKey, itemName) {
-  const normalized = normalizeText(itemName, 120)
-  if (!normalized) return false
+async function getDictItemByCode(typeKey, itemCode) {
+  const normalized = normalizeOptionalCode(itemCode)
+  if (!normalized) return null
 
   const [rows] = await pool.query(
-    `SELECT id
+    `SELECT item_code, item_name
      FROM config_dict_items
-     WHERE type_key = ? AND item_name = ? AND enabled = 1
+     WHERE type_key = ? AND item_code = ? AND enabled = 1
      LIMIT 1`,
     [typeKey, normalized],
   )
-  return rows.length > 0
+  return rows[0] || null
 }
 
 function buildWhere(filters = {}) {
@@ -77,15 +97,21 @@ function buildWhere(filters = {}) {
 
   const keyword = normalizeText(filters.keyword, 100)
   if (keyword) {
-    clauses.push('(da.company_name LIKE ? OR da.account_name LIKE ? OR da.account_id LIKE ? OR da.owner_name LIKE ? OR ownerUser.real_name LIKE ? OR ownerUser.username LIKE ?)')
+    clauses.push('(COALESCE(companyDict.item_name, da.company_name) LIKE ? OR da.account_name LIKE ? OR da.account_id LIKE ? OR da.owner_name LIKE ? OR ownerUser.real_name LIKE ? OR ownerUser.username LIKE ?)')
     const like = `%${keyword}%`
     params.push(like, like, like, like, like, like)
   }
 
-  const companyName = normalizeText(filters.company_name, 120)
-  if (companyName) {
-    clauses.push('da.company_name LIKE ?')
-    params.push(`%${companyName}%`)
+  const companyCode = normalizeOptionalCode(filters.company_code)
+  if (companyCode) {
+    clauses.push('COALESCE(da.company_code, companyDict.item_code) = ?')
+    params.push(companyCode)
+  } else {
+    const companyName = normalizeText(filters.company_name, 120)
+    if (companyName) {
+      clauses.push('COALESCE(companyDict.item_name, da.company_name) LIKE ?')
+      params.push(`%${companyName}%`)
+    }
   }
 
   const statusCode = normalizeOptionalCode(filters.status_code)
@@ -120,16 +146,25 @@ const DeveloperAccount = {
     const [countRows] = await pool.query(
       `SELECT COUNT(*) AS total
        FROM developer_accounts da
+       LEFT JOIN config_dict_items companyDict
+         ON companyDict.type_key = ?
+        AND (
+          companyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND companyDict.item_name = da.company_name)
+        )
        LEFT JOIN users ownerUser
          ON ownerUser.id = da.owner_user_id
        WHERE ${whereSql}`,
-      params,
+      [COMPANY_DICT_KEY, ...params],
     )
 
     const [rows] = await pool.query(
       `SELECT
          da.id,
+         COALESCE(da.company_code, companyDict.item_code) AS company_code,
          da.company_name,
+         COALESCE(companyDict.item_name, da.company_name) AS company_display_name,
+         companyDict.extra_json AS company_extra_json,
          da.account_name,
          da.account_id,
          da.status_code,
@@ -138,22 +173,31 @@ const DeveloperAccount = {
          da.owner_user_id,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
          da.owner_name,
-         COUNT(mp.id) AS package_count,
+         COALESCE(packageStats.package_count, 0) AS package_count,
          da.created_by,
          da.updated_by,
          DATE_FORMAT(da.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(da.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
        FROM developer_accounts da
+       LEFT JOIN config_dict_items companyDict
+         ON companyDict.type_key = ?
+        AND (
+          companyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND companyDict.item_name = da.company_name)
+        )
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = ?
         AND statusDict.item_code = da.status_code
        LEFT JOIN users ownerUser
          ON ownerUser.id = da.owner_user_id
-       LEFT JOIN matrix_packages mp
-         ON mp.developer_account_id = da.id
-        AND mp.deleted_at IS NULL
+       LEFT JOIN (
+         SELECT developer_account_id, COUNT(*) AS package_count
+         FROM matrix_packages
+         WHERE deleted_at IS NULL
+         GROUP BY developer_account_id
+       ) packageStats
+         ON packageStats.developer_account_id = da.id
        WHERE ${whereSql}
-       GROUP BY da.id
        ORDER BY
          CASE da.status_code
            WHEN 'RISK' THEN 1
@@ -164,8 +208,8 @@ const DeveloperAccount = {
          END ASC,
          da.updated_at DESC,
          da.id DESC
-       LIMIT ? OFFSET ?`,
-      [STATUS_DICT_KEY, ...params, pageSize, offset],
+      LIMIT ? OFFSET ?`,
+      [COMPANY_DICT_KEY, STATUS_DICT_KEY, ...params, pageSize, offset],
     )
 
     return {
@@ -180,7 +224,10 @@ const DeveloperAccount = {
     const [rows] = await pool.query(
       `SELECT
          da.id,
+         COALESCE(da.company_code, companyDict.item_code) AS company_code,
          da.company_name,
+         COALESCE(companyDict.item_name, da.company_name) AS company_display_name,
+         companyDict.extra_json AS company_extra_json,
          da.account_name,
          da.account_id,
          da.status_code,
@@ -195,14 +242,20 @@ const DeveloperAccount = {
          DATE_FORMAT(da.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(da.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
        FROM developer_accounts da
+       LEFT JOIN config_dict_items companyDict
+         ON companyDict.type_key = ?
+        AND (
+          companyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND companyDict.item_name = da.company_name)
+        )
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = ?
         AND statusDict.item_code = da.status_code
        LEFT JOIN users ownerUser
          ON ownerUser.id = da.owner_user_id
        WHERE da.deleted_at IS NULL
-       ORDER BY da.company_name ASC, da.account_name ASC, da.id DESC`,
-      [STATUS_DICT_KEY],
+       ORDER BY COALESCE(companyDict.item_name, da.company_name) ASC, da.account_name ASC, da.id DESC`,
+      [COMPANY_DICT_KEY, STATUS_DICT_KEY],
     )
     return rows.map(mapRow)
   },
@@ -214,7 +267,10 @@ const DeveloperAccount = {
     const [rows] = await pool.query(
       `SELECT
          da.id,
+         COALESCE(da.company_code, companyDict.item_code) AS company_code,
          da.company_name,
+         COALESCE(companyDict.item_name, da.company_name) AS company_display_name,
+         companyDict.extra_json AS company_extra_json,
          da.account_name,
          da.account_id,
          da.status_code,
@@ -223,24 +279,33 @@ const DeveloperAccount = {
          da.owner_user_id,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name,
          da.owner_name,
-         COUNT(mp.id) AS package_count,
+         COALESCE(packageStats.package_count, 0) AS package_count,
          da.created_by,
          da.updated_by,
          DATE_FORMAT(da.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(da.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
        FROM developer_accounts da
+       LEFT JOIN config_dict_items companyDict
+         ON companyDict.type_key = ?
+        AND (
+          companyDict.item_code = da.company_code
+          OR (da.company_code IS NULL AND companyDict.item_name = da.company_name)
+        )
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = ?
         AND statusDict.item_code = da.status_code
        LEFT JOIN users ownerUser
          ON ownerUser.id = da.owner_user_id
-       LEFT JOIN matrix_packages mp
-         ON mp.developer_account_id = da.id
-        AND mp.deleted_at IS NULL
-       WHERE da.id = ? AND da.deleted_at IS NULL
-       GROUP BY da.id
-       LIMIT 1`,
-      [STATUS_DICT_KEY, accountId],
+       LEFT JOIN (
+         SELECT developer_account_id, COUNT(*) AS package_count
+         FROM matrix_packages
+         WHERE deleted_at IS NULL
+         GROUP BY developer_account_id
+       ) packageStats
+         ON packageStats.developer_account_id = da.id
+      WHERE da.id = ? AND da.deleted_at IS NULL
+      LIMIT 1`,
+      [COMPANY_DICT_KEY, STATUS_DICT_KEY, accountId],
     )
     return mapRow(rows[0])
   },
@@ -262,9 +327,10 @@ const DeveloperAccount = {
     const normalized = await this.normalizePayload(payload)
     const [result] = await pool.query(
       `INSERT INTO developer_accounts
-       (company_name, account_name, account_id, status_code, owner_user_id, owner_name, created_by, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (company_code, company_name, account_name, account_id, status_code, owner_user_id, owner_name, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        normalized.company_code,
         normalized.company_name,
         normalized.account_name,
         normalized.account_id,
@@ -287,8 +353,9 @@ const DeveloperAccount = {
 
     const normalized = await this.normalizePayload(payload)
     await pool.query(
-      `UPDATE developer_accounts
-       SET company_name = ?,
+       `UPDATE developer_accounts
+       SET company_code = ?,
+           company_name = ?,
            account_name = ?,
            account_id = ?,
            status_code = ?,
@@ -297,6 +364,7 @@ const DeveloperAccount = {
            updated_by = ?
        WHERE id = ? AND deleted_at IS NULL`,
       [
+        normalized.company_code,
         normalized.company_name,
         normalized.account_name,
         normalized.account_id,
@@ -349,14 +417,15 @@ const DeveloperAccount = {
   },
 
   async normalizePayload(payload = {}) {
-    const companyName = normalizeText(payload.company_name, 120)
-    if (!companyName) {
+    const companyCode = normalizeOptionalCode(payload.company_code || payload.company_name)
+    if (!companyCode) {
       const err = new Error('company_name_required')
       err.statusCode = 400
       err.message = '公司主体不能为空'
       throw err
     }
-    if (!(await validateDictName(COMPANY_DICT_KEY, companyName))) {
+    const companyDict = await getDictItemByCode(COMPANY_DICT_KEY, companyCode)
+    if (!companyDict) {
       const err = new Error('company_name_invalid')
       err.statusCode = 400
       err.message = '公司主体不合法，请先在系统字典中维护'
@@ -382,7 +451,8 @@ const DeveloperAccount = {
     const ownerUser = await this.getUserDisplayName(payload.owner_user_id)
 
     return {
-      company_name: companyName,
+      company_code: companyDict.item_code,
+      company_name: normalizeText(companyDict.item_name, 120),
       account_name: accountName,
       account_id: normalizeText(payload.account_id, 120),
       status_code: statusCode,
