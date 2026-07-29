@@ -123,7 +123,22 @@ const MatrixPackageSideNote = {
         .filter((item) => item.note_type)
       : []
 
+    const [existingRows] = await pool.query(
+      `SELECT note_type, content
+       FROM matrix_package_side_notes
+       WHERE package_id = ?`,
+      [matrixPackage.id],
+    )
+    const existingContentMap = new Map(
+      (existingRows || []).map((row) => [row.note_type, String(row.content || '').trim()]),
+    )
+
     for (const note of normalizedNotes) {
+      const existingContent = existingContentMap.get(note.note_type) || ''
+      if (!note.content && existingContent) {
+        note.content = existingContent
+      }
+
       let ownerName = ''
       if (note.owner_user_id) {
         const [userRows] = await pool.query(

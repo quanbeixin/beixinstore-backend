@@ -8,6 +8,7 @@ const {
   buildMatrixPackageSideNotePolicyPayload,
   decorateMatrixPackageSideNotes,
 } = require('../services/matrixPackageSideNoteUploadService')
+const { generateDataSafetyFile } = require('../services/matrixPackageDataSafetyFileService')
 const { sendNotification } = require('../utils/notificationSender')
 const pool = require('../utils/db')
 
@@ -877,6 +878,26 @@ async function getMatrixPackageSideNoteUploadPolicy(req, res) {
   }
 }
 
+async function downloadMatrixPackageDataSafetyFile(req, res) {
+  try {
+    const packageId = Number.parseInt(req.params.id, 10)
+    if (!Number.isFinite(packageId) || packageId <= 0) {
+      return res.status(400).json({ success: false, message: '矩阵包ID不合法' })
+    }
+
+    const result = await generateDataSafetyFile(packageId, {
+      dataDeletionUrl: req.query?.data_deletion_url,
+    })
+    const encodedFileName = encodeURIComponent(result.fileName)
+    res.setHeader('Content-Type', result.encoding === 'gb18030' ? 'text/csv; charset=GB18030' : 'text/csv; charset=utf-8')
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodedFileName}`)
+    res.setHeader('Cache-Control', 'no-store')
+    return res.send(result.buffer)
+  } catch (error) {
+    return handleError(res, error, '生成数据安全文件失败')
+  }
+}
+
 module.exports = {
   listMatrixPackages,
   getMatrixPackage,
@@ -891,5 +912,6 @@ module.exports = {
   confirmMatrixPackageSideNote,
   remindMatrixPackageSideNote,
   getMatrixPackageSideNoteUploadPolicy,
+  downloadMatrixPackageDataSafetyFile,
   updateMatrixPackageProductionNode,
 }
