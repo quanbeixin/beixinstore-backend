@@ -157,6 +157,9 @@ POST http://39.97.253.194/api/open/matrix-packages/update-fields
 | `frontend` | `testReleaseDownloadUrl` | 测试包下载地址 | 文本 |
 | `frontend` | `googleServiceJsonFile` | google-service.json文件 | 文件对象 |
 | `frontend` | `pushFcmFile` | push-fcm文件 | 文件对象 |
+| `advertising` | `MATRIX_FACEBOOK_INSTALL_DECRYPT_SECRET` | Facebook 投放解析安装来源密钥 | 文本 |
+| `advertising` | `facebook_app_id` | android 内 facebook app id 配置 | 文本 |
+| `advertising` | `facebook_client_token` | android app 内 facebook 密钥 | 文本 |
 
 `prodH5Url` / `testH5Url` 是系统自动生成字段，不开放写入。
 
@@ -178,6 +181,11 @@ curl -X POST "http://39.97.253.194/api/open/matrix-packages/update-fields" \
       "operation": {
         "prodGooglePlatformAppId": "1:xxx:android:xxx",
         "testGooglePlatformAppId": "1:yyy:android:yyy"
+      },
+      "advertising": {
+        "MATRIX_FACEBOOK_INSTALL_DECRYPT_SECRET": "decrypt-secret",
+        "facebook_app_id": "1234567890",
+        "facebook_client_token": "facebook-client-token"
       }
     }
   }'

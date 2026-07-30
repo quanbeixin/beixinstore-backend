@@ -136,6 +136,7 @@ const PRODUCTION_NODE_STATUS_NAMES = {
 const OPEN_WRITE_SECTION_MAP = {
   frontend: 'FRONTEND',
   operation: 'OPERATION',
+  advertising: 'ADVERTISING',
 }
 
 const OPEN_OPERATION_TEXT_FIELDS = new Set([
@@ -162,6 +163,12 @@ const OPEN_FRONTEND_FILE_FIELDS = new Set([
 const OPEN_FRONTEND_FIELDS = new Set([
   ...OPEN_FRONTEND_TEXT_FIELDS,
   ...OPEN_FRONTEND_FILE_FIELDS,
+])
+
+const OPEN_ADVERTISING_TEXT_FIELDS = new Set([
+  'MATRIX_FACEBOOK_INSTALL_DECRYPT_SECRET',
+  'facebook_app_id',
+  'facebook_client_token',
 ])
 
 function normalizeText(value, maxLength = 255) {
@@ -453,6 +460,25 @@ function normalizeOpenOperationFields(fields) {
   Object.entries(fields).forEach(([fieldName, value]) => {
     if (!OPEN_OPERATION_TEXT_FIELDS.has(fieldName)) {
       const err = new Error(`字段不允许写入：operation.${fieldName}`)
+      err.statusCode = 400
+      throw err
+    }
+    nextFields[fieldName] = normalizeText(value, 10000)
+  })
+  return nextFields
+}
+
+function normalizeOpenAdvertisingFields(fields) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    const err = new Error('sections.advertising 必须是对象')
+    err.statusCode = 400
+    throw err
+  }
+
+  const nextFields = {}
+  Object.entries(fields).forEach(([fieldName, value]) => {
+    if (!OPEN_ADVERTISING_TEXT_FIELDS.has(fieldName)) {
+      const err = new Error(`字段不允许写入：advertising.${fieldName}`)
       err.statusCode = 400
       throw err
     }
@@ -950,16 +976,19 @@ async function updateOpenMatrixPackageFields(req, res) {
       : {}
     const frontendFields = sections.frontend || req.body?.frontend || null
     const operationFields = sections.operation || req.body?.operation || null
-    if (!frontendFields && !operationFields) {
-      return res.status(400).json({ success: false, message: '请提供 sections.frontend 或 sections.operation 写入内容' })
+    const advertisingFields = sections.advertising || req.body?.advertising || null
+    if (!frontendFields && !operationFields && !advertisingFields) {
+      return res.status(400).json({ success: false, message: '请提供 sections.frontend、sections.operation 或 sections.advertising 写入内容' })
     }
 
     const packageId = Number(matchedPackage.id)
     const normalizedFrontendFields = frontendFields ? normalizeOpenFrontendFields(frontendFields, packageId) : {}
     const normalizedOperationFields = operationFields ? normalizeOpenOperationFields(operationFields) : {}
+    const normalizedAdvertisingFields = advertisingFields ? normalizeOpenAdvertisingFields(advertisingFields) : {}
     const updateJobs = [
       { section: 'frontend', noteType: 'FRONTEND', fields: normalizedFrontendFields },
       { section: 'operation', noteType: 'OPERATION', fields: normalizedOperationFields },
+      { section: 'advertising', noteType: 'ADVERTISING', fields: normalizedAdvertisingFields },
     ].filter((item) => Object.keys(item.fields).length > 0)
     if (updateJobs.length === 0) {
       return res.status(400).json({ success: false, message: '至少需要提供一个允许写入的字段' })
