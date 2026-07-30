@@ -533,6 +533,7 @@ const MatrixPackage = {
         total: Number(summaryRows[0]?.total || 0),
         pending_dev: Number(summaryRows[0]?.pending_dev || 0),
         in_development: Number(summaryRows[0]?.in_development || 0),
+        testing: Number(summaryRows[0]?.testing || 0),
         cold_standby: Number(summaryRows[0]?.cold_standby || 0),
         pending_review_submit: Number(summaryRows[0]?.pending_review_submit || 0),
         delivering: Number(summaryRows[0]?.delivering || 0),
