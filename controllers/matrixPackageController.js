@@ -4,6 +4,7 @@ const MatrixPackageSideNote = require('../models/MatrixPackageSideNote')
 const MatrixPackageNotificationService = require('../services/matrixPackageNotificationService')
 const MatrixPackageDemandService = require('../services/matrixPackageDemandService')
 const MatrixPackageScheduleService = require('../services/matrixPackageScheduleService')
+const MatrixPackageDevopsMetaSyncService = require('../services/matrixPackageDevopsMetaSyncService')
 const {
   buildMatrixPackageSideNotePolicyPayload,
   decorateMatrixPackageSideNotes,
@@ -918,6 +919,22 @@ async function getMatrixPackageSideNoteUploadPolicy(req, res) {
   }
 }
 
+async function syncMatrixPackageDevopsMeta(req, res) {
+  try {
+    const data = await MatrixPackageDevopsMetaSyncService.syncDevopsMeta({
+      packageId: req.params.id,
+      env: req.body?.env,
+    })
+    return res.json({
+      success: true,
+      message: '数据同步成功',
+      data,
+    })
+  } catch (error) {
+    return handleError(res, error, '数据同步失败')
+  }
+}
+
 async function downloadMatrixPackageDataSafetyFile(req, res) {
   try {
     const packageId = Number.parseInt(req.params.id, 10)
@@ -954,5 +971,6 @@ module.exports = {
   remindMatrixPackageSideNote,
   getMatrixPackageSideNoteUploadPolicy,
   downloadMatrixPackageDataSafetyFile,
+  syncMatrixPackageDevopsMeta,
   updateMatrixPackageProductionNode,
 }

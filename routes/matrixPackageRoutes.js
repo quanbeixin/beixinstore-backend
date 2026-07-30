@@ -15,6 +15,7 @@ const {
   listMatrixPackages,
   patchMatrixPackageSideNoteFields,
   saveMatrixPackageSideNotes,
+  syncMatrixPackageDevopsMeta,
   updateMatrixPackageProductionNode,
   updateMatrixPackage,
 } = require('../controllers/matrixPackageController')
@@ -36,6 +37,7 @@ router.patch('/:id/side-notes/:noteType/fields', authMiddleware.requirePermissio
 router.post('/:id/side-notes/upload-policy', authMiddleware.requirePermission('matrix_package.manage'), getMatrixPackageSideNoteUploadPolicy)
 router.post('/:id/side-notes/:noteType/confirm', authMiddleware.requirePermission('matrix_package.manage'), confirmMatrixPackageSideNote)
 router.post('/:id/side-notes/:noteType/remind', authMiddleware.requirePermission('matrix_package.view'), remindMatrixPackageSideNote)
+router.post('/:id/devops-meta-sync', authMiddleware.requirePermission('matrix_package.manage'), syncMatrixPackageDevopsMeta)
 router.post('/', authMiddleware.requirePermission('matrix_package.manage'), createMatrixPackage)
 router.put('/:id', authMiddleware.requirePermission('matrix_package.manage'), updateMatrixPackage)
 router.delete('/:id', authMiddleware.requirePermission('matrix_package.manage'), deleteMatrixPackage)
