@@ -803,7 +803,7 @@ const MatrixPackage = {
       throw err
     }
 
-    const statusCode = normalizeOptionalCode(payload.status_code)
+    const statusCode = normalizeOptionalCode(payload.status_code) || normalizeOptionalCode(existing.status_code) || 'PENDING_DEV'
     if (!(await validateDictCode(STATUS_DICT_KEY, statusCode))) {
       const err = new Error('status_code_invalid')
       err.statusCode = 400
