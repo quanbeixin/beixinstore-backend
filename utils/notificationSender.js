@@ -493,7 +493,7 @@ function buildMarkdownMessage({ content }) {
   return normalizeMarkdownForFeishu(md)
 }
 
-function buildInteractiveCardPayload({ title, markdown, actionUrl, actionText }) {
+function buildInteractiveCardPayload({ title, markdown, actionUrl, actionText, imageKey, imageKeys, imageAlt, footerMarkdown }) {
   const elements = [
     {
       tag: 'markdown',
@@ -501,19 +501,54 @@ function buildInteractiveCardPayload({ title, markdown, actionUrl, actionText })
     },
   ]
 
+  const normalizedImageKeys = Array.from(
+    new Set(
+      (Array.isArray(imageKeys) ? imageKeys : [imageKey])
+        .map((item) => normalizeText(item, 255))
+        .filter(Boolean),
+    ),
+  )
+  normalizedImageKeys.forEach((normalizedImageKey, index) => {
+    elements.push({
+      tag: 'img',
+      img_key: normalizedImageKey,
+      alt: {
+        tag: 'plain_text',
+        content: normalizeText(imageAlt, 80) || `主内容配图${normalizedImageKeys.length > 1 ? index + 1 : ''}`,
+      },
+    })
+  })
+
+  const normalizedFooterMarkdown = normalizeText(footerMarkdown, 2000)
+  if (normalizedFooterMarkdown) {
+    elements.push({
+      tag: 'markdown',
+      content: normalizedFooterMarkdown,
+    })
+  }
+
   const normalizedActionUrl = normalizeHttpUrl(actionUrl)
   if (normalizedActionUrl) {
     elements.push({
-      tag: 'action',
-      actions: [
+      tag: 'column_set',
+      flex_mode: 'none',
+      horizontal_align: 'left',
+      columns: [
         {
-          tag: 'button',
-          text: {
-            tag: 'plain_text',
-            content: normalizeText(actionText, 20) || '查看详情',
-          },
-          type: 'primary',
-          url: normalizedActionUrl,
+          tag: 'column',
+          width: 'auto',
+          elements: [
+            {
+              tag: 'button',
+              name: 'culture_push_detail_btn',
+              text: {
+                tag: 'plain_text',
+                content: normalizeText(actionText, 20) || '查看详情',
+              },
+              type: 'primary',
+              url: normalizedActionUrl,
+            },
+          ],
         },
       ],
     })
@@ -522,6 +557,7 @@ function buildInteractiveCardPayload({ title, markdown, actionUrl, actionText })
   return {
     msg_type: 'interactive',
     content: JSON.stringify({
+      schema: '2.0',
       config: {
         wide_screen_mode: true,
       },
@@ -532,7 +568,9 @@ function buildInteractiveCardPayload({ title, markdown, actionUrl, actionText })
           content: normalizeText(title, 100) || '系统通知',
         },
       },
-      elements,
+      body: {
+        elements,
+      },
     }),
   }
 }
@@ -866,6 +904,101 @@ async function listFeishuChats({ pageSize = 50, pageToken = '' } = {}) {
       data: [],
       next_page_token: '',
       has_more: false,
+    }
+  }
+}
+
+async function uploadFeishuImageByUrl(imageUrl) {
+  const normalizedImageUrl = normalizeHttpUrl(imageUrl, 2000)
+  if (!normalizedImageUrl) {
+    return {
+      success: false,
+      error_code: 'INVALID_IMAGE_URL',
+      error_message: '图片地址不合法',
+      response: {},
+    }
+  }
+
+  const tokenResult = await getTenantAccessToken()
+  if (!tokenResult.success) {
+    return {
+      success: false,
+      error_code: tokenResult.error_code || 'TOKEN_ERROR',
+      error_message: tokenResult.error_message || '获取飞书 token 失败',
+      response: tokenResult.response || {},
+    }
+  }
+
+  const { timeoutMs } = pickFeishuConfig()
+  try {
+    const imageResponse = await requestWithTimeout(normalizedImageUrl, { method: 'GET' }, timeoutMs)
+    if (!imageResponse.ok) {
+      return {
+        success: false,
+        error_code: 'IMAGE_DOWNLOAD_FAILED',
+        error_message: `下载图片失败: HTTP ${imageResponse.status}`,
+        response: { http_status: imageResponse.status },
+      }
+    }
+
+    const contentType = normalizeText(imageResponse.headers.get('content-type'), 100) || 'image/jpeg'
+    const arrayBuffer = await imageResponse.arrayBuffer()
+    const maxBytes = 10 * 1024 * 1024
+    if (arrayBuffer.byteLength > maxBytes) {
+      return {
+        success: false,
+        error_code: 'IMAGE_TOO_LARGE',
+        error_message: '图片大小不能超过 10MB',
+        response: { size: arrayBuffer.byteLength },
+      }
+    }
+
+    const formData = new FormData()
+    formData.append('image_type', 'message')
+    formData.append('image', new Blob([arrayBuffer], { type: contentType }), 'culture-push-image')
+
+    const uploadResponse = await requestWithTimeout(
+      'https://open.feishu.cn/open-apis/im/v1/images',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${tokenResult.token}`,
+        },
+        body: formData,
+      },
+      timeoutMs,
+    )
+
+    const body = await uploadResponse.json().catch(() => null)
+    if (!uploadResponse.ok) {
+      return {
+        success: false,
+        error_code: 'FEISHU_IMAGE_UPLOAD_HTTP_ERROR',
+        error_message: `上传飞书图片失败: HTTP ${uploadResponse.status}`,
+        response: { http_status: uploadResponse.status, body },
+      }
+    }
+
+    if (!body || Number(body.code) !== 0 || !body?.data?.image_key) {
+      return {
+        success: false,
+        error_code: 'FEISHU_IMAGE_UPLOAD_FAILED',
+        error_message: body?.msg || '上传飞书图片失败',
+        response: { http_status: uploadResponse.status, body },
+      }
+    }
+
+    return {
+      success: true,
+      image_key: normalizeText(body.data.image_key, 255),
+      response: { http_status: uploadResponse.status, body },
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error_code: 'FEISHU_IMAGE_UPLOAD_REQUEST_FAILED',
+      error_message: error?.message || '上传飞书图片请求失败',
+      response: {},
     }
   }
 }
@@ -1378,6 +1511,10 @@ async function sendByFeishuApp({ title, content, targets, metadata }) {
               markdown,
               actionUrl: targetActionUrl,
               actionText: metadata?.detail_action_text || '查看详情',
+              imageKey: metadata?.image_key || '',
+              imageKeys: metadata?.image_keys || [],
+              imageAlt: metadata?.image_alt || '',
+              footerMarkdown: metadata?.footer_markdown || '',
             }),
         timeoutMs,
       })
@@ -1491,6 +1628,7 @@ module.exports = {
   getNotificationSendControl,
   updateNotificationSendControl,
   listFeishuChats,
+  uploadFeishuImageByUrl,
   createFeishuDemandChat,
   addFeishuChatMembers,
   buildBugCommentReplyCardPayload,

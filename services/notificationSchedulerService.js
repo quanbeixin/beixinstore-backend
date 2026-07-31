@@ -2,6 +2,7 @@ const pool = require('../utils/db')
 const NotificationEvent = require('../models/NotificationEvent')
 const Work = require('../models/Work')
 const MatrixPackageNotificationService = require('./matrixPackageNotificationService')
+const CulturePushService = require('./culturePushService')
 const { getChinaBusinessDayInfo } = require('../utils/chinaBusinessCalendar')
 
 const SCHEDULE_EVENT_TYPES = new Set(['schedule_hourly', 'schedule_daily', 'schedule_weekly', 'schedule_monthly'])
@@ -504,6 +505,7 @@ async function runTick() {
       await dispatchDeadlineRules(rules)
     }
     await MatrixPackageNotificationService.dispatchScheduledNotifications()
+    await CulturePushService.dispatchDueCulturePushes()
   } catch (error) {
     console.error('通知调度执行失败:', error)
   } finally {

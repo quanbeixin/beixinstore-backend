@@ -32,6 +32,7 @@ const userFeedbackConfigRoutes = require('./routes/userFeedbackConfigRoutes')
 const publicFeedbackRoutes = require('./routes/publicFeedbackRoutes')
 const publicFeishuRoutes = require('./routes/publicFeishuRoutes')
 const openMatrixPackageRoutes = require('./routes/openMatrixPackageRoutes')
+const culturePushRoutes = require('./routes/culturePushRoutes')
 const { apiLimiter, loginLimiter } = require('./middleware/security')
 const notificationSchedulerService = require('./services/notificationSchedulerService')
 
@@ -176,6 +177,7 @@ app.use('/api/ai-config', userFeedbackConfigRoutes)
 app.use('/api/public/feedback', publicFeedbackRoutes)
 app.use('/api/public/feishu', publicFeishuRoutes)
 app.use('/api/open', openMatrixPackageRoutes)
+app.use('/api/culture', culturePushRoutes)
 app.use('/api', testRoutes)
 
 app.get('/', (req, res) => {
