@@ -281,6 +281,12 @@ function buildWhere(filters = {}) {
     params.push(productionStageCode)
   }
 
+  const expectedColdReadyDate = normalizeOptionalDate(filters.expected_cold_ready_date)
+  if (expectedColdReadyDate) {
+    clauses.push('DATE(mp.expected_cold_ready_date) = ?')
+    params.push(expectedColdReadyDate.slice(0, 10))
+  }
+
   return {
     whereSql: clauses.join(' AND '),
     params,
