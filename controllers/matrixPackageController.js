@@ -496,6 +496,11 @@ async function completeMatrixPackageProductionStageCore(beforePackage, operatorU
       afterPackage,
       operatorUserId,
     })
+  } else if (beforeStatusCode === 'TESTING') {
+    await MatrixPackageNotificationService.triggerProductionCompletedNotification({
+      packageDetail: beforePackage,
+      operatorUserId,
+    })
   }
 
   if (MatrixPackageDemandService.shouldEnsureDemand(afterPackage)) {

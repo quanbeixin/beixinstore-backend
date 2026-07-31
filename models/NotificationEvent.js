@@ -362,7 +362,8 @@ function renderTemplateText(template, data) {
 
 function appendMatrixPackageProductionLinks(renderedContent, eventData = {}) {
   const source = String(renderedContent || '').trim()
-  if (String(eventData?.to_status || '').trim().toUpperCase() !== 'COLD_STANDBY') return source
+  const toStatus = String(eventData?.to_status || '').trim().toUpperCase()
+  if (!['TESTING', 'COLD_STANDBY'].includes(toStatus)) return source
   if (source.includes('正式包下载地址：')) return source
 
   return [
@@ -1174,7 +1175,7 @@ async function createNotificationLog(payload) {
 }
 
 const NotificationEvent = {
-  async processEvent({ eventType, data = {}, operatorUserId = null, targetRuleIds = [] }) {
+  async processEvent({ eventType, data = {}, operatorUserId = null, targetRuleIds = [], skipCondition = false }) {
     const normalizedEventType = normalizeText(eventType, 64)
     const businessLineId = data?.business_line_id ?? null
     const normalizedOperatorUserId = toNullableInt(operatorUserId)
@@ -1187,7 +1188,9 @@ const NotificationEvent = {
     const candidateRules = await listCandidateRules(normalizedEventType, businessLineId, {
       ruleIds: targetRuleIds,
     })
-    const passedRules = candidateRules.filter((rule) => evaluateRuleCondition(rule.condition_config_json, data))
+    const passedRules = skipCondition
+      ? candidateRules
+      : candidateRules.filter((rule) => evaluateRuleCondition(rule.condition_config_json, data))
 
     const results = []
 

@@ -821,6 +821,22 @@ async function listEnabledPreparationAllCompletedRuleRows() {
   return rows || []
 }
 
+async function listEnabledProductionCompletedStatusRuleIds() {
+  const [rows] = await pool.query(
+    `SELECT id
+     FROM notification_rules
+     WHERE biz_domain = 'matrix_package'
+       AND event_type = 'matrix_package_status_change'
+       AND enabled = 1
+       AND rule_name LIKE ?
+     ORDER BY id ASC`,
+    ['%生产完成%'],
+  )
+  return (rows || [])
+    .map((row) => Number(row.id))
+    .filter((id) => Number.isInteger(id) && id > 0)
+}
+
 async function dispatchInventoryLowNotifications({ beforePackage, afterPackage, operatorUserId = null } = {}) {
   const rules = await listEnabledInventoryLowRuleRows()
   if (rules.length === 0) return
@@ -1366,6 +1382,32 @@ const MatrixPackageNotificationService = {
       operatorUserId,
     })
     await dispatchInventoryLowNotifications({ beforePackage, afterPackage, operatorUserId })
+  },
+
+  async triggerProductionCompletedNotification({ packageDetail, operatorUserId = null } = {}) {
+    if (!packageDetail?.id) return []
+    const ruleIds = await listEnabledProductionCompletedStatusRuleIds()
+    if (ruleIds.length === 0) return []
+
+    const eventData = await buildStatusChangeEventData(
+      {
+        ...packageDetail,
+        status_code: 'IN_DEVELOPMENT',
+        status_name: '开发中',
+      },
+      {
+        ...packageDetail,
+        status_code: 'TESTING',
+        status_name: packageDetail.status_name || '测试中',
+      },
+    )
+    return NotificationEvent.processEvent({
+      eventType: 'matrix_package_status_change',
+      data: eventData,
+      operatorUserId,
+      targetRuleIds: ruleIds,
+      skipCondition: true,
+    })
   },
 
   async dispatchScheduledNotifications() {

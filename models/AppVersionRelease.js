@@ -100,6 +100,17 @@ function parseStructuredContent(content) {
   }
 }
 
+function buildGeneratedAppConsoleUrl(packageDetail = {}, operationContent = {}, frontendContent = {}) {
+  const developerAccountId = normalizeText(packageDetail.developer_account_account_id, 120)
+  const prodGooglePlatformAppId = normalizeText(
+    operationContent.prodGooglePlatformAppId || frontendContent.prodGooglePlatformAppId,
+    120,
+  )
+  return developerAccountId && prodGooglePlatformAppId
+    ? `https://play.google.com/console/u/0/developers/${developerAccountId}/app/${prodGooglePlatformAppId}/publishing`
+    : ''
+}
+
 function mapRow(row) {
   if (!row) return null
   const releaseStatus = RELEASE_STATUS_MAP.get(row.release_status || '') || null
@@ -869,7 +880,9 @@ const AppVersionRelease = {
           getSideNoteContent(packageDetail.id, 'FRONTEND'),
         ])
         const appName = normalizeText(operationContent.appName, 160) || normalizeText(packageDetail.package_name, 160)
-        const appConsoleUrl = applicationItem.app_console_url
+        const generatedAppConsoleUrl = buildGeneratedAppConsoleUrl(packageDetail, operationContent, frontendContent)
+        const appConsoleUrl = generatedAppConsoleUrl
+          || applicationItem.app_console_url
           || await getLatestAppConsoleUrlByPackageId(packageDetail.id)
           || normalizeText(frontendContent.appConsoleUrl, 1000)
         if (!appConsoleUrl) {
@@ -946,7 +959,8 @@ const AppVersionRelease = {
     const applicant = await resolveMatrixPackageReleaseApplicant(packageDetail)
     const appName = normalizeText(operationContent.appName, 160) || normalizeText(packageDetail.package_name, 160)
     const appVersion = normalizeText(frontendContent.appVersion, 80)
-    const appConsoleUrl = normalizeText(frontendContent.appConsoleUrl, 1000)
+    const appConsoleUrl = buildGeneratedAppConsoleUrl(packageDetail, operationContent, frontendContent)
+      || normalizeText(frontendContent.appConsoleUrl, 1000)
     const releaseOwner = await resolveDefaultReleaseOwnerInfo(packageDetail)
     const operationSummary = '系统创建发版记录'
     const operator = userId ? await resolveUserInfo(userId) : applicant
