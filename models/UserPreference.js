@@ -6,6 +6,7 @@ const DEFAULT_VALUES = {
   default_home: '/work-logs',
   date_display_mode: 'datetime',
   demand_list_compact_default: 1,
+  app_version_release_group_by: ['developer', 'app', 'status'],
 }
 
 let tableReady = false
@@ -32,6 +33,49 @@ function normalizeText(value, maxLen = 64) {
   return text.slice(0, maxLen)
 }
 
+function normalizeAppVersionReleaseGroupBy(value) {
+  const allowed = new Set(['developer', 'app', 'status', 'company_subject', 'owner', 'urgency'])
+  const rawList = Array.isArray(value)
+    ? value
+    : String(value || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  const normalized = []
+  const seen = new Set()
+  rawList.forEach((item) => {
+    const key = String(item || '').trim().toLowerCase()
+    if (!allowed.has(key) || seen.has(key)) return
+    seen.add(key)
+    normalized.push(key)
+  })
+  return normalized.length > 0 ? normalized : DEFAULT_VALUES.app_version_release_group_by.slice()
+}
+
+function parseJsonText(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string') return fallback
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : fallback
+  } catch {
+    return fallback
+  }
+}
+
+async function columnExists(tableName, columnName) {
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS total
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND COLUMN_NAME = ?`,
+    [tableName, columnName],
+  )
+  return Number(rows[0]?.total || 0) > 0
+}
+
 async function ensureTable() {
   if (tableReady) return
 
@@ -43,11 +87,18 @@ async function ensureTable() {
       default_home VARCHAR(64) NOT NULL DEFAULT '/work-logs',
       date_display_mode VARCHAR(16) NOT NULL DEFAULT 'datetime',
       demand_list_compact_default TINYINT(1) NOT NULL DEFAULT 1,
+      app_version_release_group_by_json LONGTEXT DEFAULT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       KEY idx_user_preferences_updated_at (updated_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `)
+
+  if (!(await columnExists('user_preferences', 'app_version_release_group_by_json'))) {
+    await pool.query(
+      'ALTER TABLE user_preferences ADD COLUMN app_version_release_group_by_json LONGTEXT DEFAULT NULL AFTER demand_list_compact_default',
+    )
+  }
 
   tableReady = true
 }
@@ -60,6 +111,9 @@ function mapRow(row) {
     default_home: normalizeDefaultHome(row?.default_home),
     date_display_mode: normalizeDateDisplayMode(row?.date_display_mode),
     demand_list_compact_default: Number(row?.demand_list_compact_default || 0) === 1 ? 1 : 0,
+    app_version_release_group_by: normalizeAppVersionReleaseGroupBy(
+      parseJsonText(row?.app_version_release_group_by_json, DEFAULT_VALUES.app_version_release_group_by),
+    ),
   }
 }
 
@@ -100,6 +154,7 @@ const UserPreference = {
       default_home = undefined,
       date_display_mode = undefined,
       demand_list_compact_default = undefined,
+      app_version_release_group_by = undefined,
     } = {},
   ) {
     await ensureTable()
@@ -115,18 +170,23 @@ const UserPreference = {
         demand_list_compact_default === undefined
           ? current.demand_list_compact_default
           : normalizeCompactDefault(demand_list_compact_default),
+      app_version_release_group_by:
+        app_version_release_group_by === undefined
+          ? current.app_version_release_group_by
+          : normalizeAppVersionReleaseGroupBy(app_version_release_group_by),
     }
 
     await pool.query(
       `INSERT INTO user_preferences (
-         user_id, display_name, mobile, default_home, date_display_mode, demand_list_compact_default
-       ) VALUES (?, ?, ?, ?, ?, ?)
+         user_id, display_name, mobile, default_home, date_display_mode, demand_list_compact_default, app_version_release_group_by_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          display_name = VALUES(display_name),
          mobile = VALUES(mobile),
          default_home = VALUES(default_home),
          date_display_mode = VALUES(date_display_mode),
-         demand_list_compact_default = VALUES(demand_list_compact_default)`,
+         demand_list_compact_default = VALUES(demand_list_compact_default),
+         app_version_release_group_by_json = VALUES(app_version_release_group_by_json)`,
       [
         userId,
         next.display_name || null,
@@ -134,6 +194,7 @@ const UserPreference = {
         next.default_home,
         next.date_display_mode,
         next.demand_list_compact_default,
+        JSON.stringify(next.app_version_release_group_by || DEFAULT_VALUES.app_version_release_group_by),
       ],
     )
 

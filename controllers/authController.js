@@ -70,6 +70,25 @@ function normalizeDateDisplayMode(value) {
   return mode === 'date' || mode === 'datetime' ? mode : ''
 }
 
+function normalizeAppVersionReleaseGroupBy(value) {
+  const allowed = new Set(['developer', 'app', 'status', 'company_subject', 'owner', 'urgency'])
+  const rawList = Array.isArray(value)
+    ? value
+    : String(value || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  const normalized = []
+  const seen = new Set()
+  rawList.forEach((item) => {
+    const key = String(item || '').trim().toLowerCase()
+    if (!allowed.has(key) || seen.has(key)) return
+    seen.add(key)
+    normalized.push(key)
+  })
+  return normalized.length > 0 ? normalized : undefined
+}
+
 function toBoolInt(value) {
   if (value === undefined || value === null || value === '') return null
   if (value === true || value === 1 || value === '1' || String(value).toLowerCase() === 'true') return 1
@@ -415,11 +434,14 @@ const updatePreferences = async (req, res) => {
   const rawDefaultHome = req.body.default_home
   const rawDateDisplayMode = req.body.date_display_mode
   const rawCompactDefault = req.body.demand_list_compact_default
+  const rawGroupBy = req.body.app_version_release_group_by
 
   const defaultHome = rawDefaultHome === undefined ? undefined : normalizeDefaultHome(rawDefaultHome)
   const dateDisplayMode =
     rawDateDisplayMode === undefined ? undefined : normalizeDateDisplayMode(rawDateDisplayMode)
   const compactDefault = rawCompactDefault === undefined ? undefined : toBoolInt(rawCompactDefault)
+  const appVersionReleaseGroupBy =
+    rawGroupBy === undefined ? undefined : normalizeAppVersionReleaseGroupBy(rawGroupBy)
 
   if (rawDefaultHome !== undefined && !defaultHome) {
     return res.status(400).json({ success: false, message: 'default_home 配置不合法' })
@@ -430,12 +452,16 @@ const updatePreferences = async (req, res) => {
   if (rawCompactDefault !== undefined && compactDefault === null) {
     return res.status(400).json({ success: false, message: 'demand_list_compact_default 配置不合法' })
   }
+  if (rawGroupBy !== undefined && !appVersionReleaseGroupBy) {
+    return res.status(400).json({ success: false, message: 'app_version_release_group_by 配置不合法' })
+  }
 
   try {
     const preferences = await UserPreference.upsertByUserId(req.user.id, {
       default_home: defaultHome,
       date_display_mode: dateDisplayMode,
       demand_list_compact_default: compactDefault,
+      app_version_release_group_by: appVersionReleaseGroupBy,
     })
 
     return res.json({
