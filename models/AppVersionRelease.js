@@ -310,6 +310,17 @@ function buildOperationSummary(existing, next) {
   return normalizeText(summary, 1000)
 }
 
+function buildMergeRemark(target = {}) {
+  const targetLabel = normalizeText(
+    [
+      target.release_request_no || '',
+      target.app_version ? `版本：${target.app_version}` : '',
+    ].filter(Boolean).join(' / '),
+    255,
+  ) || normalizeText(target.app_version || target.release_request_no || `记录${target.id || ''}`, 255)
+  return `该版本已合并至${targetLabel}版本申请`
+}
+
 function buildWhere(filters = {}) {
   const clauses = ['avr.deleted_at IS NULL']
   const params = []
@@ -842,6 +853,178 @@ const AppVersionRelease = {
     )
 
     return this.getById(releaseId)
+  },
+
+  async listSyncTargets(id) {
+    const releaseId = toPositiveInt(id)
+    if (!releaseId) return []
+
+    const current = await this.getById(releaseId)
+    if (!current) return []
+
+    const [rows] = await pool.query(
+      `SELECT
+         avr.id,
+         avr.release_request_no,
+         avr.app_version,
+         avr.release_status,
+         DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         COALESCE(NULLIF(applicantUser.real_name, ''), applicantUser.username) AS applicant_display_name
+       FROM app_version_releases avr
+       LEFT JOIN users applicantUser
+         ON applicantUser.id = avr.applicant_user_id
+       WHERE avr.matrix_package_id = ?
+         AND avr.deleted_at IS NULL
+         AND avr.id > ?
+       ORDER BY avr.created_at ASC, avr.id ASC`,
+      [current.matrix_package_id || 0, releaseId],
+    )
+
+    return rows.map((row) => ({
+      id: Number(row.id),
+      release_request_no: row.release_request_no || '',
+      app_version: row.app_version || '',
+      release_status: row.release_status || '',
+      created_at: row.created_at || '',
+      applicant_name: row.applicant_display_name || '',
+      label: normalizeText(
+        [
+          row.release_request_no || `记录${row.id}`,
+          row.app_version ? `版本：${row.app_version}` : '',
+        ].filter(Boolean).join(' / '),
+        255,
+      ),
+    }))
+  },
+
+  async mergeToTargetRelease(id, targetReleaseId, userId, options = {}) {
+    const releaseId = toPositiveInt(id)
+    const normalizedTargetReleaseId = toPositiveInt(targetReleaseId)
+    const shouldSyncPreviousReleaseInfo = options.sync_previous_release_info !== false
+    if (!releaseId || !normalizedTargetReleaseId) return null
+    if (releaseId === normalizedTargetReleaseId) {
+      const err = new Error('merge_target_invalid')
+      err.statusCode = 400
+      err.message = '不能同步到当前发版记录本身'
+      throw err
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const [currentRows] = await conn.query(
+        `SELECT
+           avr.*,
+           DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d') AS expected_submit_at,
+           DATE_FORMAT(avr.submitted_at, '%Y-%m-%d') AS submitted_at,
+           DATE_FORMAT(avr.listed_at, '%Y-%m-%d') AS listed_at,
+           DATE_FORMAT(avr.last_operation_at, '%Y-%m-%d %H:%i:%s') AS last_operation_at,
+           DATE_FORMAT(avr.requested_at, '%Y-%m-%d') AS requested_at,
+           DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+           DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+           COALESCE(NULLIF(applicantUser.real_name, ''), applicantUser.username) AS applicant_display_name,
+           COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name
+         FROM app_version_releases avr
+         LEFT JOIN users applicantUser
+           ON applicantUser.id = avr.applicant_user_id
+         LEFT JOIN users ownerUser
+           ON ownerUser.id = avr.owner_user_id
+         WHERE avr.id = ?
+           AND avr.deleted_at IS NULL
+         FOR UPDATE`,
+        [releaseId],
+      )
+      const current = mapRow(currentRows[0])
+      if (!current) {
+        const err = new Error('release_not_found')
+        err.statusCode = 404
+        err.message = 'APP发版记录不存在'
+        throw err
+      }
+
+      const [targetRows] = await conn.query(
+        `SELECT
+           avr.*,
+           DATE_FORMAT(avr.expected_submit_at, '%Y-%m-%d') AS expected_submit_at,
+           DATE_FORMAT(avr.submitted_at, '%Y-%m-%d') AS submitted_at,
+           DATE_FORMAT(avr.listed_at, '%Y-%m-%d') AS listed_at,
+           DATE_FORMAT(avr.last_operation_at, '%Y-%m-%d %H:%i:%s') AS last_operation_at,
+           DATE_FORMAT(avr.requested_at, '%Y-%m-%d') AS requested_at,
+           DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+           DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+           COALESCE(NULLIF(applicantUser.real_name, ''), applicantUser.username) AS applicant_display_name,
+           COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name
+         FROM app_version_releases avr
+         LEFT JOIN users applicantUser
+           ON applicantUser.id = avr.applicant_user_id
+         LEFT JOIN users ownerUser
+           ON ownerUser.id = avr.owner_user_id
+         WHERE avr.id = ?
+           AND avr.deleted_at IS NULL
+         FOR UPDATE`,
+        [normalizedTargetReleaseId],
+      )
+      const target = mapRow(targetRows[0])
+      if (!target) {
+        const err = new Error('merge_target_not_found')
+        err.statusCode = 404
+        err.message = '目标发版记录不存在'
+        throw err
+      }
+      if (Number(current.matrix_package_id || 0) !== Number(target.matrix_package_id || 0)) {
+        const err = new Error('merge_target_package_mismatch')
+        err.statusCode = 400
+        err.message = '只能同步同一矩阵包下的发版记录'
+        throw err
+      }
+      if (target.id <= current.id) {
+        const err = new Error('merge_target_not_after_current')
+        err.statusCode = 400
+        err.message = '只能同步到当前发版记录之后的申请'
+        throw err
+      }
+
+      const operator = await resolveUserInfo(userId)
+      const mergedRemarkLine = buildMergeRemark(target)
+      const nextRemark = current.remark
+        ? `${current.remark}\n${mergedRemarkLine}`
+        : mergedRemarkLine
+      const nextPreviousReleaseInfo = shouldSyncPreviousReleaseInfo
+        ? normalizeText(target.previous_release_info, 255)
+        : normalizeText(current.previous_release_info, 255)
+      const operationSummary = `同步发版申请至 ${normalizeText(target.release_request_no || target.app_version || `记录${target.id}`, 120)}${shouldSyncPreviousReleaseInfo ? '' : '（未同步前序发版）'}`
+
+      await conn.query(
+        `UPDATE app_version_releases
+         SET release_status = 'CANCELLED',
+             previous_release_info = ?,
+             remark = ?,
+             last_operation_summary = ?,
+             last_operation_user_id = ?,
+             last_operation_user_name = ?,
+             last_operation_at = NOW(),
+             updated_by = ?
+         WHERE id = ? AND deleted_at IS NULL`,
+        [
+          nextPreviousReleaseInfo || null,
+          nextRemark || null,
+          operationSummary,
+          toPositiveInt(userId) || null,
+          operator.name || null,
+          userId || null,
+          releaseId,
+        ],
+      )
+
+      await conn.commit()
+      return this.getById(releaseId)
+    } catch (error) {
+      await conn.rollback()
+      throw error
+    } finally {
+      conn.release()
+    }
   },
 
   async softDelete(id, userId) {

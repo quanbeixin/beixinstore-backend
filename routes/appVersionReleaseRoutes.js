@@ -3,8 +3,10 @@ const authMiddleware = require('../middleware/auth')
 const {
   createAppVersionReleaseApplications,
   deleteAppVersionRelease,
+  listAppVersionReleaseSyncTargets,
   listGroupedAppVersionReleases,
   listAppVersionReleases,
+  mergeAppVersionRelease,
   updateAppVersionRelease,
 } = require('../controllers/appVersionReleaseController')
 
@@ -32,7 +34,9 @@ router.use(authMiddleware)
 
 router.get('/', authMiddleware.requirePermission('demand.view'), listAppVersionReleases)
 router.get('/grouped', authMiddleware.requirePermission('demand.view'), listGroupedAppVersionReleases)
+router.get('/:id/sync-targets', authMiddleware.requirePermission('demand.manage'), requireAppReleaseManager, listAppVersionReleaseSyncTargets)
 router.post('/applications', authMiddleware.requirePermission('demand.manage'), createAppVersionReleaseApplications)
+router.post('/:id/merge-to', authMiddleware.requirePermission('demand.manage'), requireAppReleaseManager, mergeAppVersionRelease)
 router.put('/:id', authMiddleware.requirePermission('demand.manage'), requireAppReleaseManager, updateAppVersionRelease)
 router.delete('/:id', authMiddleware.requirePermission('demand.manage'), requireAppReleaseManager, deleteAppVersionRelease)
 

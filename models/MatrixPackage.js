@@ -303,6 +303,8 @@ const MatrixPackage = {
     const offset = (page - 1) * pageSize
     const { whereSql, params } = buildWhere(filters)
     const productionOnly = String(filters.production_only || '').trim() === '1'
+    const sortBy = String(filters.sort_by || '').trim().toLowerCase()
+    const sortOrder = String(filters.sort_order || '').trim().toLowerCase() === 'asc' ? 'ASC' : 'DESC'
     const statusOrderSql = productionOnly
       ? `CASE mp.status_code
            WHEN 'IN_DEVELOPMENT' THEN 1
@@ -324,6 +326,26 @@ const MatrixPackage = {
            WHEN 'ARCHIVED' THEN 11
            ELSE 99
          END`
+    const orderBySql = sortBy === 'expected_cold_ready_date'
+      ? `CASE WHEN mp.expected_cold_ready_date IS NULL THEN 1 ELSE 0 END ASC,
+         mp.expected_cold_ready_date ${sortOrder},
+         mp.updated_at DESC,
+         mp.id DESC`
+      : `${statusOrderSql} ASC,
+         CASE
+           WHEN mp.status_code = 'IN_REVIEW' AND latestRelease.release_type = 'FIRST_RELEASE' THEN 1
+           WHEN mp.status_code = 'IN_REVIEW' AND latestRelease.release_type = 'VERSION_UPDATE' THEN 2
+           WHEN mp.status_code = 'IN_REVIEW' THEN 3
+           ELSE 9
+         END ASC,
+         CASE mp.health_code
+           WHEN 'ABNORMAL' THEN 1
+           WHEN 'WATCH' THEN 2
+           WHEN 'NORMAL' THEN 3
+           ELSE 9
+         END ASC,
+         mp.updated_at DESC,
+         mp.id DESC`
 
     const [countRows] = await pool.query(
       `SELECT COUNT(*) AS total
@@ -501,21 +523,7 @@ const MatrixPackage = {
        AND deliveryChannelDict.item_code = mp.delivery_channel_code
        WHERE ${whereSql}
        ORDER BY
-         ${statusOrderSql} ASC,
-         CASE
-           WHEN mp.status_code = 'IN_REVIEW' AND latestRelease.release_type = 'FIRST_RELEASE' THEN 1
-           WHEN mp.status_code = 'IN_REVIEW' AND latestRelease.release_type = 'VERSION_UPDATE' THEN 2
-           WHEN mp.status_code = 'IN_REVIEW' THEN 3
-           ELSE 9
-         END ASC,
-         CASE mp.health_code
-           WHEN 'ABNORMAL' THEN 1
-           WHEN 'WATCH' THEN 2
-           WHEN 'NORMAL' THEN 3
-           ELSE 9
-         END ASC,
-         mp.updated_at DESC,
-         mp.id DESC
+         ${orderBySql}
       LIMIT ? OFFSET ?`,
       [
         ...COMPLETION_SIDE_NOTE_TYPES,

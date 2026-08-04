@@ -34,6 +34,43 @@ async function listGroupedAppVersionReleases(req, res) {
   }
 }
 
+async function listAppVersionReleaseSyncTargets(req, res) {
+  try {
+    const data = await AppVersionRelease.listSyncTargets(req.params.id)
+    return res.json({ success: true, data })
+  } catch (error) {
+    return handleError(res, error, '获取可同步发版申请失败')
+  }
+}
+
+async function mergeAppVersionRelease(req, res) {
+  try {
+    const beforeRelease = await AppVersionRelease.getById(req.params.id)
+    const data = await AppVersionRelease.mergeToTargetRelease(
+      req.params.id,
+      req.body?.target_release_id,
+      req.user?.id,
+      {
+        sync_previous_release_info: req.body?.sync_previous_release_info !== false,
+      },
+    )
+    if (!data) {
+      return res.status(404).json({ success: false, message: 'APP发版记录不存在' })
+    }
+    try {
+      await AppVersionReleaseNotificationService.notifyApplicantStatusChanged({
+        beforeRelease,
+        afterRelease: data,
+      })
+    } catch (notifyError) {
+      console.error('发送APP版本发布状态通知失败', notifyError)
+    }
+    return res.json({ success: true, message: 'APP发版记录已同步', data })
+  } catch (error) {
+    return handleError(res, error, '同步APP发版记录失败')
+  }
+}
+
 async function updateAppVersionRelease(req, res) {
   try {
     const beforeRelease = await AppVersionRelease.getById(req.params.id)
@@ -87,8 +124,10 @@ async function deleteAppVersionRelease(req, res) {
 
 module.exports = {
   createAppVersionReleaseApplications,
+  listAppVersionReleaseSyncTargets,
   listGroupedAppVersionReleases,
   listAppVersionReleases,
+  mergeAppVersionRelease,
   updateAppVersionRelease,
   deleteAppVersionRelease,
 }
