@@ -32,6 +32,16 @@ const RELEASE_STATUS_TO_REVIEW_STAGE_MAP = new Map([
   ['LISTED', 'HOT_STANDBY'],
 ])
 const DEFAULT_RELEASE_OWNER_NAME = '赵佳颖'
+const DEFAULT_GROUP_BY = ['developer', 'app', 'status']
+const GROUP_BY_OPTIONS = [
+  { code: 'developer', name: '开发者' },
+  { code: 'app', name: 'APP' },
+  { code: 'status', name: '发版进度' },
+  { code: 'company_subject', name: '公司主体' },
+  { code: 'owner', name: '负责人' },
+  { code: 'urgency', name: '紧急程度' },
+]
+const GROUP_BY_MAP = new Map(GROUP_BY_OPTIONS.map((item) => [item.code, item]))
 
 function toPositiveInt(value) {
   const numeric = Number.parseInt(value, 10)
@@ -58,6 +68,116 @@ function normalizeOptionalCode(value) {
   return text || null
 }
 
+function normalizeGroupBy(value) {
+  const rawList = Array.isArray(value)
+    ? value
+    : String(value || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  const normalized = []
+  const seen = new Set()
+  rawList.forEach((item) => {
+    const code = String(item || '').trim().toLowerCase()
+    if (!GROUP_BY_MAP.has(code) || seen.has(code)) return
+    seen.add(code)
+    normalized.push(code)
+  })
+  return normalized.length > 0 ? normalized : DEFAULT_GROUP_BY.slice()
+}
+
+function getGroupValue(release, groupBy) {
+  switch (groupBy) {
+    case 'developer':
+      return normalizeText(release?.app_developer, 160) || '未设置开发者'
+    case 'app':
+      return normalizeText(release?.app_name, 160) || '未设置APP'
+    case 'status':
+      return {
+        value: normalizeOptionalCode(release?.release_status) || 'UNKNOWN',
+        name: normalizeText(release?.release_status_name, 80) || normalizeOptionalCode(release?.release_status) || '未设置进度',
+        color: normalizeText(release?.release_status_color, 32) || 'default',
+      }
+    case 'company_subject':
+      return normalizeText(release?.app_company_subject, 160) || '未设置公司主体'
+    case 'owner':
+      return normalizeText(release?.owner_name, 80) || '未设置负责人'
+    case 'urgency':
+      return {
+        value: normalizeOptionalCode(release?.urgency_code) || 'UNKNOWN',
+        name: normalizeText(release?.urgency_name, 80) || normalizeOptionalCode(release?.urgency_code) || '未设置紧急程度',
+        color: normalizeText(release?.urgency_color, 32) || 'default',
+      }
+    default:
+      return ''
+  }
+}
+
+function buildLeafReleaseRow(release) {
+  return {
+    ...release,
+    key: `release:${release.id}`,
+    row_type: 'release',
+    group_name: release.release_request_no || release.app_version || `记录 ${release.id}`,
+    release_count: 1,
+  }
+}
+
+function buildGroupedTree(rows = [], groupBy = DEFAULT_GROUP_BY, depth = 0, path = []) {
+  if (depth >= groupBy.length) {
+    return rows.map(buildLeafReleaseRow)
+  }
+
+  const groupKey = groupBy[depth]
+  const groupMeta = GROUP_BY_MAP.get(groupKey)
+  if (!groupMeta) {
+    return buildGroupedTree(rows, DEFAULT_GROUP_BY, 0, [])
+  }
+
+  const groupMap = new Map()
+  rows.forEach((release) => {
+    const raw = getGroupValue(release, groupKey)
+    const groupValue = typeof raw === 'object' && raw !== null ? raw.value : raw
+    const groupName = typeof raw === 'object' && raw !== null ? raw.name : raw
+    const groupColor = typeof raw === 'object' && raw !== null ? raw.color : 'default'
+    const normalizedValue = normalizeText(groupValue, 255) || `未设置${groupMeta.name}`
+    if (!groupMap.has(normalizedValue)) {
+      groupMap.set(normalizedValue, {
+        key: `group:${path.concat(`${groupKey}:${normalizedValue}`).join('>')}`,
+        row_type: 'group',
+        group_field: groupKey,
+        group_value: normalizedValue,
+        group_name: groupName || normalizedValue,
+        group_color: groupColor,
+        release_count: 0,
+        children: [],
+      })
+    }
+    const node = groupMap.get(normalizedValue)
+    node.release_count += 1
+    node.children.push(release)
+  })
+
+  return Array.from(groupMap.values()).map((node) => ({
+    ...node,
+    children: buildGroupedTree(node.children, groupBy, depth + 1, path.concat(`${groupKey}:${node.group_value}`)),
+  }))
+}
+
+function computeGroupCounts(rows = [], groupBy = DEFAULT_GROUP_BY) {
+  const result = {}
+  groupBy.forEach((field) => {
+    const values = new Set()
+    rows.forEach((item) => {
+      const raw = getGroupValue(item, field)
+      const value = typeof raw === 'object' && raw !== null ? raw.value : raw
+      values.add(normalizeText(value, 255) || `未设置${GROUP_BY_MAP.get(field)?.name || field}`)
+    })
+    result[field] = values.size
+  })
+  return result
+}
+
 function normalizeOptionalDateTime(value) {
   const text = String(value || '').trim()
   if (!text) return null
@@ -68,11 +188,6 @@ function normalizeOptionalDateTime(value) {
   err.statusCode = 400
   err.message = '时间格式不合法'
   throw err
-}
-
-function normalizePackageIds(value) {
-  if (!Array.isArray(value)) return []
-  return [...new Set(value.map((item) => toPositiveInt(item)).filter((item) => item > 0))]
 }
 
 function normalizeApplicationItems(value) {
@@ -488,22 +603,6 @@ async function syncReviewPlanByReleaseStatus(existing, nextReleaseStatus, syncCo
   })
 }
 
-function createGroupNode(key, rowType, groupName, extra = {}) {
-  return {
-    key,
-    row_type: rowType,
-    group_name: groupName,
-    release_count: 0,
-    children: [],
-    ...extra,
-  }
-}
-
-function incrementGroupCount(node) {
-  if (!node) return
-  node.release_count = Number(node.release_count || 0) + 1
-}
-
 const AppVersionRelease = {
   RELEASE_STATUS_OPTIONS,
   RELEASE_TYPE_OPTIONS,
@@ -560,6 +659,7 @@ const AppVersionRelease = {
 
   async listGrouped(filters = {}) {
     const { whereSql, params } = buildWhere(filters)
+    const groupBy = normalizeGroupBy(filters.group_by || filters.groupBy || filters['group_by[]'])
     const [rows] = await pool.query(
       `SELECT
          avr.*,
@@ -587,80 +687,16 @@ const AppVersionRelease = {
       params,
     )
 
-    const developerMap = new Map()
-    const appKeySet = new Set()
-    const statusKeySet = new Set()
-
-    rows.map(mapRow).filter(Boolean).forEach((release) => {
-      const developerName = normalizeText(release.app_developer, 160) || '未设置开发者'
-      const companySubject = normalizeText(release.app_company_subject, 160)
-      const developerKey = `${developerName}::${companySubject}`
-      if (!developerMap.has(developerKey)) {
-        developerMap.set(developerKey, createGroupNode(`developer:${developerKey}`, 'developer', developerName, {
-          app_developer: developerName,
-          app_company_subject: companySubject,
-          __appMap: new Map(),
-        }))
-      }
-
-      const developerNode = developerMap.get(developerKey)
-      incrementGroupCount(developerNode)
-
-      const appName = normalizeText(release.app_name, 160) || '未设置APP'
-      const appIdentity = normalizeText(release.app_id, 120) || normalizeText(release.domain_info, 255) || String(release.matrix_package_id || appName)
-      const appKey = `${developerKey}::${appIdentity}`
-      appKeySet.add(appKey)
-      if (!developerNode.__appMap.has(appKey)) {
-        developerNode.__appMap.set(appKey, createGroupNode(`app:${appKey}`, 'app', appName, {
-          app_name: appName,
-          app_id: release.app_id || '',
-          domain_info: release.domain_info || '',
-          matrix_package_id: release.matrix_package_id || null,
-          __statusMap: new Map(),
-        }))
-        developerNode.children.push(developerNode.__appMap.get(appKey))
-      }
-
-      const appNode = developerNode.__appMap.get(appKey)
-      incrementGroupCount(appNode)
-
-      const statusCode = release.release_status || 'UNKNOWN'
-      const statusKey = `${appKey}::${statusCode}`
-      statusKeySet.add(statusKey)
-      if (!appNode.__statusMap.has(statusKey)) {
-        appNode.__statusMap.set(statusKey, createGroupNode(`status:${statusKey}`, 'status', release.release_status_name || statusCode, {
-          release_status: statusCode,
-          release_status_name: release.release_status_name || statusCode,
-          release_status_color: release.release_status_color || 'default',
-        }))
-        appNode.children.push(appNode.__statusMap.get(statusKey))
-      }
-
-      const statusNode = appNode.__statusMap.get(statusKey)
-      incrementGroupCount(statusNode)
-      statusNode.children.push({
-        ...release,
-        key: `release:${release.id}`,
-        row_type: 'release',
-        group_name: release.release_request_no || release.app_version || `记录 ${release.id}`,
-        release_count: 1,
-      })
-    })
-
-    const stripInternalMaps = (node) => {
-      const { __appMap, __statusMap, ...rest } = node
-      return {
-        ...rest,
-        children: Array.isArray(rest.children) ? rest.children.map(stripInternalMaps) : [],
-      }
-    }
+    const mappedRows = rows.map(mapRow).filter(Boolean)
+    const tree = buildGroupedTree(mappedRows, groupBy)
+    const groupCounts = computeGroupCounts(mappedRows, groupBy)
 
     return {
-      tree: Array.from(developerMap.values()).map(stripInternalMaps),
+      tree,
       total: rows.length,
-      developer_count: developerMap.size,
-      app_count: appKeySet.size,
-      status_group_count: statusKeySet.size,
+      group_by: groupBy,
+      group_by_options: GROUP_BY_OPTIONS,
+      group_counts: groupCounts,
       release_status_options: RELEASE_STATUS_OPTIONS,
       release_type_options: RELEASE_TYPE_OPTIONS,
       urgency_options: URGENCY_OPTIONS,
