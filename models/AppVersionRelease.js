@@ -868,6 +868,7 @@ const AppVersionRelease = {
          avr.release_request_no,
          avr.app_version,
          avr.release_status,
+         avr.remark,
          DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          COALESCE(NULLIF(applicantUser.real_name, ''), applicantUser.username) AS applicant_display_name
        FROM app_version_releases avr
@@ -876,6 +877,7 @@ const AppVersionRelease = {
        WHERE avr.matrix_package_id = ?
          AND avr.deleted_at IS NULL
          AND avr.id > ?
+         AND avr.release_status IN ('PENDING_PLAN', 'QUEUED', 'IN_REVIEW')
        ORDER BY avr.created_at ASC, avr.id ASC`,
       [current.matrix_package_id || 0, releaseId],
     )
@@ -885,6 +887,7 @@ const AppVersionRelease = {
       release_request_no: row.release_request_no || '',
       app_version: row.app_version || '',
       release_status: row.release_status || '',
+      remark: row.remark || '',
       created_at: row.created_at || '',
       applicant_name: row.applicant_display_name || '',
       label: normalizeText(
@@ -990,15 +993,26 @@ const AppVersionRelease = {
       const nextRemark = current.remark
         ? `${current.remark}\n${mergedRemarkLine}`
         : mergedRemarkLine
-      const nextPreviousReleaseInfo = shouldSyncPreviousReleaseInfo
-        ? normalizeText(target.previous_release_info, 255)
-        : normalizeText(current.previous_release_info, 255)
       const operationSummary = `同步发版申请至 ${normalizeText(target.release_request_no || target.app_version || `记录${target.id}`, 120)}${shouldSyncPreviousReleaseInfo ? '' : '（未同步前序发版）'}`
+
+      if (shouldSyncPreviousReleaseInfo) {
+        await conn.query(
+          `UPDATE app_version_releases
+           SET previous_release_info = ?,
+               updated_by = ?
+           WHERE id = ? AND deleted_at IS NULL`,
+          [
+            normalizeText(current.previous_release_info, 255) || null,
+            userId || null,
+            normalizedTargetReleaseId,
+          ],
+        )
+      }
 
       await conn.query(
         `UPDATE app_version_releases
          SET release_status = 'CANCELLED',
-             previous_release_info = ?,
+             listed_at = CURRENT_DATE,
              remark = ?,
              last_operation_summary = ?,
              last_operation_user_id = ?,
@@ -1007,7 +1021,6 @@ const AppVersionRelease = {
              updated_by = ?
          WHERE id = ? AND deleted_at IS NULL`,
         [
-          nextPreviousReleaseInfo || null,
           nextRemark || null,
           operationSummary,
           toPositiveInt(userId) || null,
