@@ -402,6 +402,7 @@ async function createMatrixPackage(req, res) {
     if (MatrixPackageDemandService.shouldEnsureDemand(data)) {
       await MatrixPackageDemandService.ensureProductionDemand(data, req.user?.id || null)
       data = await MatrixPackage.getById(data.id)
+      await MatrixPackageDemandService.syncProductAcceptanceAssigneeFromPackageOwner(data, req.user?.id || null)
     }
     if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'expected_cold_ready_date') && data?.expected_cold_ready_date) {
       await MatrixPackageScheduleService.syncFromFrontendBuildT({
@@ -433,6 +434,7 @@ async function updateMatrixPackage(req, res) {
     if (MatrixPackageDemandService.shouldEnsureDemand(data)) {
       await MatrixPackageDemandService.ensureProductionDemand(data, req.user?.id || null)
       data = await MatrixPackage.getById(data.id)
+      await MatrixPackageDemandService.syncProductAcceptanceAssigneeFromPackageOwner(data, req.user?.id || null)
     }
     if (req.body && Object.prototype.hasOwnProperty.call(req.body, 'expected_cold_ready_date') && data?.expected_cold_ready_date) {
       await MatrixPackageScheduleService.syncFromFrontendBuildT({
@@ -653,6 +655,12 @@ async function updateMatrixPackageProductionNode(req, res) {
         [nextOwnerUserId],
         req.user?.id || null,
       )
+      await MatrixPackageDemandService.syncWorkflowAssigneeFromProductionNodeOwner(
+        packageDetail,
+        nodeCode,
+        nextOwnerUserId,
+        req.user?.id || null,
+      )
     }
     await notifyPreparationNodeCompletedQuietly({
       packageDetail,
@@ -774,6 +782,18 @@ async function saveMatrixPackageSideNotes(req, res) {
         ownerUserIds,
         req.user?.id || null,
       )
+      for (const item of (Array.isArray(data) ? data : [])) {
+        const noteType = String(item?.note_type || '').trim().toUpperCase()
+        const nextOwnerUserId = toPositiveInt(item?.owner_user_id)
+        if (nextOwnerUserId && nextOwnerUserId !== beforeOwnerMap.get(noteType)) {
+          await MatrixPackageDemandService.syncWorkflowAssigneeFromSideNoteOwner(
+            packageDetail,
+            noteType,
+            nextOwnerUserId,
+            req.user?.id || null,
+          )
+        }
+      }
     }
     return res.json({ success: true, message: '补充信息已保存', data: decorateMatrixPackageSideNotes(data) })
   } catch (error) {
@@ -805,6 +825,12 @@ async function patchMatrixPackageSideNoteFields(req, res) {
       await MatrixPackageDemandService.syncProductionGroupMembers(
         packageDetail,
         [afterOwnerUserId],
+        req.user?.id || null,
+      )
+      await MatrixPackageDemandService.syncWorkflowAssigneeFromSideNoteOwner(
+        packageDetail,
+        noteType,
+        afterOwnerUserId,
         req.user?.id || null,
       )
     }

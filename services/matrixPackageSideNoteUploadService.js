@@ -21,6 +21,16 @@ function buildFileSizeExceededMessage(maxFileSize) {
   return `文件大小不能超过 ${mb}MB，请压缩后再上传`
 }
 
+function buildAttachmentContentDisposition(attachment, fallback = 'inline') {
+  const disposition = String(fallback || 'inline').trim().toLowerCase() === 'attachment' ? 'attachment' : 'inline'
+  if (disposition !== 'attachment') return disposition
+
+  const fileName = normalizeText(attachment?.file_name || attachment?.filename, 255)
+  if (!fileName) return disposition
+
+  return `${disposition}; filename*=UTF-8''${encodeURIComponent(fileName)}`
+}
+
 function getMatrixPackageSideNoteSignExpireSeconds() {
   return Math.max(60, Number(process.env.MATRIX_PACKAGE_SIDE_NOTE_SIGN_EXPIRE_SECONDS || 300))
 }
@@ -43,7 +53,7 @@ function buildMatrixPackageSideNoteAccessUrl(
       objectKey,
       expireSeconds,
       securityToken: ossConfig.securityToken,
-      responseContentDisposition: contentDisposition,
+      responseContentDisposition: buildAttachmentContentDisposition(attachment, contentDisposition),
       responseCacheControl: 'public,max-age=300',
     })
     if (signedUrl) return signedUrl
@@ -139,6 +149,7 @@ function buildMatrixPackageSideNotePolicyPayload({ packageId, noteType, fieldNam
     bucket_name: oss.bucketName,
     object_key: objectKey,
     object_url: objectUrl,
+    file_name: fileName,
   }, {
     ossConfig: oss,
     expireSeconds: getMatrixPackageSideNoteSignExpireSeconds(),
@@ -148,6 +159,7 @@ function buildMatrixPackageSideNotePolicyPayload({ packageId, noteType, fieldNam
     bucket_name: oss.bucketName,
     object_key: objectKey,
     object_url: objectUrl,
+    file_name: fileName,
   }, {
     ossConfig: oss,
     expireSeconds: getMatrixPackageSideNoteSignExpireSeconds(),

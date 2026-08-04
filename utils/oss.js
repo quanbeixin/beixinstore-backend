@@ -153,7 +153,7 @@ function buildSignedGetObjectUrl({
   const normalizedEndpoint = normalizeEndpoint(endpoint)
   const normalizedObjectKey = String(objectKey || '').replace(/^\/+/, '')
   const normalizedSecurityToken = normalizeText(securityToken, 2048)
-  const normalizedResponseContentDisposition = normalizeText(responseContentDisposition, 200)
+  const normalizedResponseContentDisposition = normalizeText(responseContentDisposition, 1000)
   const normalizedResponseCacheControl = normalizeText(responseCacheControl, 200)
   const expires = Math.floor(Date.now() / 1000) + Math.max(60, Number(expireSeconds) || 300)
 

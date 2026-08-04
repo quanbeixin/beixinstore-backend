@@ -18,6 +18,13 @@ const NODE_KEYS = {
 }
 const PRODUCTION_STATUS_CODES = new Set(['IN_DEVELOPMENT', 'TESTING', 'COLD_STANDBY'])
 const PRODUCTION_DEMAND_PARTICIPANT_ROLES = ['DEMAND_OWNER', 'QA', 'PRODUCT_MANAGER', 'OPERATIONS', 'DESIGNER']
+const SIDE_NOTE_WORKFLOW_NODE_KEY_MAP = {
+  OPERATION: NODE_KEYS.OPERATION_ACCEPTANCE,
+  DESIGN: NODE_KEYS.DESIGN_ACCEPTANCE,
+}
+const PRODUCTION_NODE_WORKFLOW_NODE_KEY_MAP = {
+  FRONTEND_BUILD: NODE_KEYS.PRODUCTION,
+}
 
 function toPositiveInt(value) {
   const numeric = Number.parseInt(value, 10)
@@ -598,6 +605,137 @@ const MatrixPackageDemandService = {
         error_message: error?.message || '生产群成员同步异常',
       }
     }
+  },
+
+  async syncWorkflowNodeAssignee(matrixPackageInput, {
+    workflowNodeKey,
+    assigneeUserId,
+    operatorUserId = null,
+    comment = '',
+  } = {}) {
+    const packageId = toPositiveInt(matrixPackageInput?.id)
+    const normalizedWorkflowNodeKey = normalizeText(workflowNodeKey, 64).toUpperCase()
+    const normalizedAssigneeUserId = toPositiveInt(assigneeUserId)
+    if (!packageId || !normalizedWorkflowNodeKey || !normalizedAssigneeUserId) {
+      return {
+        success: false,
+        skipped: true,
+        reason: 'WORKFLOW_ASSIGNEE_SYNC_PARAMS_INVALID',
+      }
+    }
+
+    try {
+      const matrixPackage = matrixPackageInput?.package_name
+        ? matrixPackageInput
+        : await MatrixPackage.getById(packageId)
+      if (!matrixPackage || !shouldEnsureDemand(matrixPackage)) {
+        return {
+          success: false,
+          skipped: true,
+          reason: 'PACKAGE_NOT_IN_PRODUCTION_FLOW',
+        }
+      }
+
+      const ensureResult = await this.ensureProductionDemand(matrixPackage, operatorUserId)
+      const demandId = normalizeText(ensureResult?.demand_id || matrixPackage.linked_demand_id, 64)
+      if (!demandId) {
+        return {
+          success: false,
+          skipped: true,
+          reason: 'NO_LINKED_DEMAND',
+        }
+      }
+
+      await Workflow.assignNode({
+        demandId,
+        nodeKey: normalizedWorkflowNodeKey,
+        assigneeUserId: normalizedAssigneeUserId,
+        operatorUserId: toPositiveInt(operatorUserId) || normalizedAssigneeUserId,
+        activateTodo: false,
+        comment: comment || '矩阵包生产详情负责人同步',
+      })
+
+      return {
+        success: true,
+        demand_id: demandId,
+        workflow_node_key: normalizedWorkflowNodeKey,
+        assignee_user_id: normalizedAssigneeUserId,
+      }
+    } catch (error) {
+      const code = normalizeText(error?.code || error?.message, 100).toUpperCase()
+      if (code === 'WORKFLOW_NODE_CLOSED' || code === 'WORKFLOW_NODE_NOT_FOUND') {
+        return {
+          success: false,
+          skipped: true,
+          reason: code,
+        }
+      }
+      console.warn('矩阵包需求流程节点负责人同步失败（已忽略）:', {
+        packageId,
+        workflowNodeKey: normalizedWorkflowNodeKey,
+        assigneeUserId: normalizedAssigneeUserId,
+        message: error?.message || error,
+      })
+      return {
+        success: false,
+        skipped: true,
+        reason: 'SYNC_WORKFLOW_NODE_ASSIGNEE_ERROR',
+        error_message: error?.message || '需求流程节点负责人同步异常',
+      }
+    }
+  },
+
+  async syncWorkflowAssigneeFromSideNoteOwner(matrixPackageInput, noteType, ownerUserId, operatorUserId = null) {
+    const normalizedNoteType = normalizeText(noteType, 50).toUpperCase()
+    const workflowNodeKey = SIDE_NOTE_WORKFLOW_NODE_KEY_MAP[normalizedNoteType]
+    if (!workflowNodeKey) {
+      return {
+        success: false,
+        skipped: true,
+        reason: 'SIDE_NOTE_WORKFLOW_NODE_NOT_MAPPED',
+      }
+    }
+    return this.syncWorkflowNodeAssignee(matrixPackageInput, {
+      workflowNodeKey,
+      assigneeUserId: ownerUserId,
+      operatorUserId,
+      comment: `矩阵包${normalizedNoteType}侧负责人同步`,
+    })
+  },
+
+  async syncWorkflowAssigneeFromProductionNodeOwner(matrixPackageInput, productionNodeCode, ownerUserId, operatorUserId = null) {
+    const normalizedNodeCode = normalizeText(productionNodeCode, 50).toUpperCase()
+    const workflowNodeKey = PRODUCTION_NODE_WORKFLOW_NODE_KEY_MAP[normalizedNodeCode]
+    if (!workflowNodeKey) {
+      return {
+        success: false,
+        skipped: true,
+        reason: 'PRODUCTION_NODE_WORKFLOW_NODE_NOT_MAPPED',
+      }
+    }
+    return this.syncWorkflowNodeAssignee(matrixPackageInput, {
+      workflowNodeKey,
+      assigneeUserId: ownerUserId,
+      operatorUserId,
+      comment: '矩阵包前端产包负责人同步',
+    })
+  },
+
+  async syncProductAcceptanceAssigneeFromPackageOwner(matrixPackageInput, operatorUserId = null) {
+    const ownerUserId = toPositiveInt(matrixPackageInput?.owner_user_id)
+    if (!ownerUserId) {
+      return {
+        success: false,
+        skipped: true,
+        reason: 'PACKAGE_OWNER_EMPTY',
+      }
+    }
+    return this.syncWorkflowNodeAssignee(matrixPackageInput, {
+      workflowNodeKey: NODE_KEYS.PRODUCT_ACCEPTANCE,
+      assigneeUserId: ownerUserId,
+      operatorUserId,
+      comment: '矩阵包负责人同步为产品验收负责人',
+    })
   },
 }
 
