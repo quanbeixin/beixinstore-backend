@@ -1032,7 +1032,7 @@ async function listPendingSideDeadlineNotes() {
        ON statusDict.type_key = ?
       AND statusDict.item_code = mp.status_code
      WHERE COALESCE(mp.side_check_deadline_at, mp.expected_cold_ready_date) IS NOT NULL
-       AND mpn.note_type <> 'ADVERTISING'`,
+       AND mpn.note_type NOT IN ('ADVERTISING', 'OPPO_PUSH')`,
     [MatrixPackage.STATUS_DICT_KEY],
   )
 

@@ -256,7 +256,8 @@ curl \
 
 | 字段 | description | 说明 |
 |------|-------------|------|
-| `delivery` | PUSH信息补充 | PUSH 生产/测试环境配置 |
+| `delivery` | Google-PUSH信息补充 | Google PUSH 生产/测试环境配置 |
+| `oppo_push` | OPPO-PUSH信息补充 | OPPO PUSH 生产环境配置 |
 | `design` | 设计侧补充 | 设计资源、图片、压缩包等 |
 | `operation` | 运营侧补充 | 商店、隐私、说明、送审账号等运营信息 |
 | `frontend` | 前端补充 | sha1/sha256 指纹 |
@@ -273,7 +274,7 @@ curl \
 | `updated_by_name` | string | 该模块最近更新人 |
 | `is_confirmed` | boolean | 该模块是否已确认完成 |
 
-### 11.1 PUSH 信息补充
+### 11.1 Google-PUSH 信息补充
 
 | 字段 | description |
 |------|-------------|
@@ -286,7 +287,17 @@ curl \
 | `testAppSecret` | 测试环境个推APPSecret |
 | `testMasterSecret` | 测试环境个推MasterSecret |
 
-### 11.2 运营侧补充
+### 11.2 OPPO-PUSH 信息补充
+
+| 字段 | description |
+|------|-------------|
+| `oppoAppId` | oppoAppId |
+| `oppoAppKey` | oppoAppKey |
+| `oppoDevAppSecret` | Oppo 开发者平台 app 密钥 |
+| `oppoPushAppSecret` | Oppo Push平台 app 密钥 |
+| `oppoMasterSecret` | Oppo app master 密钥 |
+
+### 11.3 运营侧补充
 
 | 字段 | description |
 |------|-------------|
@@ -312,7 +323,7 @@ curl \
 
 说明：`contactEmail` / `officialEmail` / `privacyPolicyUrl` / `termsUrl` / `dataDeletionUrl` 为系统自动生成字段；URL 中的包名前缀沿用 H5 地址规则，统一转小写并移除不符合规则的字符。
 
-### 11.3 设计侧补充
+### 11.4 设计侧补充
 
 | 字段 | description | 类型 |
 |------|-------------|------|
@@ -324,7 +335,7 @@ curl \
 | `tokenDocUrl` | TOKEN文档 | 附件 |
 | `productFiveImagesZipPackage` | 商品5图的压缩包 | 附件 |
 
-### 11.4 前端补充
+### 11.5 前端补充
 
 | 字段 | description | 类型 |
 |------|-------------|------|
@@ -337,7 +348,7 @@ curl \
 | `testSha1Fingerprint` | 测试环境sha1指纹 | 文本 |
 | `testSha256Fingerprint` | 测试环境sha256指纹 | 文本 |
 
-### 11.5 运维补充
+### 11.6 运维补充
 
 | 字段 | description | 类型 |
 |------|-------------|------|
@@ -350,7 +361,7 @@ curl \
 | `testGooglePayCertificateUrl` | 测试环境谷歌支付证书地址 | 文本/链接 |
 | `testGooglePayCertificateContent` | 测试环境谷歌支付证书内容 | 文本 |
 
-### 11.6 投放侧补充
+### 11.7 投放侧补充
 
 | 字段 | description | 类型 |
 |------|-------------|------|

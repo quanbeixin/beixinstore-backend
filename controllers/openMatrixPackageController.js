@@ -8,7 +8,8 @@ const {
 } = require('../services/matrixPackageSideNoteUploadService')
 
 const SIDE_NOTE_SECTIONS = [
-  { type: 'DELIVERY', key: 'delivery', description: 'PUSH信息补充' },
+  { type: 'DELIVERY', key: 'delivery', description: 'Google-PUSH信息补充' },
+  { type: 'OPPO_PUSH', key: 'oppo_push', description: 'OPPO-PUSH信息补充' },
   { type: 'DESIGN', key: 'design', description: '设计侧补充' },
   { type: 'OPERATION', key: 'operation', description: '运营侧补充' },
   { type: 'FRONTEND', key: 'frontend', description: '前端补充' },
@@ -29,6 +30,13 @@ const FIELD_DEFINITIONS = {
     { name: 'testAppKey', description: '测试环境个推PUSH APP KEY' },
     { name: 'testAppSecret', description: '测试环境个推APPSecret' },
     { name: 'testMasterSecret', description: '测试环境个推MasterSecret' },
+  ],
+  OPPO_PUSH: [
+    { name: 'oppoAppId', description: 'oppoAppId' },
+    { name: 'oppoAppKey', description: 'oppoAppKey' },
+    { name: 'oppoDevAppSecret', description: 'Oppo 开发者平台 app 密钥' },
+    { name: 'oppoPushAppSecret', description: 'Oppo Push平台 app 密钥' },
+    { name: 'oppoMasterSecret', description: 'Oppo app master 密钥' },
   ],
   OPERATION: [
     { name: 'appOrigin', description: 'appOrigin' },
