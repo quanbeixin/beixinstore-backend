@@ -1,4 +1,5 @@
 const MatrixPackage = require('../models/MatrixPackage')
+const MatrixPackageDeliveryPlatform = require('../models/MatrixPackageDeliveryPlatform')
 const MatrixPackageProductionNode = require('../models/MatrixPackageProductionNode')
 const MatrixPackageSideNote = require('../models/MatrixPackageSideNote')
 const MatrixPackageNotificationService = require('../services/matrixPackageNotificationService')
@@ -378,9 +379,25 @@ function handleError(res, error, fallbackMessage) {
 async function listMatrixPackages(req, res) {
   try {
     const data = await MatrixPackage.list(req.query || {})
+    const overviewByPackageId = await MatrixPackageDeliveryPlatform.listByPackageIds(
+      (data.list || []).map((item) => item.id),
+    )
+    data.list = (data.list || []).map((item) => ({
+      ...item,
+      delivery_platform_overview: overviewByPackageId.get(Number(item.id)) || [],
+    }))
     return res.json({ success: true, data })
   } catch (error) {
     return handleError(res, error, '获取矩阵包列表失败')
+  }
+}
+
+async function getMatrixPackageDeliveryPlatformOverview(req, res) {
+  try {
+    const data = await MatrixPackageDeliveryPlatform.getGlobalOverview()
+    return res.json({ success: true, data })
+  } catch (error) {
+    return handleError(res, error, '获取平台投放总览失败')
   }
 }
 
@@ -390,9 +407,36 @@ async function getMatrixPackage(req, res) {
     if (!data) {
       return res.status(404).json({ success: false, message: '矩阵包不存在' })
     }
+    data.delivery_platform_overview = await MatrixPackageDeliveryPlatform.listByPackageId(data.id)
     return res.json({ success: true, data })
   } catch (error) {
     return handleError(res, error, '获取矩阵包详情失败')
+  }
+}
+
+async function listMatrixPackageDeliveryPlatforms(req, res) {
+  try {
+    const matrixPackage = await MatrixPackage.getById(req.params.id)
+    if (!matrixPackage) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    const data = await MatrixPackageDeliveryPlatform.listByPackageId(matrixPackage.id)
+    return res.json({ success: true, data })
+  } catch (error) {
+    return handleError(res, error, '获取投放平台信息概览失败')
+  }
+}
+
+async function saveMatrixPackageDeliveryPlatforms(req, res) {
+  try {
+    const data = await MatrixPackageDeliveryPlatform.replaceByPackageId(
+      req.params.id,
+      req.body?.items,
+      req.user?.id,
+    )
+    return res.json({ success: true, message: '投放平台信息概览已保存', data })
+  } catch (error) {
+    return handleError(res, error, '保存投放平台信息概览失败')
   }
 }
 
@@ -486,7 +530,6 @@ async function completeMatrixPackageProductionStageCore(beforePackage, operatorU
       delivery_status_code: beforePackage.delivery_status_code || null,
       owner_user_id: beforePackage.owner_user_id || null,
       status_code: 'TESTING',
-      health_code: null,
       production_stage_code: beforePackage.production_stage_code || null,
       expected_cold_ready_date: beforePackage.expected_cold_ready_date || null,
       latest_progress: beforePackage.latest_progress || '',
@@ -988,7 +1031,10 @@ async function downloadMatrixPackageDataSafetyFile(req, res) {
 
 module.exports = {
   listMatrixPackages,
+  getMatrixPackageDeliveryPlatformOverview,
   getMatrixPackage,
+  listMatrixPackageDeliveryPlatforms,
+  saveMatrixPackageDeliveryPlatforms,
   createMatrixPackage,
   updateMatrixPackage,
   completeMatrixPackageProduction,

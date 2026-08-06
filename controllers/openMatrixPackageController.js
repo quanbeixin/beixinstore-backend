@@ -1,4 +1,5 @@
 const pool = require('../utils/db')
+const MatrixPackageDeliveryPlatform = require('../models/MatrixPackageDeliveryPlatform')
 const {
   buildSignedGetObjectUrl,
   getOssConfigFromEnv,
@@ -652,6 +653,18 @@ function buildProductionNodes(row, productionNodesByPackageId) {
 
 function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackageId, options = {}) {
   const sideNotes = sideNotesByPackageId.get(Number(row.id)) || new Map()
+  const deliveryPlatforms = options.deliveryPlatformsByPackageId?.get(Number(row.id)) || []
+  const platformCodes = deliveryPlatforms.length > 0
+    ? deliveryPlatforms.map((item) => item.platform_code).filter(Boolean)
+    : normalizePlatformCodes(row.platform)
+  const channelCodes = Array.from(new Set(deliveryPlatforms.map((item) => item.channel_code).filter(Boolean)))
+  const statusCodes = Array.from(new Set(deliveryPlatforms.map((item) => item.status_code).filter(Boolean)))
+  const commonChannel = channelCodes.length === 1
+    ? deliveryPlatforms.find((item) => item.channel_code === channelCodes[0])
+    : null
+  const commonStatus = statusCodes.length === 1
+    ? deliveryPlatforms.find((item) => item.status_code === statusCodes[0])
+    : null
   const sections = {}
 
   SIDE_NOTE_SECTIONS.forEach((section) => {
@@ -707,24 +720,36 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
     package_name: field('矩阵包名', row.package_name || ''),
     app_id: field('包ID（应用ID）', row.app_id || ''),
     domain_info: field('域名信息', row.domain_info || ''),
-    delivery_platform: field('投放平台', normalizePlatformCodes(row.platform)),
+    delivery_platform: field('投放平台', platformCodes),
     delivery_channel: field('投放渠道', {
-      code: row.delivery_channel_code || '',
-      name: row.delivery_channel_name || row.delivery_channel_code || '',
+      code: deliveryPlatforms.length > 0 ? commonChannel?.channel_code || '' : row.delivery_channel_code || '',
+      name: deliveryPlatforms.length > 0 ? commonChannel?.channel_name || '' : row.delivery_channel_name || row.delivery_channel_code || '',
     }),
     delivery_status: field('投放状态', {
-      code: row.delivery_status_code || '',
-      name: row.delivery_status_name || row.delivery_status_code || '',
+      code: deliveryPlatforms.length > 0 ? commonStatus?.status_code || '' : row.delivery_status_code || '',
+      name: deliveryPlatforms.length > 0 ? commonStatus?.status_name || '' : row.delivery_status_name || row.delivery_status_code || '',
     }),
+    delivery_platform_overview: field('投放平台信息概览', deliveryPlatforms.map((item) => ({
+      platform: field('投放平台', {
+        code: item.platform_code || '',
+        name: item.platform_name || item.platform_code || '',
+      }),
+      channel: field('投放渠道', {
+        code: item.channel_code || '',
+        name: item.channel_name || item.channel_code || '',
+      }),
+      status: field('平台状态', {
+        code: item.status_code || '',
+        name: item.status_name || item.status_code || '',
+      }),
+      updated_by_name: field('最近修改人', item.updated_by_name || ''),
+      updated_at: field('最近修改时间', item.updated_at || null),
+    }))),
     has_operated: field('是否运营过', Number(row.has_operated || 0) === 1),
     new_package_version: field('新包版本', row.new_package_version || ''),
     status: field('包状态', {
       code: row.status_code || '',
       name: row.status_name || row.status_code || '',
-    }),
-    health: field('健康度', {
-      code: row.health_code || '',
-      name: row.health_name || row.health_code || '',
     }),
     expected_cold_ready_date: field('预计生产完成时间', row.expected_cold_ready_date || null),
     side_check_deadline_at: field('统一截止时间', row.side_check_deadline_at || null),
@@ -782,8 +807,6 @@ async function listOpenMatrixPackages(req, res) {
          mp.new_package_version,
          mp.status_code,
          statusDict.item_name AS status_name,
-         mp.health_code,
-         healthDict.item_name AS health_name,
          DATE_FORMAT(mp.expected_cold_ready_date, '%Y-%m-%d %H:%i:%s') AS expected_cold_ready_date,
          DATE_FORMAT(mp.side_check_deadline_at, '%Y-%m-%d %H:%i:%s') AS side_check_deadline_at,
          mp.owner_name,
@@ -815,9 +838,6 @@ async function listOpenMatrixPackages(req, res) {
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = 'matrix_package_status'
         AND statusDict.item_code = mp.status_code
-       LEFT JOIN config_dict_items healthDict
-         ON healthDict.type_key = 'matrix_package_health'
-        AND healthDict.item_code = mp.health_code
       LEFT JOIN config_dict_items deliveryStatusDict
         ON deliveryStatusDict.type_key = 'matrix_package_delivery_status'
        AND deliveryStatusDict.item_code = mp.delivery_status_code
@@ -835,6 +855,9 @@ async function listOpenMatrixPackages(req, res) {
     const packageIds = packageRows.map((row) => Number(row.id)).filter(Boolean)
     const sideNotesByPackageId = new Map()
     const productionNodesByPackageId = new Map()
+    const deliveryPlatformsByPackageId = packageIds.length > 0
+      ? await MatrixPackageDeliveryPlatform.listByPackageIds(packageIds)
+      : new Map()
     if (packageIds.length > 0) {
       const [noteRows] = await pool.query(
         `SELECT
@@ -899,7 +922,11 @@ async function listOpenMatrixPackages(req, res) {
 
     const ossConfig = getOssConfigFromEnv()
     const expireSeconds = Math.max(60, Number(process.env.MATRIX_PACKAGE_OPEN_API_SIGN_EXPIRE_SECONDS || process.env.MATRIX_PACKAGE_SIDE_NOTE_SIGN_EXPIRE_SECONDS || 300))
-    const data = packageRows.map((row) => buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackageId, { ossConfig, expireSeconds }))
+    const data = packageRows.map((row) => buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackageId, {
+      ossConfig,
+      expireSeconds,
+      deliveryPlatformsByPackageId,
+    }))
 
     return res.json({
       success: true,

@@ -477,11 +477,10 @@ const MatrixPackageReviewPlan = {
       await pool.query(
         `UPDATE matrix_packages
          SET status_code = ?,
-             health_code = CASE WHEN ? = 'DELIVERING' THEN COALESCE(health_code, 'NORMAL') ELSE NULL END,
              has_operated = CASE WHEN ? = 'DELIVERING' THEN 1 ELSE has_operated END,
              updated_by = ?
          WHERE id = ? AND deleted_at IS NULL`,
-        [nextPackageStatus, nextPackageStatus, nextPackageStatus, userId || null, normalizedPackageId],
+        [nextPackageStatus, nextPackageStatus, userId || null, normalizedPackageId],
       )
     }
 
@@ -565,11 +564,10 @@ const MatrixPackageReviewPlan = {
       await pool.query(
         `UPDATE matrix_packages
          SET status_code = ?,
-             health_code = CASE WHEN ? = 'DELIVERING' THEN COALESCE(health_code, 'NORMAL') ELSE NULL END,
              has_operated = CASE WHEN ? = 'DELIVERING' THEN 1 ELSE has_operated END,
              updated_by = ?
          WHERE id = ? AND deleted_at IS NULL`,
-        [nextPackageStatus, nextPackageStatus, nextPackageStatus, userId || null, normalizedPackageId],
+        [nextPackageStatus, nextPackageStatus, userId || null, normalizedPackageId],
       )
     }
 

@@ -2,7 +2,6 @@ const pool = require('../utils/db')
 const DeveloperAccount = require('./DeveloperAccount')
 
 const STATUS_DICT_KEY = 'matrix_package_status'
-const HEALTH_DICT_KEY = 'matrix_package_health'
 const PLATFORM_DICT_KEY = 'matrix_package_delivery_platform'
 const DELIVERY_STATUS_DICT_KEY = 'matrix_package_delivery_status'
 const DELIVERY_CHANNEL_DICT_KEY = 'matrix_package_delivery_channel'
@@ -149,9 +148,6 @@ function mapRow(row) {
     status_code: row.status_code || '',
     status_name: row.status_name || row.status_code || '',
     status_color: row.status_color || '',
-    health_code: row.health_code || '',
-    health_name: row.health_name || row.health_code || '',
-    health_color: row.health_color || '',
     production_stage_code: row.production_stage_code || '',
     production_stage_name: row.production_stage_name || row.production_stage_code || '',
     production_stage_color: row.production_stage_color || '',
@@ -213,7 +209,21 @@ function buildWhere(filters = {}) {
 
   const keyword = normalizeText(filters.keyword, 100)
   if (keyword) {
-    clauses.push('(mp.package_name LIKE ? OR mp.app_id LIKE ? OR mp.new_package_version LIKE ? OR mp.domain_info LIKE ? OR mp.platform LIKE ? OR mp.owner_name LIKE ? OR ownerUser.real_name LIKE ? OR ownerUser.username LIKE ? OR da.account_name LIKE ? OR COALESCE(developerCompanyDict.item_name, da.company_name) LIKE ?)')
+    clauses.push(`(mp.package_name LIKE ?
+      OR mp.app_id LIKE ?
+      OR mp.new_package_version LIKE ?
+      OR mp.domain_info LIKE ?
+      OR EXISTS (
+        SELECT 1
+        FROM matrix_package_delivery_platforms keywordPlatform
+        WHERE keywordPlatform.package_id = mp.id
+          AND keywordPlatform.platform_code LIKE ?
+      )
+      OR mp.owner_name LIKE ?
+      OR ownerUser.real_name LIKE ?
+      OR ownerUser.username LIKE ?
+      OR da.account_name LIKE ?
+      OR COALESCE(developerCompanyDict.item_name, da.company_name) LIKE ?)`)
     const like = `%${keyword}%`
     params.push(like, like, like, like, like, like, like, like, like, like)
   }
@@ -238,28 +248,28 @@ function buildWhere(filters = {}) {
     params.push(...PRODUCTION_STATUS_CODES)
   }
 
-  const healthCode = normalizeOptionalCode(filters.health_code)
-  if (healthCode) {
-    clauses.push('mp.health_code = ?')
-    params.push(healthCode)
-  }
-
-  const platformCodes = normalizePlatformCodes(filters.platform)
-  if (platformCodes.length > 0) {
-    clauses.push(`(${platformCodes.map(() => 'FIND_IN_SET(?, mp.platform)').join(' OR ')})`)
-    params.push(...platformCodes)
-  }
-
-  const deliveryStatusCode = normalizeOptionalCode(filters.delivery_status_code)
-  if (deliveryStatusCode) {
-    clauses.push('mp.delivery_status_code = ?')
-    params.push(deliveryStatusCode)
-  }
-
-  const deliveryChannelCode = normalizeOptionalCode(filters.delivery_channel_code)
-  if (deliveryChannelCode) {
-    clauses.push('mp.delivery_channel_code = ?')
-    params.push(deliveryChannelCode)
+  const platformCodes = normalizePlatformCodes(filters.platform_code || filters.platform)
+  const platformStatusCode = normalizeOptionalCode(filters.platform_status_code || filters.delivery_status_code)
+  const channelCode = normalizeOptionalCode(filters.channel_code || filters.delivery_channel_code)
+  if (platformCodes.length > 0 || platformStatusCode || channelCode) {
+    const overviewClauses = ['overviewFilter.package_id = mp.id']
+    if (platformCodes.length > 0) {
+      overviewClauses.push(`overviewFilter.platform_code IN (${platformCodes.map(() => '?').join(', ')})`)
+      params.push(...platformCodes)
+    }
+    if (channelCode) {
+      overviewClauses.push('overviewFilter.channel_code = ?')
+      params.push(channelCode)
+    }
+    if (platformStatusCode) {
+      overviewClauses.push('overviewFilter.status_code = ?')
+      params.push(platformStatusCode)
+    }
+    clauses.push(`EXISTS (
+      SELECT 1
+      FROM matrix_package_delivery_platforms overviewFilter
+      WHERE ${overviewClauses.join(' AND ')}
+    )`)
   }
 
   const ownerName = normalizeText(filters.owner_name, 80)
@@ -295,7 +305,6 @@ function buildWhere(filters = {}) {
 
 const MatrixPackage = {
   STATUS_DICT_KEY,
-  HEALTH_DICT_KEY,
 
   async list(filters = {}) {
     const page = Math.max(toPositiveInt(filters.page) || 1, 1)
@@ -338,12 +347,6 @@ const MatrixPackage = {
            WHEN mp.status_code = 'IN_REVIEW' THEN 3
            ELSE 9
          END ASC,
-         CASE mp.health_code
-           WHEN 'ABNORMAL' THEN 1
-           WHEN 'WATCH' THEN 2
-           WHEN 'NORMAL' THEN 3
-           ELSE 9
-         END ASC,
          mp.updated_at DESC,
          mp.id DESC`
 
@@ -378,7 +381,7 @@ const MatrixPackage = {
          SUM(CASE WHEN mp.status_code = 'IN_REVIEW' AND latestRelease.release_type = 'FIRST_RELEASE' THEN 1 ELSE 0 END) AS in_review_first_release,
          SUM(CASE WHEN mp.status_code = 'HOT_STANDBY' THEN 1 ELSE 0 END) AS hot_standby,
          SUM(CASE WHEN mp.status_code IN ('HOT_STANDBY', 'COLD_STANDBY') THEN 1 ELSE 0 END) AS standby,
-         SUM(CASE WHEN mp.status_code = 'BANNED' OR mp.health_code = 'ABNORMAL' THEN 1 ELSE 0 END) AS abnormal
+         SUM(CASE WHEN mp.status_code = 'BANNED' THEN 1 ELSE 0 END) AS abnormal
        FROM matrix_packages mp
        LEFT JOIN users ownerUser
          ON ownerUser.id = mp.owner_user_id
@@ -430,9 +433,6 @@ const MatrixPackage = {
          mp.status_code,
          statusDict.item_name AS status_name,
          statusDict.color AS status_color,
-         mp.health_code,
-         healthDict.item_name AS health_name,
-         healthDict.color AS health_color,
          mp.production_stage_code,
          productionStageDict.item_name AS production_stage_name,
          productionStageDict.color AS production_stage_color,
@@ -509,9 +509,6 @@ const MatrixPackage = {
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = ?
         AND statusDict.item_code = mp.status_code
-       LEFT JOIN config_dict_items healthDict
-         ON healthDict.type_key = ?
-        AND healthDict.item_code = mp.health_code
        LEFT JOIN config_dict_items productionStageDict
          ON productionStageDict.type_key = ?
         AND productionStageDict.item_code = mp.production_stage_code
@@ -528,7 +525,6 @@ const MatrixPackage = {
       [
         ...COMPLETION_SIDE_NOTE_TYPES,
         STATUS_DICT_KEY,
-        HEALTH_DICT_KEY,
         PRODUCTION_STAGE_DICT_KEY,
         DELIVERY_STATUS_DICT_KEY,
         DELIVERY_CHANNEL_DICT_KEY,
@@ -590,9 +586,6 @@ const MatrixPackage = {
          mp.status_code,
          statusDict.item_name AS status_name,
          statusDict.color AS status_color,
-         mp.health_code,
-         healthDict.item_name AS health_name,
-         healthDict.color AS health_color,
          mp.production_stage_code,
          productionStageDict.item_name AS production_stage_name,
          productionStageDict.color AS production_stage_color,
@@ -649,9 +642,6 @@ const MatrixPackage = {
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = ?
         AND statusDict.item_code = mp.status_code
-       LEFT JOIN config_dict_items healthDict
-         ON healthDict.type_key = ?
-        AND healthDict.item_code = mp.health_code
        LEFT JOIN config_dict_items productionStageDict
          ON productionStageDict.type_key = ?
         AND productionStageDict.item_code = mp.production_stage_code
@@ -666,7 +656,6 @@ const MatrixPackage = {
       [
         ...COMPLETION_SIDE_NOTE_TYPES,
         STATUS_DICT_KEY,
-        HEALTH_DICT_KEY,
         PRODUCTION_STAGE_DICT_KEY,
         DELIVERY_STATUS_DICT_KEY,
         DELIVERY_CHANNEL_DICT_KEY,
@@ -680,8 +669,8 @@ const MatrixPackage = {
     const normalized = await this.normalizePayload(payload)
     const [result] = await pool.query(
       `INSERT INTO matrix_packages
-       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, delivery_channel_code, delivery_status_code, has_operated, owner_user_id, owner_name, status_code, health_code, production_stage_code, expected_cold_ready_date, expected_cold_ready_date_source, side_check_deadline_at, side_check_deadline_source, latest_progress, production_checklist, created_by, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (developer_account_id, package_name, app_id, new_package_version, domain_info, platform, delivery_channel_code, delivery_status_code, has_operated, owner_user_id, owner_name, status_code, production_stage_code, expected_cold_ready_date, expected_cold_ready_date_source, side_check_deadline_at, side_check_deadline_source, latest_progress, production_checklist, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         normalized.developer_account_id,
         normalized.package_name,
@@ -695,7 +684,6 @@ const MatrixPackage = {
         normalized.owner_user_id,
         normalized.owner_name,
         normalized.status_code,
-        normalized.health_code,
         normalized.production_stage_code,
         normalized.expected_cold_ready_date,
         normalized.expected_cold_ready_date_source,
@@ -732,7 +720,6 @@ const MatrixPackage = {
            owner_user_id = ?,
            owner_name = ?,
            status_code = ?,
-           health_code = ?,
            production_stage_code = ?,
            expected_cold_ready_date = ?,
            expected_cold_ready_date_source = ?,
@@ -755,7 +742,6 @@ const MatrixPackage = {
         normalized.owner_user_id,
         normalized.owner_name,
         normalized.status_code,
-        normalized.health_code,
         normalized.production_stage_code,
         normalized.expected_cold_ready_date,
         normalized.expected_cold_ready_date_source,
@@ -822,14 +808,6 @@ const MatrixPackage = {
       const err = new Error('status_code_invalid')
       err.statusCode = 400
       err.message = '包状态不合法'
-      throw err
-    }
-
-    const healthCode = statusCode === 'DELIVERING' ? normalizeOptionalCode(payload.health_code) : null
-    if (statusCode === 'DELIVERING' && !(await validateDictCode(HEALTH_DICT_KEY, healthCode))) {
-      const err = new Error('health_code_invalid')
-      err.statusCode = 400
-      err.message = '运营中的矩阵包必须选择健康度'
       throw err
     }
 
@@ -980,7 +958,6 @@ const MatrixPackage = {
       owner_user_id: ownerUser.id,
       owner_name: normalizeText(ownerUser.displayName, 80),
       status_code: statusCode,
-      health_code: healthCode,
       production_stage_code: productionStageCode,
       expected_cold_ready_date: expectedColdReadyDate,
       expected_cold_ready_date_source: expectedColdReadyDate ? expectedColdReadyDateSource : null,

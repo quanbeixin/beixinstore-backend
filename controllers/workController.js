@@ -558,7 +558,6 @@ async function syncMatrixPackageAfterAcceptanceCompleted({ demandId, fromNodeKey
       delivery_status_code: beforePackage.delivery_status_code || null,
       owner_user_id: beforePackage.owner_user_id || null,
       status_code: 'COLD_STANDBY',
-      health_code: null,
       production_stage_code: beforePackage.production_stage_code || null,
       expected_cold_ready_date: beforePackage.expected_cold_ready_date || null,
       latest_progress: beforePackage.latest_progress || '',

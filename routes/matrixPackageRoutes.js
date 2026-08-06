@@ -7,6 +7,8 @@ const {
   deleteMatrixPackage,
   downloadMatrixPackageDataSafetyFile,
   getMatrixPackage,
+  getMatrixPackageDeliveryPlatformOverview,
+  listMatrixPackageDeliveryPlatforms,
   remindMatrixPackageProductionNode,
   remindMatrixPackageSideNote,
   listMatrixPackageProductionNodes,
@@ -15,6 +17,7 @@ const {
   listMatrixPackages,
   patchMatrixPackageSideNoteFields,
   saveMatrixPackageSideNotes,
+  saveMatrixPackageDeliveryPlatforms,
   syncMatrixPackageDevopsMeta,
   updateMatrixPackageProductionNode,
   updateMatrixPackage,
@@ -25,7 +28,9 @@ const router = express.Router()
 router.use(authMiddleware)
 
 router.get('/', authMiddleware.requirePermission('matrix_package.view'), listMatrixPackages)
+router.get('/delivery-platform-overview', authMiddleware.requirePermission('matrix_package.view'), getMatrixPackageDeliveryPlatformOverview)
 router.get('/:id', authMiddleware.requirePermission('matrix_package.view'), getMatrixPackage)
+router.get('/:id/delivery-platforms', authMiddleware.requirePermission('matrix_package.view'), listMatrixPackageDeliveryPlatforms)
 router.get('/:id/production-nodes', authMiddleware.requirePermission('matrix_package.view'), listMatrixPackageProductionNodes)
 router.post('/:id/complete-production', authMiddleware.requirePermission('matrix_package.manage'), completeMatrixPackageProduction)
 router.put('/:id/production-nodes/:nodeCode', authMiddleware.requirePermission('matrix_package.manage'), updateMatrixPackageProductionNode)
@@ -33,6 +38,7 @@ router.post('/:id/production-nodes/:nodeCode/remind', authMiddleware.requirePerm
 router.get('/:id/side-notes', authMiddleware.requirePermission('matrix_package.view'), listMatrixPackageSideNotes)
 router.get('/:id/data-safety-file', authMiddleware.requirePermission('matrix_package.view'), downloadMatrixPackageDataSafetyFile)
 router.put('/:id/side-notes', authMiddleware.requirePermission('matrix_package.manage'), saveMatrixPackageSideNotes)
+router.put('/:id/delivery-platforms', authMiddleware.requirePermission('matrix_package.manage'), saveMatrixPackageDeliveryPlatforms)
 router.patch('/:id/side-notes/:noteType/fields', authMiddleware.requirePermission('matrix_package.manage'), patchMatrixPackageSideNoteFields)
 router.post('/:id/side-notes/upload-policy', authMiddleware.requirePermission('matrix_package.manage'), getMatrixPackageSideNoteUploadPolicy)
 router.post('/:id/side-notes/:noteType/confirm', authMiddleware.requirePermission('matrix_package.manage'), confirmMatrixPackageSideNote)

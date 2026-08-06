@@ -156,6 +156,18 @@ curl \
           "name": "在投"
         }
       },
+      "delivery_platform_overview": {
+        "description": "投放平台信息概览",
+        "value": [
+          {
+            "platform": { "description": "投放平台", "value": { "code": "META", "name": "Meta" } },
+            "channel": { "description": "投放渠道", "value": { "code": "SELF", "name": "自投" } },
+            "status": { "description": "平台状态", "value": { "code": "ACTIVE", "name": "在投" } },
+            "updated_by_name": { "description": "最近修改人", "value": "田甜" },
+            "updated_at": { "description": "最近修改时间", "value": "2026-08-06 15:20:00" }
+          }
+        ]
+      },
       "has_operated": {
         "description": "是否运营过",
         "value": true
@@ -213,12 +225,12 @@ curl \
 | `app_id` | 包ID（应用ID） | 应用包 ID |
 | `domain_info` | 域名信息 | 矩阵包域名 |
 | `delivery_platform` | 投放平台 | 返回平台编码数组，如 `["META", "GOOGLE"]` |
-| `delivery_channel` | 投放渠道 | 返回 `{ code, name }`，当前枚举为 `SELF`/自投、`AGENCY`/代理 |
-| `delivery_status` | 投放状态 | 返回 `{ code, name }`，当前枚举为 `ACTIVE`/在投、`STOPPED`/停投 |
+| `delivery_channel` | 投放渠道 | 旧版单值兼容字段；全部平台渠道相同时返回 `{ code, name }`，否则返回空值 |
+| `delivery_status` | 投放状态 | 旧版单值兼容字段；全部平台状态相同时返回 `{ code, name }`，否则返回空值 |
+| `delivery_platform_overview` | 投放平台信息概览 | 按平台返回投放渠道、平台状态、最近修改人和最近修改时间；状态支持 `PENDING`/待投、`ACTIVE`/在投、`STOPPED`/停投、`BANNED`/封禁 |
 | `has_operated` | 是否运营过 | 布尔值，表示该矩阵包是否曾进入运营状态 |
 | `new_package_version` | 新包版本 | 新包版本 |
 | `status` | 包状态 | 返回 `{ code, name }` |
-| `health` | 健康度 | 返回 `{ code, name }` |
 | `expected_cold_ready_date` | 预计生产完成时间 | 冷备包生产线里的预计生产完成时间 |
 | `side_check_deadline_at` | 统一截止时间 | 各侧信息 check 的统一截止时间 |
 | `owner_name` | 矩阵包负责人 | 矩阵包总负责人 |
@@ -228,6 +240,8 @@ curl \
 | `production_nodes` | 前置准备 | 生产详情页前置准备模块 |
 | `created_at` | 创建时间 | 矩阵包创建时间 |
 | `updated_at` | 更新时间 | 矩阵包更新时间 |
+
+`delivery_platform`、`delivery_channel`、`delivery_status` 为旧版兼容字段；新接入方应使用 `delivery_platform_overview`。当多个平台的渠道或状态不一致时，对应旧版单值字段返回空值。
 
 ## 9. 关联需求字段
 

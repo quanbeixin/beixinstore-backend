@@ -18,3 +18,4 @@ node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-27-matrix-pa
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-27-matrix-package-product-acceptance-gate-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-28-matrix-package-schedule-source-up.sql
 node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-07-28-matrix-package-frontend-build-node-up.sql
+node docs/migrations/run-sql-with-mysql2.js docs/migrations/2026-08-06-matrix-package-delivery-platform-overview-up.sql
