@@ -198,7 +198,7 @@ function buildMorningStandupContextSummary(boardData = {}, contextParams = {}) {
 
 function normalizeDemandStatus(value) {
   const status = normalizeText(value, 32).toUpperCase()
-  if (['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED'].includes(status)) return status
+  if (['TODO', 'IN_PROGRESS', 'PAUSED', 'DONE', 'CANCELLED'].includes(status)) return status
   return ''
 }
 
@@ -211,6 +211,7 @@ function normalizeDemandPriority(value) {
 function getDemandStatusLabel(status) {
   if (status === 'TODO') return '待开始'
   if (status === 'IN_PROGRESS') return '进行中'
+  if (status === 'PAUSED') return '已挂起'
   if (status === 'DONE') return '已完成'
   if (status === 'CANCELLED') return '已中止'
   return status || '-'
@@ -356,7 +357,7 @@ function buildDemandPoolContextSummary(payload = {}, contextParams = {}) {
     `查看范围：${filters.scopeLabel || '全部需求'}`,
     `更新时间范围：${filters.updatedRangeLabel || '不限'}`,
     `命中需求数：${total}`,
-    `状态分布：${buildCountText(statusCountMap, ['待开始', '进行中', '已完成', '已中止'])}`,
+    `状态分布：${buildCountText(statusCountMap, ['待开始', '进行中', '已挂起', '已完成', '已中止'])}`,
     `优先级分布：${buildCountText(priorityCountMap, ['P0', 'P1', 'P2', 'P3', '-'])}`,
     `健康度分布：${buildCountText(healthCountMap, ['风险', '预警', '健康'])}`,
     `当前阶段分布：${buildCountText(phaseCountMap)}`,

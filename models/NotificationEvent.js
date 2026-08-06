@@ -380,6 +380,7 @@ const STATUS_CN_MAP = Object.freeze({
   TODO: '待处理',
   NOT_STARTED: '未开始',
   IN_PROGRESS: '进行中',
+  PAUSED: '已挂起',
   DONE: '已完成',
   CANCELLED: '已取消',
   RETURNED: '已退回',

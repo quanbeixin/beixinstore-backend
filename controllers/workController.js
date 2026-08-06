@@ -1046,7 +1046,7 @@ function parseOptionalNonNegativeNumber(value, { scale = 2 } = {}) {
 }
 
 function isDemandOpen(status) {
-  return status === 'TODO' || status === 'IN_PROGRESS'
+  return status === 'TODO' || status === 'IN_PROGRESS' || status === 'PAUSED'
 }
 
 function hasPermission(req, code) {
@@ -1785,7 +1785,7 @@ const listDemands = async (req, res) => {
   }
 
   try {
-    const { rows, total, allTotal, completedTotal, cancelledTotal, groupCounts } = await Work.listDemands({
+    const { rows, total, allTotal, inProgressTotal, completedTotal, cancelledTotal, pausedTotal, groupCounts } = await Work.listDemands({
       page,
       pageSize,
       keyword,
@@ -1815,8 +1815,10 @@ const listDemands = async (req, res) => {
         list: rows,
         total,
         all_total: allTotal,
+        in_progress_total: Number(inProgressTotal || 0),
         completed_total: Number(completedTotal || 0),
         cancelled_total: Number(cancelledTotal || 0),
+        paused_total: Number(pausedTotal || 0),
         group_counts: groupCounts || [],
         page,
         pageSize,

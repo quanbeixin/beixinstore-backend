@@ -5,7 +5,7 @@ const {
   filterTemplateGraphByParticipantRoles,
 } = require('../utils/projectTemplateWorkflowGraph')
 
-const DEMAND_STATUSES = ['TODO', 'IN_PROGRESS', 'DONE', 'CANCELLED']
+const DEMAND_STATUSES = ['TODO', 'IN_PROGRESS', 'PAUSED', 'DONE', 'CANCELLED']
 const DEMAND_PRIORITIES = ['P0', 'P1', 'P2', 'P3']
 const DEMAND_MANAGEMENT_MODES = ['simple', 'advanced']
 const DEMAND_HEALTH_STATUSES = ['green', 'yellow', 'red']
@@ -2785,11 +2785,6 @@ const Work = {
       baseParams.push(`%${keyword}%`, `%${keyword}%`)
     }
 
-    if (status) {
-      baseConditions.push('d.status = ?')
-      baseParams.push(normalizeStatus(status))
-    }
-
     if (priority) {
       baseConditions.push('d.priority = ?')
       baseParams.push(normalizePriority(priority))
@@ -2860,6 +2855,14 @@ const Work = {
       baseConditions.push('d.expected_release_date IS NOT NULL')
     }
 
+    const countBaseConditions = [...baseConditions]
+    const countBaseParams = [...baseParams]
+
+    if (status) {
+      baseConditions.push('d.status = ?')
+      baseParams.push(normalizeStatus(status))
+    }
+
     const conditions = [...baseConditions]
     const params = [...baseParams]
 
@@ -2881,7 +2884,7 @@ const Work = {
       params.push(businessGroupCode)
     }
 
-    const activeConditions = [...baseConditions, "d.status <> 'DONE'", "d.status <> 'CANCELLED'"]
+    const activeConditions = [...countBaseConditions, "d.status <> 'DONE'", "d.status <> 'CANCELLED'"]
     const activeWhereSql = activeConditions.join(' AND ')
     const whereSql = conditions.join(' AND ')
     const normalizedPriorityOrder = String(priorityOrder || '').trim().toLowerCase() === 'desc' ? 'DESC' : 'ASC'
@@ -3199,8 +3202,10 @@ const Work = {
     const [
       [[{ total }]],
       [[{ all_total: allTotal }]],
+      [[{ in_progress_total: inProgressTotal }]],
       [[{ completed_total: completedTotal }]],
       [[{ cancelled_total: cancelledTotal }]],
+      [[{ paused_total: pausedTotal }]],
       [groupCountRows],
       [templatePhaseRows],
     ] = await Promise.all([
@@ -3214,21 +3219,35 @@ const Work = {
         `SELECT COUNT(*) AS all_total
          FROM work_demands d
          WHERE ${activeWhereSql}`,
-        baseParams,
+        countBaseParams,
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS in_progress_total
+         FROM work_demands d
+         WHERE ${countBaseConditions.join(' AND ')}
+           AND d.status = 'IN_PROGRESS'`,
+        countBaseParams,
       ),
       pool.query(
         `SELECT COUNT(*) AS completed_total
          FROM work_demands d
-         WHERE ${baseConditions.join(' AND ')}
+         WHERE ${countBaseConditions.join(' AND ')}
            AND d.status = 'DONE'`,
-        baseParams,
+        countBaseParams,
       ),
       pool.query(
         `SELECT COUNT(*) AS cancelled_total
          FROM work_demands d
-         WHERE ${baseConditions.join(' AND ')}
+         WHERE ${countBaseConditions.join(' AND ')}
            AND d.status = 'CANCELLED'`,
-        baseParams,
+        countBaseParams,
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS paused_total
+         FROM work_demands d
+         WHERE ${countBaseConditions.join(' AND ')}
+           AND d.status = 'PAUSED'`,
+        countBaseParams,
       ),
       pool.query(
         `SELECT
@@ -3242,7 +3261,7 @@ const Work = {
          WHERE ${activeWhereSql}
          GROUP BY d.business_group_code, bg.item_name
          ORDER BY total DESC, business_group_code ASC`,
-        baseParams,
+        countBaseParams,
       ),
       pool.query(
         `SELECT item_code, item_name
@@ -3275,8 +3294,10 @@ const Work = {
       rows: normalizedRows,
       total,
       allTotal: Number(allTotal || 0),
+      inProgressTotal: Number(inProgressTotal || 0),
       completedTotal: Number(completedTotal || 0),
       cancelledTotal: Number(cancelledTotal || 0),
+      pausedTotal: Number(pausedTotal || 0),
       groupCounts: (groupCountRows || []).map((item) => ({
         business_group_code: item.business_group_code || '',
         business_group_name: item.business_group_name || item.business_group_code || '',
