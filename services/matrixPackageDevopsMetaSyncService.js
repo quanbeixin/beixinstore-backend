@@ -50,7 +50,8 @@ function buildSyncPayload({ matrixPackage, operationContent, devopsContent, env 
   const channelCode = normalizeText(operationContent.appOrigin, 2000)
   const clientId = normalizeText(devopsContent[`${prefix}GoogleAuthClientId`], 2000)
   const clientSecret = normalizeText(devopsContent[`${prefix}GoogleAuthClientSecret`], 2000)
-  const packageName = normalizeText(matrixPackage?.app_id, 2000)
+  const appId = normalizeText(matrixPackage?.app_id, 2000)
+  const packageName = env === 'test' && appId ? `${appId}.test` : appId
   const certificateContent = normalizeText(devopsContent[`${prefix}GooglePayCertificateContent`], 300000)
   const missingFields = []
 
