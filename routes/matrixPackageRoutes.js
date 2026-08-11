@@ -19,6 +19,7 @@ const {
   saveMatrixPackageSideNotes,
   saveMatrixPackageDeliveryPlatforms,
   syncMatrixPackageDevopsMeta,
+  syncMatrixPackageGooglePlayMetadata,
   updateMatrixPackageProductionNode,
   updateMatrixPackage,
 } = require('../controllers/matrixPackageController')
@@ -44,6 +45,7 @@ router.post('/:id/side-notes/upload-policy', authMiddleware.requirePermission('m
 router.post('/:id/side-notes/:noteType/confirm', authMiddleware.requirePermission('matrix_package.manage'), confirmMatrixPackageSideNote)
 router.post('/:id/side-notes/:noteType/remind', authMiddleware.requirePermission('matrix_package.view'), remindMatrixPackageSideNote)
 router.post('/:id/devops-meta-sync', authMiddleware.requirePermission('matrix_package.manage'), syncMatrixPackageDevopsMeta)
+router.post('/:id/google-play-metadata-sync', authMiddleware.requirePermission('matrix_package.manage'), syncMatrixPackageGooglePlayMetadata)
 router.post('/', authMiddleware.requirePermission('matrix_package.manage'), createMatrixPackage)
 router.put('/:id', authMiddleware.requirePermission('matrix_package.manage'), updateMatrixPackage)
 router.delete('/:id', authMiddleware.requirePermission('matrix_package.manage'), deleteMatrixPackage)

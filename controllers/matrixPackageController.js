@@ -6,6 +6,7 @@ const MatrixPackageNotificationService = require('../services/matrixPackageNotif
 const MatrixPackageDemandService = require('../services/matrixPackageDemandService')
 const MatrixPackageScheduleService = require('../services/matrixPackageScheduleService')
 const MatrixPackageDevopsMetaSyncService = require('../services/matrixPackageDevopsMetaSyncService')
+const MatrixPackageGooglePlayMetadataService = require('../services/matrixPackageGooglePlayMetadataService')
 const {
   buildMatrixPackageSideNotePolicyPayload,
   decorateMatrixPackageSideNotes,
@@ -908,6 +909,18 @@ async function confirmMatrixPackageSideNote(req, res) {
       afterNote,
       operatorUserId: req.user?.id || null,
     })
+    if (noteType === 'OPERATION') {
+      void MatrixPackageGooglePlayMetadataService.syncGooglePlayMetadata({
+        matrixPackage: packageDetail,
+        maxAttempts: 2,
+      }).catch((error) => {
+        console.warn('运营侧确认后的 Google Play 元数据同步最终失败（已忽略）:', {
+          packageId: packageDetail.id,
+          packageName: packageDetail.package_name,
+          message: error?.message || error,
+        })
+      })
+    }
     return res.json({ success: true, message: '补充信息已确认', data: decorateMatrixPackageSideNotes(data) })
   } catch (error) {
     return handleError(res, error, '确认矩阵包补充信息失败')
@@ -1009,6 +1022,26 @@ async function syncMatrixPackageDevopsMeta(req, res) {
   }
 }
 
+async function syncMatrixPackageGooglePlayMetadata(req, res) {
+  try {
+    const matrixPackage = await MatrixPackage.getById(req.params.id)
+    if (!matrixPackage) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    const data = await MatrixPackageGooglePlayMetadataService.syncGooglePlayMetadata({
+      matrixPackage,
+      maxAttempts: 1,
+    })
+    return res.json({
+      success: true,
+      message: 'Google Play 元数据同步已触发',
+      data,
+    })
+  } catch (error) {
+    return handleError(res, error, 'Google Play 元数据同步触发失败')
+  }
+}
+
 async function downloadMatrixPackageDataSafetyFile(req, res) {
   try {
     const packageId = Number.parseInt(req.params.id, 10)
@@ -1049,5 +1082,6 @@ module.exports = {
   getMatrixPackageSideNoteUploadPolicy,
   downloadMatrixPackageDataSafetyFile,
   syncMatrixPackageDevopsMeta,
+  syncMatrixPackageGooglePlayMetadata,
   updateMatrixPackageProductionNode,
 }
