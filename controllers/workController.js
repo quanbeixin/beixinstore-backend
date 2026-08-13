@@ -2241,6 +2241,7 @@ const createDemand = async (req, res) => {
   const codeBranch = normalizeText(req.body.code_branch, 255)
   const releaseNote = normalizeText(req.body.release_note, 2000)
   const businessValueExpectation = normalizeText(req.body.business_value_expectation, 2000)
+  const requiresAppRelease = toBool(req.body.requires_app_release, false)
   const expectedReleaseDateRaw = req.body.expected_release_date
   const expectedReleaseDate = normalizeDate(expectedReleaseDateRaw)
   const status = normalizeStatus(req.body.status)
@@ -2392,6 +2393,7 @@ const createDemand = async (req, res) => {
       codeBranch: codeBranch || null,
       releaseNote: releaseNote || null,
       businessValueExpectation: businessValueExpectation || null,
+      requiresAppRelease,
       businessGroupCode,
       expectedReleaseDate: expectedReleaseDate || null,
       status,
@@ -2688,6 +2690,10 @@ const updateDemand = async (req, res) => {
       req.body.business_value_expectation === undefined
         ? existing.business_value_expectation
         : normalizeText(req.body.business_value_expectation, 2000) || null
+    const requiresAppRelease =
+      req.body.requires_app_release === undefined
+        ? Boolean(Number(existing.requires_app_release))
+        : toBool(req.body.requires_app_release, false)
     let expectedReleaseDate = existing.expected_release_date || null
     if (req.body.expected_release_date !== undefined) {
       const raw = req.body.expected_release_date
@@ -2796,6 +2802,7 @@ const updateDemand = async (req, res) => {
       codeBranch,
       releaseNote,
       businessValueExpectation,
+      requiresAppRelease,
       businessGroupCode,
       expectedReleaseDate,
       expectedReleaseDateSource,

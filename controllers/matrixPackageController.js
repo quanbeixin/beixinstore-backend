@@ -836,6 +836,7 @@ async function saveMatrixPackageSideNotes(req, res) {
             noteType,
             nextOwnerUserId,
             req.user?.id || null,
+            beforeOwnerMap.get(noteType) || null,
           )
         }
       }
@@ -877,6 +878,7 @@ async function patchMatrixPackageSideNoteFields(req, res) {
         noteType,
         afterOwnerUserId,
         req.user?.id || null,
+        beforeOwnerUserId || null,
       )
     }
 

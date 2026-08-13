@@ -22,6 +22,10 @@ const SIDE_NOTE_WORKFLOW_NODE_KEY_MAP = {
   OPERATION: NODE_KEYS.OPERATION_ACCEPTANCE,
   DESIGN: NODE_KEYS.DESIGN_ACCEPTANCE,
 }
+const SIDE_NOTE_PARTICIPANT_ROLE_MAP = {
+  OPERATION: 'OPERATIONS',
+  DESIGN: 'DESIGNER',
+}
 const PRODUCTION_NODE_WORKFLOW_NODE_KEY_MAP = {
   FRONTEND_BUILD: NODE_KEYS.PRODUCTION,
 }
@@ -685,7 +689,92 @@ const MatrixPackageDemandService = {
     }
   },
 
-  async syncWorkflowAssigneeFromSideNoteOwner(matrixPackageInput, noteType, ownerUserId, operatorUserId = null) {
+  async syncParticipantRoleAssignee(matrixPackageInput, {
+    participantRole,
+    assigneeUserId,
+    previousOwnerUserId = null,
+    operatorUserId = null,
+  } = {}) {
+    const packageId = toPositiveInt(matrixPackageInput?.id)
+    const normalizedParticipantRole = normalizeText(participantRole, 64).toUpperCase()
+    const normalizedAssigneeUserId = toPositiveInt(assigneeUserId)
+    if (!packageId || !normalizedParticipantRole || !normalizedAssigneeUserId) {
+      return {
+        success: false,
+        skipped: true,
+        reason: 'PARTICIPANT_ROLE_SYNC_PARAMS_INVALID',
+      }
+    }
+
+    try {
+      const matrixPackage = matrixPackageInput?.package_name
+        ? matrixPackageInput
+        : await MatrixPackage.getById(packageId)
+      if (!matrixPackage || !shouldEnsureDemand(matrixPackage)) {
+        return {
+          success: false,
+          skipped: true,
+          reason: 'PACKAGE_NOT_IN_PRODUCTION_FLOW',
+        }
+      }
+
+      const ensureResult = await this.ensureProductionDemand(matrixPackage, operatorUserId)
+      const demandId = normalizeText(ensureResult?.demand_id || matrixPackage.linked_demand_id, 64)
+      if (!demandId) {
+        return {
+          success: false,
+          skipped: true,
+          reason: 'NO_LINKED_DEMAND',
+        }
+      }
+      const demand = await Work.findDemandById(demandId)
+      const replaceableUserIds = [
+        toPositiveInt(demand?.owner_user_id),
+        toPositiveInt(matrixPackage.owner_user_id),
+        toPositiveInt(previousOwnerUserId),
+      ].filter(Boolean)
+      const result = await Work.syncDemandParticipantRoleAssignee(
+        demandId,
+        normalizedParticipantRole,
+        normalizedAssigneeUserId,
+        { replaceableUserIds },
+      )
+      if (result?.updated) {
+        await this.syncProductionGroupMembers(
+          matrixPackage,
+          [normalizedAssigneeUserId],
+          operatorUserId,
+        )
+      }
+      return {
+        success: Boolean(result?.updated),
+        skipped: !result?.updated,
+        demand_id: demandId,
+        ...result,
+      }
+    } catch (error) {
+      console.warn('矩阵包需求涉及角色负责人同步失败（已忽略）:', {
+        packageId,
+        participantRole: normalizedParticipantRole,
+        assigneeUserId: normalizedAssigneeUserId,
+        message: error?.message || error,
+      })
+      return {
+        success: false,
+        skipped: true,
+        reason: 'SYNC_PARTICIPANT_ROLE_ASSIGNEE_ERROR',
+        error_message: error?.message || '需求涉及角色负责人同步异常',
+      }
+    }
+  },
+
+  async syncWorkflowAssigneeFromSideNoteOwner(
+    matrixPackageInput,
+    noteType,
+    ownerUserId,
+    operatorUserId = null,
+    previousOwnerUserId = null,
+  ) {
     const normalizedNoteType = normalizeText(noteType, 50).toUpperCase()
     const workflowNodeKey = SIDE_NOTE_WORKFLOW_NODE_KEY_MAP[normalizedNoteType]
     if (!workflowNodeKey) {
@@ -695,12 +784,23 @@ const MatrixPackageDemandService = {
         reason: 'SIDE_NOTE_WORKFLOW_NODE_NOT_MAPPED',
       }
     }
-    return this.syncWorkflowNodeAssignee(matrixPackageInput, {
+    const participantRole = SIDE_NOTE_PARTICIPANT_ROLE_MAP[normalizedNoteType]
+    const workflowResult = await this.syncWorkflowNodeAssignee(matrixPackageInput, {
       workflowNodeKey,
       assigneeUserId: ownerUserId,
       operatorUserId,
       comment: `矩阵包${normalizedNoteType}侧负责人同步`,
     })
+    const participantRoleResult = await this.syncParticipantRoleAssignee(matrixPackageInput, {
+      participantRole,
+      assigneeUserId: ownerUserId,
+      previousOwnerUserId,
+      operatorUserId,
+    })
+    return {
+      workflow: workflowResult,
+      participant_role: participantRoleResult,
+    }
   },
 
   async syncWorkflowAssigneeFromProductionNodeOwner(matrixPackageInput, productionNodeCode, ownerUserId, operatorUserId = null) {
@@ -730,12 +830,21 @@ const MatrixPackageDemandService = {
         reason: 'PACKAGE_OWNER_EMPTY',
       }
     }
-    return this.syncWorkflowNodeAssignee(matrixPackageInput, {
+    const workflowResult = await this.syncWorkflowNodeAssignee(matrixPackageInput, {
       workflowNodeKey: NODE_KEYS.PRODUCT_ACCEPTANCE,
       assigneeUserId: ownerUserId,
       operatorUserId,
       comment: '矩阵包负责人同步为产品验收负责人',
     })
+    const participantRoleResult = await this.syncParticipantRoleAssignee(matrixPackageInput, {
+      participantRole: 'PRODUCT_MANAGER',
+      assigneeUserId: ownerUserId,
+      operatorUserId,
+    })
+    return {
+      workflow: workflowResult,
+      participant_role: participantRoleResult,
+    }
   },
 }
 
