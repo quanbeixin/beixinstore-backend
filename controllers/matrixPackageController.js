@@ -7,6 +7,7 @@ const MatrixPackageDemandService = require('../services/matrixPackageDemandServi
 const MatrixPackageScheduleService = require('../services/matrixPackageScheduleService')
 const MatrixPackageDevopsMetaSyncService = require('../services/matrixPackageDevopsMetaSyncService')
 const MatrixPackageGooglePlayMetadataService = require('../services/matrixPackageGooglePlayMetadataService')
+const MatrixPackageVersion = require('../models/MatrixPackageVersion')
 const {
   buildMatrixPackageSideNotePolicyPayload,
   decorateMatrixPackageSideNotes,
@@ -1042,6 +1043,35 @@ async function syncMatrixPackageGooglePlayMetadata(req, res) {
   }
 }
 
+async function listMatrixPackageVersions(req, res) {
+  try {
+    const matrixPackage = await MatrixPackage.getById(req.params.id)
+    if (!matrixPackage) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    const data = await MatrixPackageVersion.listByPackageId(req.params.id)
+    return res.json({ success: true, data })
+  } catch (error) {
+    return handleError(res, error, '获取矩阵包版本信息失败')
+  }
+}
+
+async function getMatrixPackageVersion(req, res) {
+  try {
+    const matrixPackage = await MatrixPackage.getById(req.params.id)
+    if (!matrixPackage) {
+      return res.status(404).json({ success: false, message: '矩阵包不存在' })
+    }
+    const data = await MatrixPackageVersion.getById(req.params.id, req.params.versionId)
+    if (!data) {
+      return res.status(404).json({ success: false, message: '版本信息不存在' })
+    }
+    return res.json({ success: true, data })
+  } catch (error) {
+    return handleError(res, error, '获取版本信息失败')
+  }
+}
+
 async function downloadMatrixPackageDataSafetyFile(req, res) {
   try {
     const packageId = Number.parseInt(req.params.id, 10)
@@ -1083,5 +1113,7 @@ module.exports = {
   downloadMatrixPackageDataSafetyFile,
   syncMatrixPackageDevopsMeta,
   syncMatrixPackageGooglePlayMetadata,
+  listMatrixPackageVersions,
+  getMatrixPackageVersion,
   updateMatrixPackageProductionNode,
 }

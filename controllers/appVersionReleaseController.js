@@ -43,6 +43,18 @@ async function listAppVersionReleaseSyncTargets(req, res) {
   }
 }
 
+async function getAppVersionReleaseVersionInfo(req, res) {
+  try {
+    const data = await AppVersionRelease.getVersionInfoByReleaseId(req.params.id)
+    if (!data) {
+      return res.status(404).json({ success: false, message: '该发版记录暂无匹配的版本信息' })
+    }
+    return res.json({ success: true, data })
+  } catch (error) {
+    return handleError(res, error, '获取发版版本信息失败')
+  }
+}
+
 async function mergeAppVersionRelease(req, res) {
   try {
     const beforeRelease = await AppVersionRelease.getById(req.params.id)
@@ -125,6 +137,7 @@ async function deleteAppVersionRelease(req, res) {
 module.exports = {
   createAppVersionReleaseApplications,
   listAppVersionReleaseSyncTargets,
+  getAppVersionReleaseVersionInfo,
   listGroupedAppVersionReleases,
   listAppVersionReleases,
   mergeAppVersionRelease,

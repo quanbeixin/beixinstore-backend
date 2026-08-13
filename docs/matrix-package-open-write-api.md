@@ -161,6 +161,32 @@ POST http://39.97.253.194/api/open/matrix-packages/update-fields
 | `advertising` | `facebook_app_id` | android 内 facebook app id 配置 | 文本 |
 | `advertising` | `facebook_client_token` | android app 内 facebook 密钥 | 文本 |
 
+### 版本信息字段
+
+版本信息使用同一个写回接口，但不写入 `sections`，直接放在请求体的 `fields` 中：
+
+| 字段 | 说明 | 类型 |
+|---------|------|------|
+| `version_number` | 版本号 | 文本 |
+| `version_info` | 版本信息 | 文本 |
+
+同一个矩阵包和版本号重复回传时会更新原记录，不会新增重复版本。
+
+```bash
+curl -X POST "http://39.97.253.194/api/open/matrix-packages/update-fields" \
+  -H "Content-Type: application/json" \
+  -H "x-open-api-token: fecb0ad62082abd324dffdec5609af4208504df30ee44d19e9ce1622fba35177" \
+  -d '{
+    "match": {
+      "package_name": "Storylume"
+    },
+    "fields": {
+      "version_number": "1.0.4",
+      "version_info": "修复支付问题，优化启动速度"
+    }
+  }'
+```
+
 `prodH5Url` / `testH5Url` 是系统自动生成字段，不开放写入。
 
 ### 写入文本字段示例
@@ -228,11 +254,14 @@ curl -X POST "http://39.97.253.194/api/open/matrix-packages/update-fields" \
   "data": {
     "package_id": 1,
     "package_name": "Storylume",
-    "section": "frontend",
-    "updated_fields": [
-      "googleServiceJsonFile"
+    "sections": [
+      {
+        "section": "frontend",
+        "updated_fields": ["googleServiceJsonFile"],
+        "updated_at": "2026-07-27 18:30:00"
+      }
     ],
-    "updated_at": "2026-07-27 18:30:00"
+    "version": null
   }
 }
 ```

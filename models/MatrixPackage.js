@@ -168,6 +168,7 @@ function mapRow(row) {
     confirmed_side_note_types: parseCsvCodes(row.confirmed_side_note_types),
     production_node_status_map: parseProductionNodeStatusMap(row.production_node_status_map),
     backend_self_check_completed: isBackendSelfCheckCompleted(row.backend_side_note_content),
+    version_count: Number(row.version_count || 0),
     created_by: row.created_by ? Number(row.created_by) : null,
     updated_by: row.updated_by ? Number(row.updated_by) : null,
     created_at: row.created_at || null,
@@ -448,6 +449,7 @@ const MatrixPackage = {
          COALESCE(sideNoteStats.confirmed_side_note_types, '') AS confirmed_side_note_types,
          COALESCE(productionNodeStats.production_node_status_map, '') AS production_node_status_map,
          COALESCE(backendSideNote.content, '') AS backend_side_note_content,
+         COALESCE(versionStats.version_count, 0) AS version_count,
          mp.created_by,
          mp.updated_by,
          DATE_FORMAT(mp.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
@@ -506,6 +508,12 @@ const MatrixPackage = {
        LEFT JOIN matrix_package_side_notes backendSideNote
          ON backendSideNote.package_id = mp.id
         AND backendSideNote.note_type = 'BACKEND'
+       LEFT JOIN (
+         SELECT matrix_package_id, COUNT(*) AS version_count
+         FROM matrix_package_versions
+         GROUP BY matrix_package_id
+       ) versionStats
+         ON versionStats.matrix_package_id = mp.id
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = ?
         AND statusDict.item_code = mp.status_code
@@ -598,6 +606,7 @@ const MatrixPackage = {
          mp.linked_demand_id,
          linkedDemand.name AS linked_demand_name,
          COALESCE(sideNoteStats.side_note_confirmed_count, 0) AS side_note_confirmed_count,
+         COALESCE(versionStats.version_count, 0) AS version_count,
          mp.created_by,
          mp.updated_by,
          DATE_FORMAT(mp.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
@@ -639,6 +648,12 @@ const MatrixPackage = {
          GROUP BY package_id
        ) sideNoteStats
          ON sideNoteStats.package_id = mp.id
+       LEFT JOIN (
+         SELECT matrix_package_id, COUNT(*) AS version_count
+         FROM matrix_package_versions
+         GROUP BY matrix_package_id
+       ) versionStats
+         ON versionStats.matrix_package_id = mp.id
        LEFT JOIN config_dict_items statusDict
          ON statusDict.type_key = ?
         AND statusDict.item_code = mp.status_code

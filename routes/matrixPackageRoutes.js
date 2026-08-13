@@ -20,6 +20,8 @@ const {
   saveMatrixPackageDeliveryPlatforms,
   syncMatrixPackageDevopsMeta,
   syncMatrixPackageGooglePlayMetadata,
+  listMatrixPackageVersions,
+  getMatrixPackageVersion,
   updateMatrixPackageProductionNode,
   updateMatrixPackage,
 } = require('../controllers/matrixPackageController')
@@ -46,6 +48,8 @@ router.post('/:id/side-notes/:noteType/confirm', authMiddleware.requirePermissio
 router.post('/:id/side-notes/:noteType/remind', authMiddleware.requirePermission('matrix_package.view'), remindMatrixPackageSideNote)
 router.post('/:id/devops-meta-sync', authMiddleware.requirePermission('matrix_package.manage'), syncMatrixPackageDevopsMeta)
 router.post('/:id/google-play-metadata-sync', authMiddleware.requirePermission('matrix_package.manage'), syncMatrixPackageGooglePlayMetadata)
+router.get('/:id/versions', authMiddleware.requirePermission('matrix_package.view'), listMatrixPackageVersions)
+router.get('/:id/versions/:versionId', authMiddleware.requirePermission('matrix_package.view'), getMatrixPackageVersion)
 router.post('/', authMiddleware.requirePermission('matrix_package.manage'), createMatrixPackage)
 router.put('/:id', authMiddleware.requirePermission('matrix_package.manage'), updateMatrixPackage)
 router.delete('/:id', authMiddleware.requirePermission('matrix_package.manage'), deleteMatrixPackage)

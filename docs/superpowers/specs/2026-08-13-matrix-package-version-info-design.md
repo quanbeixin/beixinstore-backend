@@ -14,17 +14,17 @@
 | --- | --- |
 | `id` | 主键 |
 | `matrix_package_id` | 关联矩阵包 |
-| `version_no` | 版本号 |
+| `version_number` | 版本号 |
 | `version_info` | 前端回传的版本信息，暂按文本保存，不解析内容 |
 | `created_at` | 首次创建时间 |
 | `updated_at` | 最近更新时间 |
 
-增加唯一约束：`matrix_package_id + version_no`。
+增加唯一约束：`matrix_package_id + version_number`。
 
 ### 写入规则
 
 - 同一矩阵包回传新的版本号时新增记录。
-- 同一矩阵包回传已存在的版本号时更新 `version_info` 和 `updated_at`，不新增重复记录。
+- 同一矩阵包回传已存在的 `version_number` 时更新 `version_info` 和 `updated_at`，不新增重复记录。
 - 不根据矩阵包状态判断版本用途。
 - 不修改现有矩阵包的 `appVersion` 字段。
 - 不修改已有 APP 发版记录中的 `app_version`。
@@ -39,7 +39,7 @@
 
 沿用现有 `/api/open/matrix-packages/update-fields`，继续通过矩阵包名称匹配矩阵包。
 
-新增 `version_no` 和 `version_info` 字段。接口完成以下操作：
+新增 `version_number` 和 `version_info` 字段。接口完成以下操作：
 
 1. 校验矩阵包匹配结果。
 2. 校验版本号非空并限制长度。

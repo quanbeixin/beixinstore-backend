@@ -269,6 +269,9 @@ function mapRow(row) {
     last_operation_at: row.last_operation_at || null,
     created_at: row.created_at || null,
     updated_at: row.updated_at || null,
+    version_info_available: Number(row.version_info_available || 0) === 1,
+    version_info_id: row.version_info_id ? Number(row.version_info_id) : null,
+    version_info_updated_at: row.version_info_updated_at || null,
   }
 }
 
@@ -642,6 +645,27 @@ const AppVersionRelease = {
          DATE_FORMAT(avr.requested_at, '%Y-%m-%d') AS requested_at,
          DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+         (
+           SELECT mpv.id
+           FROM matrix_package_versions mpv
+           WHERE mpv.matrix_package_id = avr.matrix_package_id
+             AND mpv.version_number = avr.app_version
+           LIMIT 1
+         ) AS version_info_id,
+         (
+           SELECT CASE WHEN mpv.id IS NOT NULL THEN 1 ELSE 0 END
+           FROM matrix_package_versions mpv
+           WHERE mpv.matrix_package_id = avr.matrix_package_id
+             AND mpv.version_number = avr.app_version
+           LIMIT 1
+         ) AS version_info_available,
+         (
+           SELECT DATE_FORMAT(mpv.updated_at, '%Y-%m-%d %H:%i:%s')
+           FROM matrix_package_versions mpv
+           WHERE mpv.matrix_package_id = avr.matrix_package_id
+             AND mpv.version_number = avr.app_version
+           LIMIT 1
+         ) AS version_info_updated_at,
          COALESCE(NULLIF(applicantUser.real_name, ''), applicantUser.username) AS applicant_display_name,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name
        FROM app_version_releases avr
@@ -681,6 +705,21 @@ const AppVersionRelease = {
          DATE_FORMAT(avr.requested_at, '%Y-%m-%d') AS requested_at,
          DATE_FORMAT(avr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
          DATE_FORMAT(avr.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+         (
+           SELECT mpv.id FROM matrix_package_versions mpv
+           WHERE mpv.matrix_package_id = avr.matrix_package_id AND mpv.version_number = avr.app_version
+           LIMIT 1
+         ) AS version_info_id,
+         (
+           SELECT CASE WHEN mpv.id IS NOT NULL THEN 1 ELSE 0 END FROM matrix_package_versions mpv
+           WHERE mpv.matrix_package_id = avr.matrix_package_id AND mpv.version_number = avr.app_version
+           LIMIT 1
+         ) AS version_info_available,
+         (
+           SELECT DATE_FORMAT(mpv.updated_at, '%Y-%m-%d %H:%i:%s') FROM matrix_package_versions mpv
+           WHERE mpv.matrix_package_id = avr.matrix_package_id AND mpv.version_number = avr.app_version
+           LIMIT 1
+         ) AS version_info_updated_at,
          COALESCE(NULLIF(applicantUser.real_name, ''), applicantUser.username) AS applicant_display_name,
          COALESCE(NULLIF(ownerUser.real_name, ''), ownerUser.username) AS owner_display_name
        FROM app_version_releases avr
@@ -741,6 +780,38 @@ const AppVersionRelease = {
       [releaseId],
     )
     return mapRow(rows[0])
+  },
+
+  async getVersionInfoByReleaseId(id) {
+    const releaseId = toPositiveInt(id)
+    if (!releaseId) return null
+    const [rows] = await pool.query(
+      `SELECT
+         mpv.id,
+         mpv.matrix_package_id,
+         mpv.version_number,
+         mpv.version_info,
+         DATE_FORMAT(mpv.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+         DATE_FORMAT(mpv.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
+       FROM app_version_releases avr
+       INNER JOIN matrix_package_versions mpv
+         ON mpv.matrix_package_id = avr.matrix_package_id
+        AND mpv.version_number = avr.app_version
+       WHERE avr.id = ? AND avr.deleted_at IS NULL
+       LIMIT 1`,
+      [releaseId],
+    )
+    const row = rows[0]
+    return row
+      ? {
+          id: Number(row.id),
+          matrix_package_id: Number(row.matrix_package_id),
+          version_number: row.version_number || '',
+          version_info: row.version_info || '',
+          created_at: row.created_at || null,
+          updated_at: row.updated_at || null,
+        }
+      : null
   },
 
   async update(id, payload = {}, userId) {

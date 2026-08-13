@@ -1,5 +1,6 @@
 const pool = require('../utils/db')
 const MatrixPackageDeliveryPlatform = require('../models/MatrixPackageDeliveryPlatform')
+const MatrixPackageVersion = require('../models/MatrixPackageVersion')
 const {
   buildSignedGetObjectUrl,
   getOssConfigFromEnv,
@@ -173,6 +174,8 @@ const OPEN_FRONTEND_FIELDS = new Set([
   ...OPEN_FRONTEND_TEXT_FIELDS,
   ...OPEN_FRONTEND_FILE_FIELDS,
 ])
+
+const OPEN_VERSION_FIELDS = new Set(['version_number', 'version_info'])
 
 const OPEN_ADVERTISING_TEXT_FIELDS = new Set([
   'MATRIX_FACEBOOK_INSTALL_DECRYPT_SECRET',
@@ -454,6 +457,25 @@ function normalizeOpenFrontendFields(fields, packageId) {
       return
     }
     nextFields[fieldName] = normalizeText(value, 10000)
+  })
+  return nextFields
+}
+
+function normalizeOpenVersionFields(fields) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    const err = new Error('fields.version 必须是对象')
+    err.statusCode = 400
+    throw err
+  }
+
+  const nextFields = {}
+  Object.entries(fields).forEach(([fieldName, value]) => {
+    if (!OPEN_VERSION_FIELDS.has(fieldName)) {
+      const err = new Error(`字段不允许写入：version.${fieldName}`)
+      err.statusCode = 400
+      throw err
+    }
+    nextFields[fieldName] = normalizeText(value, fieldName === 'version_info' ? 100000 : 80)
   })
   return nextFields
 }
@@ -1012,20 +1034,32 @@ async function updateOpenMatrixPackageFields(req, res) {
     const frontendFields = sections.frontend || req.body?.frontend || null
     const operationFields = sections.operation || req.body?.operation || null
     const advertisingFields = sections.advertising || req.body?.advertising || null
-    if (!frontendFields && !operationFields && !advertisingFields) {
-      return res.status(400).json({ success: false, message: '请提供 sections.frontend、sections.operation 或 sections.advertising 写入内容' })
+    const directVersionFields = req.body?.fields && typeof req.body.fields === 'object' && !Array.isArray(req.body.fields)
+      && (Object.prototype.hasOwnProperty.call(req.body.fields, 'version_number') || Object.prototype.hasOwnProperty.call(req.body.fields, 'version_info'))
+      ? req.body.fields
+      : null
+    const versionFields = directVersionFields || req.body?.fields?.version || req.body?.version || null
+    if (!frontendFields && !operationFields && !advertisingFields && !versionFields) {
+      return res.status(400).json({ success: false, message: '请提供 sections.frontend、sections.operation、sections.advertising 或 fields.version 写入内容' })
     }
 
     const packageId = Number(matchedPackage.id)
     const normalizedFrontendFields = frontendFields ? normalizeOpenFrontendFields(frontendFields, packageId) : {}
     const normalizedOperationFields = operationFields ? normalizeOpenOperationFields(operationFields) : {}
     const normalizedAdvertisingFields = advertisingFields ? normalizeOpenAdvertisingFields(advertisingFields) : {}
+    const normalizedVersionFields = versionFields ? normalizeOpenVersionFields(versionFields) : {}
+    if (normalizedVersionFields.version_number && !Object.prototype.hasOwnProperty.call(normalizedVersionFields, 'version_info')) {
+      normalizedVersionFields.version_info = ''
+    }
+    if (Object.prototype.hasOwnProperty.call(normalizedVersionFields, 'version_info') && !normalizedVersionFields.version_number) {
+      return res.status(400).json({ success: false, message: '写入版本信息时 version_number 不能为空' })
+    }
     const updateJobs = [
       { section: 'frontend', noteType: 'FRONTEND', fields: normalizedFrontendFields },
       { section: 'operation', noteType: 'OPERATION', fields: normalizedOperationFields },
       { section: 'advertising', noteType: 'ADVERTISING', fields: normalizedAdvertisingFields },
     ].filter((item) => Object.keys(item.fields).length > 0)
-    if (updateJobs.length === 0) {
+    if (updateJobs.length === 0 && !normalizedVersionFields.version_number) {
       return res.status(400).json({ success: false, message: '至少需要提供一个允许写入的字段' })
     }
 
@@ -1043,6 +1077,15 @@ async function updateOpenMatrixPackageFields(req, res) {
       })
     }
 
+    let versionRecord = null
+    if (normalizedVersionFields.version_number) {
+      versionRecord = await MatrixPackageVersion.upsert({
+        matrixPackageId: packageId,
+        versionNumber: normalizedVersionFields.version_number,
+        versionInfo: normalizedVersionFields.version_info,
+      })
+    }
+
     console.info('开放接口保存矩阵包补充信息成功', {
       package_id: packageId,
       sections: updatedSections,
@@ -1055,6 +1098,7 @@ async function updateOpenMatrixPackageFields(req, res) {
         package_id: packageId,
         package_name: matchedPackage.package_name || '',
         sections: updatedSections,
+        version: versionRecord,
       },
     })
   } catch (error) {
