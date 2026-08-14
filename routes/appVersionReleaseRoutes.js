@@ -4,6 +4,7 @@ const {
   createAppVersionReleaseApplications,
   deleteAppVersionRelease,
   listAppVersionReleaseSyncTargets,
+  listAppReleaseDemandCoverage,
   getAppVersionReleaseVersionInfo,
   listGroupedAppVersionReleases,
   listAppVersionReleases,
@@ -34,6 +35,7 @@ function requireAppReleaseManager(req, res, next) {
 router.use(authMiddleware)
 
 router.get('/', authMiddleware.requirePermission('demand.view'), listAppVersionReleases)
+router.get('/demand-coverage', authMiddleware.requirePermission('demand.view'), listAppReleaseDemandCoverage)
 router.get('/grouped', authMiddleware.requirePermission('demand.view'), listGroupedAppVersionReleases)
 router.get('/:id/sync-targets', authMiddleware.requirePermission('demand.manage'), requireAppReleaseManager, listAppVersionReleaseSyncTargets)
 router.get('/:id/version-info', authMiddleware.requirePermission('demand.view'), getAppVersionReleaseVersionInfo)

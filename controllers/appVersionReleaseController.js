@@ -1,4 +1,5 @@
 const AppVersionRelease = require('../models/AppVersionRelease')
+const AppReleaseDemandCoverage = require('../models/AppReleaseDemandCoverage')
 const AppVersionReleaseNotificationService = require('../services/appVersionReleaseNotificationService')
 
 function handleError(res, error, fallbackMessage) {
@@ -22,6 +23,15 @@ async function listAppVersionReleases(req, res) {
     return res.json({ success: true, data })
   } catch (error) {
     return handleError(res, error, '获取APP版本发布列表失败')
+  }
+}
+
+async function listAppReleaseDemandCoverage(req, res) {
+  try {
+    const data = await AppReleaseDemandCoverage.list(req.query || {})
+    return res.json({ success: true, data })
+  } catch (error) {
+    return handleError(res, error, '获取APP发版需求覆盖范围失败')
   }
 }
 
@@ -136,6 +146,7 @@ async function deleteAppVersionRelease(req, res) {
 
 module.exports = {
   createAppVersionReleaseApplications,
+  listAppReleaseDemandCoverage,
   listAppVersionReleaseSyncTargets,
   getAppVersionReleaseVersionInfo,
   listGroupedAppVersionReleases,
