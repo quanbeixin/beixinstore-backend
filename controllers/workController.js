@@ -226,6 +226,14 @@ function normalizeDate(value) {
   return str
 }
 
+function getCurrentYearDateRange() {
+  const year = new Date().getFullYear()
+  return {
+    startDate: `${year}-01-01`,
+    endDate: `${year}-12-31`,
+  }
+}
+
 function normalizeDateTime(value) {
   const str = String(value || '').trim()
   if (!str) return ''
@@ -1825,6 +1833,141 @@ const listDemands = async (req, res) => {
     })
   } catch (err) {
     console.error('获取需求池失败:', err)
+    return res.status(500).json({ success: false, message: '服务器错误' })
+  }
+}
+
+const listLaunchScheduleDemands = async (req, res) => {
+  const page = toPositiveInt(req.query.page) || 1
+  const pageSize = Math.min(300, toPositiveInt(req.query.pageSize) || 10)
+  const keyword = normalizeText(req.query.keyword, 100)
+  const status = normalizeStatus(req.query.status || '')
+  const priority = normalizePriority(req.query.priority || '')
+  const templateId = toPositiveInt(req.query.template_id)
+  const templateIds = toPositiveIntList(req.query.template_ids)
+  const priorityOrderRaw = req.query.priority_order
+  const priorityOrder = normalizePriorityOrder(priorityOrderRaw)
+  const businessGroupCode = normalizeBusinessGroupCode(req.query.business_group_code)
+  const ownerUserId = toPositiveInt(req.query.owner_user_id)
+  const updatedStartDateRaw = req.query.updated_start_date
+  const updatedEndDateRaw = req.query.updated_end_date
+  const updatedStartDate = normalizeDate(updatedStartDateRaw)
+  const updatedEndDate = normalizeDate(updatedEndDateRaw)
+  const defaultReleaseRange = getCurrentYearDateRange()
+  const releaseStartDateRaw = req.query.start_date
+  const releaseEndDateRaw = req.query.end_date
+  const releaseStartDate = normalizeDate(releaseStartDateRaw) || defaultReleaseRange.startDate
+  const releaseEndDate = normalizeDate(releaseEndDateRaw) || defaultReleaseRange.endDate
+  const mine = toBool(req.query.mine, false)
+
+  if (businessGroupCode === '') {
+    return res.status(400).json({ success: false, message: 'business_group_code 格式不正确' })
+  }
+  if (
+    req.query.template_id !== undefined &&
+    req.query.template_id !== null &&
+    String(req.query.template_id).trim() !== '' &&
+    !templateId
+  ) {
+    return res.status(400).json({ success: false, message: 'template_id 无效' })
+  }
+  if (
+    req.query.template_ids !== undefined &&
+    req.query.template_ids !== null &&
+    String(Array.isArray(req.query.template_ids) ? req.query.template_ids.join(',') : req.query.template_ids).trim() !== '' &&
+    templateIds.length === 0
+  ) {
+    return res.status(400).json({ success: false, message: 'template_ids 无效' })
+  }
+  if (
+    priorityOrderRaw !== undefined &&
+    priorityOrderRaw !== null &&
+    String(priorityOrderRaw).trim() !== '' &&
+    !priorityOrder
+  ) {
+    return res.status(400).json({ success: false, message: 'priority_order 仅支持 asc 或 desc' })
+  }
+  if (
+    updatedStartDateRaw !== undefined &&
+    updatedStartDateRaw !== null &&
+    String(updatedStartDateRaw).trim() !== '' &&
+    !updatedStartDate
+  ) {
+    return res.status(400).json({ success: false, message: 'updated_start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (
+    updatedEndDateRaw !== undefined &&
+    updatedEndDateRaw !== null &&
+    String(updatedEndDateRaw).trim() !== '' &&
+    !updatedEndDate
+  ) {
+    return res.status(400).json({ success: false, message: 'updated_end_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (
+    releaseStartDateRaw !== undefined &&
+    releaseStartDateRaw !== null &&
+    String(releaseStartDateRaw).trim() !== '' &&
+    !normalizeDate(releaseStartDateRaw)
+  ) {
+    return res.status(400).json({ success: false, message: 'start_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (
+    releaseEndDateRaw !== undefined &&
+    releaseEndDateRaw !== null &&
+    String(releaseEndDateRaw).trim() !== '' &&
+    !normalizeDate(releaseEndDateRaw)
+  ) {
+    return res.status(400).json({ success: false, message: 'end_date 格式错误，需为 YYYY-MM-DD' })
+  }
+  if (updatedStartDate && updatedEndDate && updatedStartDate > updatedEndDate) {
+    return res.status(400).json({ success: false, message: '更新时间范围不合法：开始日期不能大于结束日期' })
+  }
+  if (releaseStartDate > releaseEndDate) {
+    return res.status(400).json({ success: false, message: '上线日期范围不合法：开始日期不能大于结束日期' })
+  }
+
+  try {
+    const { rows, total, allTotal, inProgressTotal, completedTotal, cancelledTotal, pausedTotal, groupCounts } = await Work.listDemands({
+      page,
+      pageSize,
+      keyword,
+      status: req.query.status ? status : '',
+      priority: req.query.priority ? priority : '',
+      templateId,
+      templateIds,
+      priorityOrder: priorityOrder || '',
+      businessGroupCode: businessGroupCode || '',
+      ownerUserId,
+      updatedStartDate: updatedStartDate || '',
+      updatedEndDate: updatedEndDate || '',
+      currentUserId: req.user?.id ? Number(req.user.id) : null,
+      mineUserId: mine ? req.user.id : null,
+      excludeCancelled: true,
+      expectedReleaseOnly: true,
+      expectedReleaseStartDate: releaseStartDate,
+      expectedReleaseEndDate: releaseEndDate,
+      orderByExpectedReleaseDate: true,
+    })
+
+    return res.json({
+      success: true,
+      data: {
+        list: rows,
+        total,
+        all_total: allTotal,
+        in_progress_total: Number(inProgressTotal || 0),
+        completed_total: Number(completedTotal || 0),
+        cancelled_total: Number(cancelledTotal || 0),
+        paused_total: Number(pausedTotal || 0),
+        group_counts: groupCounts || [],
+        page,
+        pageSize,
+        start_date: releaseStartDate,
+        end_date: releaseEndDate,
+      },
+    })
+  } catch (err) {
+    console.error('获取上线排期表失败:', err)
     return res.status(500).json({ success: false, message: '服务器错误' })
   }
 }
@@ -6932,6 +7075,7 @@ module.exports = {
   getEfficiencyFactorSettings,
   updateEfficiencyFactorSettings,
   listDemands,
+  listLaunchScheduleDemands,
   listDemandViews,
   getDemandViewById,
   createDemandView,

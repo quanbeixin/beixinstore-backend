@@ -8,6 +8,14 @@ const APP_RELEASE_MANAGER_ROLE_KEYS = [
 ]
 const DEFAULT_NOTIFICATION_PUBLIC_BASE_URL = 'http://39.97.253.194'
 const APP_VERSION_RELEASE_PATH = '/app-version-release'
+const STATUS_CHANGE_NOTIFY_CODES = new Set([
+  'PENDING_PLAN',
+  'QUEUED',
+  'IN_REVIEW',
+  'LISTED',
+  'REJECTED',
+  'CANCELLED',
+])
 const APPLICANT_NOTIFY_STATUS_CODES = new Set(['IN_REVIEW', 'LISTED', 'REJECTED', 'CANCELLED'])
 
 function normalizeText(value, maxLength = 500) {
@@ -120,10 +128,14 @@ function buildNotificationContent(releases = []) {
 }
 
 function buildStatusChangeContent(release, previousStatusName = '') {
+  const relatedDemand = release.related_demand_id
+    ? `${formatValue(release.related_demand_name)}（${formatValue(release.related_demand_id)}）`
+    : '-'
   return [
     `发版申请ID：${formatValue(release.release_request_no || release.id)}`,
     `APP：${formatValue(release.app_name)}`,
     `版本号：${formatValue(release.app_version)}`,
+    `关联需求：${relatedDemand}`,
     `当前状态：${formatValue(release.release_status_name || release.release_status)}`,
     previousStatusName ? `原状态：${previousStatusName}` : '',
     `发版负责人：${formatValue(release.owner_name)}`,
@@ -201,6 +213,40 @@ async function getApplicantTarget(release) {
   }
 }
 
+async function getDemandGroupTarget(release) {
+  const demandId = normalizeText(release?.related_demand_id, 64)
+  if (!demandId) return null
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, name, group_chat_mode, group_chat_id
+       FROM work_demands
+       WHERE id = ?
+       LIMIT 1`,
+      [demandId],
+    )
+    const demand = rows?.[0]
+    const mode = normalizeText(demand?.group_chat_mode, 20).toLowerCase()
+    const chatId = normalizeText(demand?.group_chat_id, 128)
+    if (!demand || !['auto', 'bind'].includes(mode) || !chatId) return null
+
+    return {
+      target_type: 'chat',
+      target_id: chatId,
+      target_name: normalizeText(demand.name, 128) || `需求群(${demandId})`,
+      extra: {
+        demand_id: demandId,
+      },
+    }
+  } catch (error) {
+    console.error('查询APP发版关联需求群失败', {
+      demand_id: demandId,
+      message: error?.message || error,
+    })
+    return null
+  }
+}
+
 const AppVersionReleaseNotificationService = {
   APPLICANT_NOTIFY_STATUS_CODES: Array.from(APPLICANT_NOTIFY_STATUS_CODES),
 
@@ -248,7 +294,7 @@ const AppVersionReleaseNotificationService = {
   async notifyApplicantStatusChanged({ beforeRelease, afterRelease } = {}) {
     const beforeStatus = normalizeText(beforeRelease?.release_status, 64).toUpperCase()
     const afterStatus = normalizeText(afterRelease?.release_status, 64).toUpperCase()
-    if (!afterStatus || beforeStatus === afterStatus || !APPLICANT_NOTIFY_STATUS_CODES.has(afterStatus)) {
+    if (!afterStatus || beforeStatus === afterStatus || !STATUS_CHANGE_NOTIFY_CODES.has(afterStatus)) {
       return {
         success: true,
         skipped: true,
@@ -256,12 +302,19 @@ const AppVersionReleaseNotificationService = {
       }
     }
 
-    const target = await getApplicantTarget(afterRelease)
-    if (!target) {
+    const targets = []
+    if (APPLICANT_NOTIFY_STATUS_CODES.has(afterStatus)) {
+      const applicantTarget = await getApplicantTarget(afterRelease)
+      if (applicantTarget) targets.push(applicantTarget)
+    }
+    const demandGroupTarget = await getDemandGroupTarget(afterRelease)
+    if (demandGroupTarget) targets.push(demandGroupTarget)
+
+    if (targets.length === 0) {
       return {
         success: true,
         skipped: true,
-        reason: 'APPLICANT_FEISHU_NOT_FOUND',
+        reason: 'NO_STATUS_NOTIFICATION_TARGETS',
       }
     }
 
@@ -269,7 +322,7 @@ const AppVersionReleaseNotificationService = {
       channelType: 'feishu',
       title: buildStatusChangeTitle(afterRelease),
       content: buildStatusChangeContent(afterRelease, beforeRelease?.release_status_name || beforeStatus),
-      targets: [target],
+      targets,
       metadata: {
         source: 'app_version_release_status_changed',
         detail_url: buildAppVersionReleaseUrl(),

@@ -1135,6 +1135,12 @@ const AppVersionRelease = {
 
     const remark = normalizeText(payload.remark, 1000)
     const relatedDemand = await resolveDemandInfo(payload.related_demand_id)
+    if (!relatedDemand.id) {
+      const err = new Error('related_demand_required')
+      err.statusCode = 400
+      err.message = '请选择关联需求'
+      throw err
+    }
     const applicant = await resolveUserInfo(userId)
     const items = normalizeApplicationItems(payload.items)
     const packageIds = items.map((item) => item.package_id)

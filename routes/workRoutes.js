@@ -86,6 +86,7 @@ const {
   getEfficiencyFactorSettings,
   updateEfficiencyFactorSettings,
   listDemands,
+  listLaunchScheduleDemands,
   listDemandViews,
   getDemandViewById,
   createDemandView,
@@ -353,6 +354,7 @@ router.post(
   submitMyDemandValueReviewScore,
 )
 
+router.get('/demands/launch-schedule', authMiddleware.requirePermission('demand.view'), listLaunchScheduleDemands)
 router.get('/demands', authMiddleware.requirePermission('demand.view'), listDemands)
 router.get('/demands/views', authMiddleware.requirePermission('demand.view'), listDemandViews)
 router.get('/demands/views/:viewId', authMiddleware.requirePermission('demand.view'), getDemandViewById)

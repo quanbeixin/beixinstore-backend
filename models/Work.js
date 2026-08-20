@@ -2766,6 +2766,8 @@ const Work = {
     ownerUserId = null,
     updatedStartDate = '',
     updatedEndDate = '',
+    expectedReleaseStartDate = '',
+    expectedReleaseEndDate = '',
     relationScope = '',
     currentUserId = null,
     mineUserId = null,
@@ -2853,6 +2855,16 @@ const Work = {
 
     if (expectedReleaseOnly) {
       baseConditions.push('d.expected_release_date IS NOT NULL')
+    }
+
+    if (expectedReleaseStartDate) {
+      baseConditions.push('DATE(d.expected_release_date) >= ?')
+      baseParams.push(expectedReleaseStartDate)
+    }
+
+    if (expectedReleaseEndDate) {
+      baseConditions.push('DATE(d.expected_release_date) <= ?')
+      baseParams.push(expectedReleaseEndDate)
     }
 
     const countBaseConditions = [...baseConditions]
