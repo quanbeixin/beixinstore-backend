@@ -77,10 +77,12 @@ const FIELD_DEFINITIONS = {
     { name: 'prodSha256Fingerprint', description: '生产环境sha256指纹' },
     { name: 'prodReleaseDownloadUrl', description: '生产环境包下载地址' },
     { name: 'prodH5Url', description: 'H5生产环境' },
+    { name: 'prodTrackingUrl', description: '生产环境埋点地址' },
     { name: 'testSha1Fingerprint', description: '测试环境sha1指纹' },
     { name: 'testSha256Fingerprint', description: '测试环境sha256指纹' },
     { name: 'testReleaseDownloadUrl', description: '测试环境包下载地址' },
     { name: 'testH5Url', description: 'H5测试环境' },
+    { name: 'testTrackingUrl', description: '测试环境埋点地址' },
   ],
   BACKEND: [
     { name: 'coldStartInfo', description: '冷启信息' },
@@ -160,9 +162,13 @@ const OPEN_FRONTEND_TEXT_FIELDS = new Set([
   'prodSha1Fingerprint',
   'prodSha256Fingerprint',
   'prodReleaseDownloadUrl',
+  'prodH5Url',
+  'prodTrackingUrl',
   'testSha1Fingerprint',
   'testSha256Fingerprint',
   'testReleaseDownloadUrl',
+  'testH5Url',
+  'testTrackingUrl',
 ])
 
 const OPEN_FRONTEND_FILE_FIELDS = new Set([
@@ -173,6 +179,13 @@ const OPEN_FRONTEND_FILE_FIELDS = new Set([
 const OPEN_FRONTEND_FIELDS = new Set([
   ...OPEN_FRONTEND_TEXT_FIELDS,
   ...OPEN_FRONTEND_FILE_FIELDS,
+])
+
+const OPEN_CLEARABLE_OVERRIDE_FIELDS = new Set([
+  'prodH5Url',
+  'prodTrackingUrl',
+  'testH5Url',
+  'testTrackingUrl',
 ])
 
 const OPEN_VERSION_FIELDS = new Set(['version_number', 'version_info'])
@@ -231,6 +244,15 @@ function buildGeneratedH5Values(row) {
   return {
     prodH5Url: packageName && domain ? `https://${packageName}.app.${domain}` : '',
     testH5Url: packageName ? `https://${packageName}-itest.a1aws.geesdev.com` : '',
+  }
+}
+
+function buildGeneratedTrackingValues(row) {
+  const packageName = normalizeH5PackageName(row?.package_name)
+  const domain = normalizeH5Domain(row?.domain_info)
+  return {
+    prodTrackingUrl: packageName && domain ? `https://${packageName}.data.app.${domain}` : '',
+    testTrackingUrl: packageName && domain ? `https://${packageName}.test-data.app.${domain}` : '',
   }
 }
 
@@ -301,6 +323,10 @@ function hasMeaningfulOpenFieldValue(value) {
 function mergeFieldsPreservingExisting(currentContent = {}, fields = {}) {
   const nextContent = { ...currentContent }
   Object.entries(fields || {}).forEach(([key, value]) => {
+    if (OPEN_CLEARABLE_OVERRIDE_FIELDS.has(key) && !hasMeaningfulOpenFieldValue(value)) {
+      nextContent[key] = ''
+      return
+    }
     if (
       hasMeaningfulOpenFieldValue(currentContent[key]) &&
       !hasMeaningfulOpenFieldValue(value)
@@ -697,13 +723,22 @@ function buildPackageResponse(row, sideNotesByPackageId, productionNodesByPackag
     sections[section.key].is_confirmed = Boolean(note?.is_confirmed)
   })
   const generatedH5Values = buildGeneratedH5Values(row)
+  const generatedTrackingValues = buildGeneratedTrackingValues(row)
   const generatedOperationValues = buildGeneratedOperationValues(row)
   const generatedGooglePayPackageValues = buildGeneratedGooglePayPackageValues(row)
   if (sections.frontend?.value && typeof sections.frontend.value === 'object') {
     Object.entries(generatedH5Values).forEach(([key, value]) => {
+      const storedValue = normalizeText(sections.frontend.value[key]?.value, 10000)
       sections.frontend.value[key] = field(
         key === 'prodH5Url' ? 'H5生产环境' : 'H5测试环境',
-        value,
+        storedValue || value,
+      )
+    })
+    Object.entries(generatedTrackingValues).forEach(([key, value]) => {
+      const storedValue = normalizeText(sections.frontend.value[key]?.value, 10000)
+      sections.frontend.value[key] = field(
+        key === 'prodTrackingUrl' ? '生产环境埋点地址' : '测试环境埋点地址',
+        storedValue || value,
       )
     })
   }

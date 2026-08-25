@@ -274,11 +274,20 @@ curl \
 | `oppo_push` | OPPO-PUSH信息补充 | OPPO PUSH 生产环境配置 |
 | `design` | 设计侧补充 | 设计资源、图片、压缩包等 |
 | `operation` | 运营侧补充 | 商店、隐私、说明、送审账号等运营信息 |
-| `frontend` | 前端补充 | sha1/sha256 指纹 |
+| `frontend` | 前端补充 | sha1/sha256 指纹、H5 地址、埋点地址等 |
 | `backend` | GP初始化配置信息 | GP 初始化相关信息 |
 | `devops` | 运维补充 | 谷歌鉴权、Firebase、支付、json 文件等 |
 | `requirement` | 需求侧补充 | 兼容历史字段 |
 | `development` | 研发侧补充 | 兼容历史字段 |
+
+`frontend.value` 中的环境地址字段：
+
+| 字段 | description | 说明 |
+|------|-------------|------|
+| `prodH5Url` | H5生产环境 | 优先返回人工或开放接口写入值，否则按 `https://[域名前缀].app.[域名]` 自动生成 |
+| `testH5Url` | H5测试环境 | 优先返回人工或开放接口写入值，否则按 `https://[域名前缀]-itest.a1aws.geesdev.com` 自动生成 |
+| `prodTrackingUrl` | 生产环境埋点地址 | 优先返回人工或开放接口写入值，否则按 `https://[域名前缀].data.app.[域名]` 自动生成 |
+| `testTrackingUrl` | 测试环境埋点地址 | 优先返回人工或开放接口写入值，否则按 `https://[域名前缀].test-data.app.[域名]` 自动生成 |
 
 每个模块除 `description/value` 外，还会返回：
 

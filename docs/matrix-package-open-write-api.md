@@ -152,9 +152,13 @@ POST http://39.97.253.194/api/open/matrix-packages/update-fields
 | `frontend` | `prodSha1Fingerprint` | 生产环境sha1指纹 | 文本 |
 | `frontend` | `prodSha256Fingerprint` | 生产环境sha256指纹 | 文本 |
 | `frontend` | `prodReleaseDownloadUrl` | 正式包下载地址 | 文本 |
+| `frontend` | `prodH5Url` | H5生产环境 | 文本 |
+| `frontend` | `prodTrackingUrl` | 生产环境埋点地址 | 文本 |
 | `frontend` | `testSha1Fingerprint` | 测试环境sha1指纹 | 文本 |
 | `frontend` | `testSha256Fingerprint` | 测试环境sha256指纹 | 文本 |
 | `frontend` | `testReleaseDownloadUrl` | 测试包下载地址 | 文本 |
+| `frontend` | `testH5Url` | H5测试环境 | 文本 |
+| `frontend` | `testTrackingUrl` | 测试环境埋点地址 | 文本 |
 | `frontend` | `googleServiceJsonFile` | google-service.json文件 | 文件对象 |
 | `frontend` | `pushFcmFile` | push-fcm文件 | 文件对象 |
 | `advertising` | `MATRIX_FACEBOOK_INSTALL_DECRYPT_SECRET` | Facebook 投放解析安装来源密钥 | 文本 |
@@ -187,7 +191,7 @@ curl -X POST "http://39.97.253.194/api/open/matrix-packages/update-fields" \
   }'
 ```
 
-`prodH5Url` / `testH5Url` 是系统自动生成字段，不开放写入。
+`prodH5Url` / `testH5Url` / `prodTrackingUrl` / `testTrackingUrl` 均提供自动生成默认值，同时允许写入自定义值；写入空字符串可清除自定义值并恢复自动生成。
 
 ### 写入文本字段示例
 
@@ -202,7 +206,11 @@ curl -X POST "http://39.97.253.194/api/open/matrix-packages/update-fields" \
     "sections": {
       "frontend": {
         "appVersion": "1.0.3",
-        "appConsoleUrl": "https://play.google.com/console/..."
+        "appConsoleUrl": "https://play.google.com/console/...",
+        "prodH5Url": "https://vimi.app.vimi.art",
+        "testH5Url": "https://vimi-itest.a1aws.geesdev.com",
+        "prodTrackingUrl": "https://vimi.data.app.vimi.art",
+        "testTrackingUrl": "https://vimi.test-data.app.vimi.art"
       },
       "operation": {
         "prodGooglePlatformAppId": "1:xxx:android:xxx",
