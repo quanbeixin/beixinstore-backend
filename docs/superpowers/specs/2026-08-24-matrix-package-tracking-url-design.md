@@ -19,14 +19,14 @@ H5 地址的域名前缀沿用包名归一化规则：包名去除空白、转�
 - H5 生产环境：`https://[域名前缀].app.[域名]`
 - H5 测试环境：`https://[域名前缀]-itest.a1aws.geesdev.com`
 - 生产环境埋点地址：`https://data.app.[域名]`
-- 测试环境埋点地址：`https://test-data.app.[域名]`
+- 测试环境埋点地址：`https://aws-test-data.geesdev.com`
 
 例如 Taleglow（包名 `Taleglow`、域名 `taleglow.live`）：
 
 - `https://data.app.taleglow.live`
-- `https://test-data.app.taleglow.live`
+- `https://aws-test-data.geesdev.com`
 
-H5 地址按各自现有依赖生成；埋点地址仅在域名存在时生成。生成条件不足时字段显示为空。
+H5 地址按各自现有依赖生成；生产环境埋点地址仅在域名存在时生成，测试环境埋点地址始终使用固定地址。生成条件不足时字段显示为空。
 
 ## 值优先级
 
