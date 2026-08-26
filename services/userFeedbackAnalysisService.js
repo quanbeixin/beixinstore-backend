@@ -96,10 +96,8 @@ function buildFeedbackQuestionText(feedback, { labeled = false } = {}) {
 
 function hasAiCapability() {
   return Boolean(
-    normalizeText(process.env.FEEDBACK_AI_API_KEY) ||
-      normalizeText(process.env.AGENT_AI_API_KEY) ||
-      normalizeText(process.env.OPENAI_API_KEY) ||
-      normalizeText(process.env.DEEPSEEK_API_KEY),
+    normalizeText(process.env.AGENT_AI_API_KEY) ||
+      normalizeText(process.env.OPENAI_API_KEY),
   )
 }
 
@@ -480,6 +478,13 @@ function hasChineseChars(text) {
   return /[\u4e00-\u9fa5]/.test(String(text || ''))
 }
 
+function stripFeedbackFieldLabels(text) {
+  return String(text || '')
+    .replace(/(^|\n)\s*邮件标题\s*[：:]\s*/g, '$1')
+    .replace(/(^|\n)\s*邮件正文\s*[：:]\s*/g, '$1')
+    .trim()
+}
+
 function isMostlyChinese(text) {
   const raw = String(text || '')
   if (!raw) return false
@@ -492,7 +497,8 @@ function isMostlyChinese(text) {
 function needsChineseTranslation(sourceText, translatedText) {
   const source = normalizeText(sourceText)
   if (!source) return false
-  if (isMostlyChinese(source)) return false
+  const sourceForLanguageDetection = stripFeedbackFieldLabels(source)
+  if (isMostlyChinese(sourceForLanguageDetection)) return false
 
   const translated = normalizeText(translatedText)
   if (!translated) return true
@@ -529,7 +535,7 @@ function extractPlainAiText(rawText) {
 async function translateToChinese(text) {
   const source = normalizeText(text)
   if (!source) return ''
-  if (isMostlyChinese(source)) return source
+  if (isMostlyChinese(stripFeedbackFieldLabels(source))) return source
   if (!hasAiCapability()) return ''
 
   try {
@@ -801,58 +807,23 @@ function shouldRetryWithFallbackModel(error) {
 }
 
 async function callFeedbackAi(payload = {}) {
-  const preferredApiKey = normalizeText(process.env.FEEDBACK_AI_API_KEY, 256) || undefined
-  const preferredBaseUrl = normalizeText(process.env.FEEDBACK_AI_BASE_URL, 255) || undefined
-  const preferredModel = normalizeText(process.env.FEEDBACK_AI_MODEL, 64) || undefined
-  const preferredWireApi = normalizeText(process.env.FEEDBACK_AI_WIRE_API, 64) || undefined
+  const apiKey =
+    normalizeText(process.env.AGENT_AI_API_KEY, 256) ||
+    normalizeText(process.env.OPENAI_API_KEY, 256)
+  const baseUrl =
+    normalizeText(process.env.AGENT_AI_BASE_URL, 255) ||
+    normalizeText(process.env.OPENAI_BASE_URL, 255) ||
+    undefined
+  const model = normalizeText(process.env.AGENT_AI_DEFAULT_MODEL, 64) || undefined
+  const wireApi = normalizeText(process.env.AGENT_AI_WIRE_API, 64) || undefined
 
-  const resolveFeedbackWireApi = (baseUrl, explicitWireApi) => {
-    if (explicitWireApi) return explicitWireApi
-    const resolvedBaseUrl = normalizeText(baseUrl, 255).toLowerCase()
-    if (resolvedBaseUrl.includes('api.deepseek.com')) return 'chat_completions'
-    return undefined
-  }
-
-  try {
-    return await callChatCompletion({
-      ...payload,
-      apiKey: preferredApiKey,
-      baseUrl: preferredBaseUrl,
-      model: preferredModel,
-      wireApi: resolveFeedbackWireApi(preferredBaseUrl, preferredWireApi),
-    })
-  } catch (error) {
-    const fallbackApiKey =
-      normalizeText(process.env.AGENT_AI_API_KEY, 256) ||
-      normalizeText(process.env.OPENAI_API_KEY, 256) ||
-      normalizeText(process.env.DEEPSEEK_API_KEY, 256)
-    const fallbackBaseUrl =
-      normalizeText(process.env.AGENT_AI_BASE_URL, 255) ||
-      normalizeText(process.env.OPENAI_BASE_URL, 255) ||
-      normalizeText(process.env.DEEPSEEK_BASE_URL, 255) ||
-      preferredBaseUrl ||
-      undefined
-    const fallbackModel =
-      normalizeText(process.env.AGENT_AI_DEFAULT_MODEL, 64) || preferredModel || undefined
-    const fallbackWireApi =
-      normalizeText(process.env.AGENT_AI_WIRE_API, 64) ||
-      resolveFeedbackWireApi(fallbackBaseUrl, preferredWireApi) ||
-      undefined
-    const hasDifferentFallback = Boolean(fallbackApiKey) && fallbackApiKey !== preferredApiKey
-
-    if (!hasDifferentFallback || !shouldRetryWithFallbackModel(error)) {
-      throw error
-    }
-
-    console.warn('反馈 AI 主配置不可用，自动切换备用模型:', error?.message || error)
-    return callChatCompletion({
-      ...payload,
-      apiKey: fallbackApiKey,
-      baseUrl: fallbackBaseUrl,
-      model: fallbackModel,
-      wireApi: fallbackWireApi,
-    })
-  }
+  return callChatCompletion({
+    ...payload,
+    apiKey,
+    baseUrl,
+    model,
+    wireApi,
+  })
 }
 
 async function analyzeFeedback(feedback) {

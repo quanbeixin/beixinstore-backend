@@ -156,6 +156,10 @@ function resolveDisableResponseStorage(preferredDisableStorage) {
   return normalizeBoolean(process.env.AGENT_AI_DISABLE_RESPONSE_STORAGE, false)
 }
 
+function resolveServiceTier(preferredServiceTier = '') {
+  return normalizeText(preferredServiceTier) || normalizeText(process.env.AGENT_AI_SERVICE_TIER)
+}
+
 function resolveResponseFormat(preferredResponseFormat = null) {
   if (!preferredResponseFormat) return null
 
@@ -207,6 +211,7 @@ async function callChatCompletion({
   responseFormat,
   reasoningEffort,
   disableResponseStorage,
+  serviceTier,
   systemPrompt,
   userPrompt,
   temperature = 0.7,
@@ -214,7 +219,7 @@ async function callChatCompletion({
 }) {
   const resolvedApiKey = resolveApiKey(apiKey)
   if (!resolvedApiKey) {
-    throw new Error('未配置 AI API Key，请先设置 FEEDBACK_AI_API_KEY、AGENT_AI_API_KEY 或 OPENAI_API_KEY')
+    throw new Error('未配置 AI API Key，请先设置 AGENT_AI_API_KEY 或 OPENAI_API_KEY')
   }
   const resolvedBaseUrl = resolveBaseUrl(baseUrl)
   const resolvedModel = normalizeModelForProvider(model, resolvedBaseUrl)
@@ -222,6 +227,7 @@ async function callChatCompletion({
   const resolvedResponseFormat = resolveResponseFormat(responseFormat)
   const resolvedReasoningEffort = resolveReasoningEffort(reasoningEffort)
   const resolvedDisableResponseStorage = resolveDisableResponseStorage(disableResponseStorage)
+  const resolvedServiceTier = resolveServiceTier(serviceTier)
 
   const controller = new AbortController()
   const timeoutMs = Number.isFinite(Number(process.env.AGENT_AI_TIMEOUT_MS))
@@ -262,6 +268,7 @@ async function callChatCompletion({
             temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7,
             max_output_tokens: Number.isInteger(Number(maxTokens)) ? Number(maxTokens) : 2000,
             store: !resolvedDisableResponseStorage,
+            ...(resolvedServiceTier ? { service_tier: resolvedServiceTier } : {}),
             ...(resolvedReasoningEffort
               ? {
                   reasoning: {
@@ -279,6 +286,7 @@ async function callChatCompletion({
             temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.7,
             max_tokens: Number.isInteger(Number(maxTokens)) ? Number(maxTokens) : 2000,
             ...(resolvedResponseFormat ? { response_format: resolvedResponseFormat } : {}),
+            ...(resolvedServiceTier ? { service_tier: resolvedServiceTier } : {}),
           }
 
     const response = await fetch(`${resolvedBaseUrl}${endpointPath}`, {
