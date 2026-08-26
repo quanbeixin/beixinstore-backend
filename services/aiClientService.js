@@ -1,5 +1,7 @@
 const DEFAULT_CHAT_COMPLETIONS_PATH = '/chat/completions'
 const DEFAULT_RESPONSES_PATH = '/responses'
+const DEFAULT_MAX_RETRIES = 1
+const DEFAULT_RETRY_BASE_DELAY_MS = 800
 
 function normalizeText(value) {
   return String(value || '').trim()
@@ -160,6 +162,60 @@ function resolveServiceTier(preferredServiceTier = '') {
   return normalizeText(preferredServiceTier) || normalizeText(process.env.AGENT_AI_SERVICE_TIER)
 }
 
+function resolveMaxRetries(preferredMaxRetries) {
+  const value = preferredMaxRetries === undefined || preferredMaxRetries === null
+    ? Number(process.env.AGENT_AI_MAX_RETRIES)
+    : Number(preferredMaxRetries)
+  if (!Number.isInteger(value)) return DEFAULT_MAX_RETRIES
+  return Math.max(0, Math.min(value, 5))
+}
+
+function resolveTimeoutMs(preferredTimeoutMs) {
+  const value = preferredTimeoutMs === undefined || preferredTimeoutMs === null
+    ? Number(process.env.AGENT_AI_TIMEOUT_MS)
+    : Number(preferredTimeoutMs)
+  if (!Number.isFinite(value)) return 90000
+  return Math.max(3000, value)
+}
+
+function getRetryAfterMs(value) {
+  const text = normalizeText(value)
+  if (!text) return 0
+
+  const seconds = Number(text)
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(Math.ceil(seconds * 1000), 30000)
+  }
+
+  const timestamp = Date.parse(text)
+  if (Number.isFinite(timestamp)) {
+    return Math.min(Math.max(0, timestamp - Date.now()), 30000)
+  }
+
+  return 0
+}
+
+function getRetryDelayMs(attemptIndex, retryAfterMs = 0) {
+  if (retryAfterMs > 0) return retryAfterMs
+  return DEFAULT_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, attemptIndex - 1))
+}
+
+function shouldRetryAiRequest({ status, message }) {
+  const normalizedMessage = normalizeText(message).toLowerCase()
+  return (
+    status === 429 ||
+    normalizedMessage.includes('concurrency limit') ||
+    normalizedMessage.includes('rate limit') ||
+    normalizedMessage.includes('too many requests')
+  )
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
 function resolveResponseFormat(preferredResponseFormat = null) {
   if (!preferredResponseFormat) return null
 
@@ -212,6 +268,8 @@ async function callChatCompletion({
   reasoningEffort,
   disableResponseStorage,
   serviceTier,
+  timeoutMs,
+  maxRetries,
   systemPrompt,
   userPrompt,
   temperature = 0.7,
@@ -228,12 +286,11 @@ async function callChatCompletion({
   const resolvedReasoningEffort = resolveReasoningEffort(reasoningEffort)
   const resolvedDisableResponseStorage = resolveDisableResponseStorage(disableResponseStorage)
   const resolvedServiceTier = resolveServiceTier(serviceTier)
+  const resolvedMaxRetries = resolveMaxRetries(maxRetries)
 
   const controller = new AbortController()
-  const timeoutMs = Number.isFinite(Number(process.env.AGENT_AI_TIMEOUT_MS))
-    ? Math.max(3000, Number(process.env.AGENT_AI_TIMEOUT_MS))
-    : 90000
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const resolvedTimeoutMs = resolveTimeoutMs(timeoutMs)
+  const timer = setTimeout(() => controller.abort(), resolvedTimeoutMs)
 
   try {
     const endpointPath = resolvedWireApi === 'responses' ? DEFAULT_RESPONSES_PATH : DEFAULT_CHAT_COMPLETIONS_PATH
@@ -289,49 +346,70 @@ async function callChatCompletion({
             ...(resolvedServiceTier ? { service_tier: resolvedServiceTier } : {}),
           }
 
-    const response = await fetch(`${resolvedBaseUrl}${endpointPath}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${resolvedApiKey}`,
-      },
-      body: JSON.stringify(requestBody),
-      signal: controller.signal,
-    })
-
-    const text = await response.text()
-    let payload = null
-    try {
-      payload = text ? JSON.parse(text) : null
-    } catch {
-      payload = null
-    }
-
-    if (!response.ok) {
-      const message =
-        payload?.error?.message ||
-        payload?.message ||
-        `AI 调用失败，HTTP ${response.status}`
-      console.warn('AI 调用失败:', {
-        baseUrl: resolvedBaseUrl,
-        model: resolvedModel,
-        wireApi: resolvedWireApi,
-        status: response.status,
-        message,
+    for (let attempt = 0; attempt <= resolvedMaxRetries; attempt += 1) {
+      const response = await fetch(`${resolvedBaseUrl}${endpointPath}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${resolvedApiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
       })
-      throw new Error(message)
-    }
 
-    const content = extractCompletionContent(payload)
-    if (!content) {
-      const shapeSummary = buildPayloadShapeSummary(payload)
-      const payloadPreview = truncateText(text, 500)
-      throw new Error(`AI 未返回有效内容（${shapeSummary}）${payloadPreview ? `，返回预览：${payloadPreview}` : ''}`)
-    }
+      const text = await response.text()
+      let payload = null
+      try {
+        payload = text ? JSON.parse(text) : null
+      } catch {
+        payload = null
+      }
 
-    return {
-      content: String(content),
-      raw: payload,
+      if (!response.ok) {
+        const message =
+          payload?.error?.message ||
+          payload?.message ||
+          `AI 调用失败，HTTP ${response.status}`
+        const retryAfterMs = getRetryAfterMs(response.headers.get('retry-after'))
+        const canRetry = attempt < resolvedMaxRetries && shouldRetryAiRequest({ status: response.status, message })
+
+        if (canRetry) {
+          const retryDelayMs = getRetryDelayMs(attempt + 1, retryAfterMs)
+          console.warn('AI 调用触发限流，等待后重试:', {
+            baseUrl: resolvedBaseUrl,
+            model: resolvedModel,
+            wireApi: resolvedWireApi,
+            status: response.status,
+            attempt: attempt + 1,
+            maxRetries: resolvedMaxRetries,
+            retryDelayMs,
+            message,
+          })
+          await sleep(retryDelayMs)
+          continue
+        }
+
+        console.warn('AI 调用失败:', {
+          baseUrl: resolvedBaseUrl,
+          model: resolvedModel,
+          wireApi: resolvedWireApi,
+          status: response.status,
+          message,
+        })
+        throw new Error(message)
+      }
+
+      const content = extractCompletionContent(payload)
+      if (!content) {
+        const shapeSummary = buildPayloadShapeSummary(payload)
+        const payloadPreview = truncateText(text, 500)
+        throw new Error(`AI 未返回有效内容（${shapeSummary}）${payloadPreview ? `，返回预览：${payloadPreview}` : ''}`)
+      }
+
+      return {
+        content: String(content),
+        raw: payload,
+      }
     }
   } catch (error) {
     if (error?.name === 'AbortError') {

@@ -2,6 +2,9 @@ const UserFeedback = require('../models/UserFeedback')
 const { callChatCompletion } = require('./aiClientService')
 
 let configCache = null
+const DEFAULT_FEEDBACK_AI_TIMEOUT_MS = 20000
+const DEFAULT_FEEDBACK_AI_MAX_RETRIES = 0
+const DEFAULT_FEEDBACK_AI_MAX_TOKENS = 600
 const REFUND_INTENT_KEYWORDS = [
   'refund',
   'refunding',
@@ -56,6 +59,13 @@ function normalizeText(value, maxLength = 0) {
   if (!text) return ''
   if (maxLength > 0) return text.slice(0, maxLength)
   return text
+}
+
+function readNumberEnv(name, fallback, { integer = false, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY } = {}) {
+  const raw = Number(process.env[name])
+  const isValid = integer ? Number.isInteger(raw) : Number.isFinite(raw)
+  if (!isValid) return fallback
+  return Math.min(Math.max(raw, min), max)
 }
 
 function normalizeFeedbackBodyText(value) {
@@ -303,6 +313,7 @@ function extractLooseJsonLikeObject(rawText) {
     stringField('ai_primary_category') || stringField('primary_category') || stringField('ai_category')
   const aiReply = stringField('ai_reply')
   const aiReplyEn = stringField('ai_reply_en')
+  const userQuestionCn = stringField('user_question_cn')
   const userRequest = stringField('user_request')
   const aiSentiment = stringField('ai_sentiment')
   const secondaryCategories =
@@ -321,34 +332,9 @@ function extractLooseJsonLikeObject(rawText) {
     ai_sentiment: aiSentiment,
     ai_reply: aiReply,
     ai_reply_en: aiReplyEn,
+    user_question_cn: userQuestionCn,
     user_request: userRequest,
     is_new_request: isNewRequest,
-  }
-}
-
-async function recoverAnalysisFromNonJsonResponse({
-  rawContent = '',
-  feedback = null,
-  categoryOptions = [],
-}) {
-  const modelOutput = normalizeText(rawContent, 6000)
-  const feedbackText = buildFeedbackQuestionText(feedback, { labeled: true }) || ''
-  if (!modelOutput || !feedbackText) return null
-
-  const categoryHint = normalizeCategoryList(categoryOptions).join('、')
-  try {
-    const response = await callFeedbackAi({
-      systemPrompt:
-        '你是 JSON 结构化提取器。请根据用户反馈与候选分析内容，输出一个严格可解析的 JSON 对象，不要输出解释、不要输出 Markdown、不要输出分析过程。',
-      userPrompt: `请输出 JSON（字段必须完整）：\n{\n  "ai_primary_category": "主分类",\n  "ai_secondary_categories": [],\n  "ai_sentiment": "Positive | Neutral | Negative",\n  "ai_reply": "中文回复",\n  "ai_reply_en": "英文回复",\n  "user_request": "用户需求摘要",\n  "is_new_request": true\n}\n\n要求：ai_primary_category 只能保留 1 个最能代表用户问题的主分类；ai_secondary_categories 固定返回 []。\n\n分类候选：${categoryHint || '咨询、功能需求、Bug、投诉'}\n\n用户反馈：\n${feedbackText}\n\n候选分析内容：\n${modelOutput}`,
-      temperature: 0,
-      maxTokens: 800,
-      responseFormat: 'json_object',
-    })
-
-    return extractJsonObject(response?.content) || extractLooseJsonLikeObject(response?.content)
-  } catch {
-    return null
   }
 }
 
@@ -532,28 +518,6 @@ function extractPlainAiText(rawText) {
   )
 }
 
-async function translateToChinese(text) {
-  const source = normalizeText(text)
-  if (!source) return ''
-  if (isMostlyChinese(stripFeedbackFieldLabels(source))) return source
-  if (!hasAiCapability()) return ''
-
-  try {
-    const response = await callFeedbackAi({
-      systemPrompt:
-        '你是专业翻译助手。请把用户原文准确翻译成简体中文，仅输出翻译文本，不要任何解释或 JSON。',
-      userPrompt: `请翻译为简体中文：\n${source}`,
-      temperature: 0.1,
-      maxTokens: 600,
-    })
-
-    return extractPlainAiText(response?.content)
-  } catch (error) {
-    console.warn('用户问题翻译失败，保留原文:', error?.message || error)
-    return ''
-  }
-}
-
 async function translateToEnglish(text) {
   const source = normalizeText(text)
   if (!source) return ''
@@ -608,23 +572,14 @@ function fallbackChineseQuestion(sourceText) {
   return exactFallbackMap.get(lower) || ''
 }
 
-async function ensureChineseQuestion(sourceText) {
+function fallbackChineseQuestionForFastPath(sourceText) {
   const source = normalizeText(sourceText)
   if (!source) return ''
-
   if (!needsChineseTranslation(source, '')) return source
-
-  const translated = await translateToChinese(source)
-  if (!needsChineseTranslation(source, translated)) return translated
-
-  const fallbackTranslated = fallbackChineseQuestion(source)
-  if (fallbackTranslated) return fallbackTranslated
-
-  if (translated) return translated
-  return source
+  return fallbackChineseQuestion(source) || source
 }
 
-async function ensureEnglishReply(sourceText, analyzedEnText) {
+function fallbackEnglishReplyForFastPath(sourceText, analyzedEnText) {
   const source = normalizeText(sourceText)
   if (!source) return ''
 
@@ -632,10 +587,8 @@ async function ensureEnglishReply(sourceText, analyzedEnText) {
   if (!needsEnglishTranslation(source, candidate)) {
     return candidate || source
   }
-
-  const translated = await translateToEnglish(source)
-  if (looksLikeEnglish(translated)) return translated
   if (looksLikeEnglish(candidate)) return candidate
+  if (looksLikeEnglish(source) && !isMostlyChinese(source)) return source
 
   return 'Thanks for your feedback. We will review it and get back to you soon.'
 }
@@ -728,7 +681,7 @@ function buildPrompt(feedback, config) {
   const categoryHint = parseCategories(config?.categories).join('、')
   const userFeedbackText = buildFeedbackQuestionText(feedback, { labeled: true })
 
-  return `# 知识库\n${config.knowledgeBase || ''}\n\n# 限制条件\n${config.limitations || ''}\n\n# 分类候选\n${categoryHint || '咨询、功能需求、Bug、投诉'}\n\n# 用户反馈\n${userFeedbackText || ''}\n\n# 输出格式\n请只返回 JSON（不要额外说明），字段如下：\n{\n  "ai_primary_category": "主分类",\n  "ai_secondary_categories": [],\n  "ai_sentiment": "Positive | Neutral | Negative",\n  "ai_reply": "中文回复",\n  "ai_reply_en": "英文回复",\n  "user_request": "用户需求摘要",\n  "is_new_request": true\n}\n\n要求：\n1. ai_primary_category 必填，并且只能保留 1 个最能代表用户问题的主分类。\n2. 判断主分类时可以综合知识库、限制条件、分类候选和用户原文，但不要输出次分类。\n3. ai_secondary_categories 固定返回 []，用于兼容旧字段。\n4. user_request 只保留用户诉求摘要，不要返回用户原文翻译。`
+  return `# 知识库\n${config.knowledgeBase || ''}\n\n# 限制条件\n${config.limitations || ''}\n\n# 分类候选\n${categoryHint || '咨询、功能需求、Bug、投诉'}\n\n# 用户反馈\n${userFeedbackText || ''}\n\n# 输出格式\n请只返回 JSON（不要额外说明），字段如下：\n{\n  "ai_primary_category": "主分类",\n  "ai_secondary_categories": [],\n  "ai_sentiment": "Positive | Neutral | Negative",\n  "ai_reply": "中文回复",\n  "ai_reply_en": "英文回复",\n  "user_question_cn": "用户问题的简体中文翻译",\n  "user_request": "用户需求摘要",\n  "is_new_request": true\n}\n\n要求：\n1. ai_primary_category 必填，并且只能保留 1 个最能代表用户问题的主分类。\n2. 判断主分类时可以综合知识库、限制条件、分类候选和用户原文，但不要输出次分类。\n3. ai_secondary_categories 固定返回 []，用于兼容旧字段。\n4. user_question_cn 必填：把邮件标题和邮件正文翻译成简体中文；如果原文已经是中文，则保留原意并规范成简体中文；保留“邮件标题：”“邮件正文：”这类字段标签。\n5. user_request 只保留用户诉求摘要，不要返回用户原文翻译。`
 }
 
 function applyIntentCategoryOverrides({
@@ -796,16 +749,6 @@ function isFeedbackAiDebugEnabled() {
   return value === '1' || value === 'true' || value === 'yes' || value === 'on'
 }
 
-function shouldRetryWithFallbackModel(error) {
-  const message = String(error?.message || '').toLowerCase()
-  return (
-    message.includes('insufficient') ||
-    message.includes('quota') ||
-    message.includes('balance') ||
-    message.includes('rate limit')
-  )
-}
-
 async function callFeedbackAi(payload = {}) {
   const apiKey =
     normalizeText(process.env.AGENT_AI_API_KEY, 256) ||
@@ -816,6 +759,17 @@ async function callFeedbackAi(payload = {}) {
     undefined
   const model = normalizeText(process.env.AGENT_AI_DEFAULT_MODEL, 64) || undefined
   const wireApi = normalizeText(process.env.AGENT_AI_WIRE_API, 64) || undefined
+  const timeoutMs = readNumberEnv('FEEDBACK_AI_TIMEOUT_MS', DEFAULT_FEEDBACK_AI_TIMEOUT_MS, {
+    integer: true,
+    min: 3000,
+    max: 60000,
+  })
+  const maxRetries = readNumberEnv('FEEDBACK_AI_MAX_RETRIES', DEFAULT_FEEDBACK_AI_MAX_RETRIES, {
+    integer: true,
+    min: 0,
+    max: 2,
+  })
+  const reasoningEffort = normalizeText(process.env.FEEDBACK_AI_REASONING_EFFORT, 32) || 'low'
 
   return callChatCompletion({
     ...payload,
@@ -823,6 +777,9 @@ async function callFeedbackAi(payload = {}) {
     baseUrl,
     model,
     wireApi,
+    timeoutMs,
+    maxRetries,
+    reasoningEffort,
   })
 }
 
@@ -834,8 +791,8 @@ async function analyzeFeedback(feedback) {
   const feedbackQuestionTranslationSourceText = buildFeedbackQuestionText(feedback, { labeled: true }) || feedbackQuestionText
 
   if (!hasAiCapability()) {
-    heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionTranslationSourceText)
-    heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
+    heuristic.user_question_cn = fallbackChineseQuestionForFastPath(feedbackQuestionTranslationSourceText)
+    heuristic.ai_reply_en = fallbackEnglishReplyForFastPath(heuristic.ai_reply, heuristic.ai_reply_en)
     return heuristic
   }
 
@@ -846,9 +803,11 @@ async function analyzeFeedback(feedback) {
       temperature: Number.isFinite(Number(process.env.FEEDBACK_AI_TEMPERATURE))
         ? Number(process.env.FEEDBACK_AI_TEMPERATURE)
         : 0.4,
-      maxTokens: Number.isInteger(Number(process.env.FEEDBACK_AI_MAX_TOKENS))
-        ? Number(process.env.FEEDBACK_AI_MAX_TOKENS)
-        : 800,
+      maxTokens: readNumberEnv('FEEDBACK_AI_MAX_TOKENS', DEFAULT_FEEDBACK_AI_MAX_TOKENS, {
+        integer: true,
+        min: 300,
+        max: 1200,
+      }),
       responseFormat: 'json_object',
     })
 
@@ -856,19 +815,12 @@ async function analyzeFeedback(feedback) {
     if (!parsed) {
       parsed = extractLooseJsonLikeObject(response?.content)
       if (!parsed) {
-        parsed = await recoverAnalysisFromNonJsonResponse({
-          rawContent: response?.content,
-          feedback,
-          categoryOptions,
-        })
-      }
-      if (!parsed) {
         console.warn('反馈 AI 返回内容无法解析为 JSON，回退到规则分析:', {
           feedbackId: feedback?.id || null,
           preview: normalizeText(response?.content, 400),
         })
-        heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionTranslationSourceText)
-        heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
+        heuristic.user_question_cn = fallbackChineseQuestionForFastPath(feedbackQuestionTranslationSourceText)
+        heuristic.ai_reply_en = fallbackEnglishReplyForFastPath(heuristic.ai_reply, heuristic.ai_reply_en)
         return heuristic
       }
       if (isFeedbackAiDebugEnabled()) {
@@ -879,7 +831,10 @@ async function analyzeFeedback(feedback) {
       }
     }
 
-    const userQuestionCn = await ensureChineseQuestion(feedbackQuestionTranslationSourceText)
+    const parsedUserQuestionCn = normalizeText(parsed.user_question_cn)
+    const userQuestionCn = needsChineseTranslation(feedbackQuestionTranslationSourceText, parsedUserQuestionCn)
+      ? fallbackChineseQuestionForFastPath(feedbackQuestionTranslationSourceText)
+      : parsedUserQuestionCn
     const aiPrimaryCategory = sanitizeCategory(
       parsed.ai_primary_category || parsed.primary_category || parsed.ai_category,
       categoryOptions,
@@ -900,7 +855,7 @@ async function analyzeFeedback(feedback) {
       categoryOptions,
     })
     const normalizedAiReply = policyReply || aiReply
-    const normalizedAiReplyEn = await ensureEnglishReply(normalizedAiReply, parsed.ai_reply_en)
+    const normalizedAiReplyEn = fallbackEnglishReplyForFastPath(normalizedAiReply, parsed.ai_reply_en)
 
     return {
       ai_category: categoryOverride.aiPrimaryCategory,
@@ -916,7 +871,6 @@ async function analyzeFeedback(feedback) {
     }
   } catch (error) {
     console.warn('反馈 AI 分析失败，回退到规则分析:', error?.message || error)
-    heuristic.user_question_cn = await ensureChineseQuestion(feedbackQuestionTranslationSourceText)
     const fallbackPolicyReply = buildPolicyReplyByCategories({
       primaryCategory: heuristic.ai_primary_category,
       secondaryCategories: heuristic.ai_secondary_categories,
@@ -925,7 +879,8 @@ async function analyzeFeedback(feedback) {
     if (fallbackPolicyReply) {
       heuristic.ai_reply = fallbackPolicyReply
     }
-    heuristic.ai_reply_en = await ensureEnglishReply(heuristic.ai_reply, heuristic.ai_reply_en)
+    heuristic.user_question_cn = fallbackChineseQuestionForFastPath(feedbackQuestionTranslationSourceText)
+    heuristic.ai_reply_en = fallbackEnglishReplyForFastPath(heuristic.ai_reply, heuristic.ai_reply_en)
     return heuristic
   }
 }
