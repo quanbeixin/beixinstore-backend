@@ -1174,6 +1174,34 @@ const UserFeedback = {
     return this.getById(feedbackId)
   },
 
+  async markAnalysisPending(id, options = {}) {
+    await ensureTables()
+
+    const feedbackId = toPositiveInt(id)
+    if (!feedbackId) return null
+
+    const operatorUserId = toPositiveInt(options.operatorUserId)
+
+    await pool.query(
+      `UPDATE user_feedback
+       SET ai_category = NULL,
+           ai_primary_category = NULL,
+           ai_secondary_categories = NULL,
+           ai_all_categories = NULL,
+           ai_sentiment = NULL,
+           ai_reply = NULL,
+           ai_reply_en = NULL,
+           user_request = NULL,
+           user_question_cn = NULL,
+           ai_processed = 0,
+           updated_by = ?
+       WHERE id = ?`,
+      [operatorUserId, feedbackId],
+    )
+
+    return this.getById(feedbackId)
+  },
+
   async getPromptConfig() {
     await ensureTables()
     const [rows] = await pool.query(

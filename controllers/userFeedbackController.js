@@ -1,8 +1,8 @@
 const UserFeedback = require('../models/UserFeedback')
 const {
-  analyzeSingleFeedback,
   analyzeUnprocessedFeedback,
   clearConfigCache,
+  startSingleFeedbackAnalysis,
   translateFeedbackReplyToEnglish,
 } = require('../services/userFeedbackAnalysisService')
 
@@ -253,7 +253,7 @@ async function analyzeUnprocessed(req, res) {
 
 async function analyzeSingle(req, res) {
   try {
-    const result = await analyzeSingleFeedback(req.params.id, {
+    const result = await startSingleFeedbackAnalysis(req.params.id, {
       operatorUserId: req.user?.id,
     })
     return res.json(result)

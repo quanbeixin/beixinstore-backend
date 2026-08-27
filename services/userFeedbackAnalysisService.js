@@ -2,7 +2,8 @@ const UserFeedback = require('../models/UserFeedback')
 const { callChatCompletion } = require('./aiClientService')
 
 let configCache = null
-const DEFAULT_FEEDBACK_AI_TIMEOUT_MS = 20000
+const runningFeedbackAnalysisIds = new Set()
+const DEFAULT_FEEDBACK_AI_TIMEOUT_MS = 40000
 const DEFAULT_FEEDBACK_AI_MAX_RETRIES = 0
 const DEFAULT_FEEDBACK_AI_MAX_TOKENS = 600
 const REFUND_INTENT_KEYWORDS = [
@@ -905,6 +906,68 @@ async function analyzeSingleFeedback(feedbackId, options = {}) {
   }
 }
 
+async function runSingleFeedbackAnalysis(feedbackId, options = {}) {
+  const normalizedFeedbackId = Number(feedbackId || 0)
+  try {
+    const row = await UserFeedback.getById(normalizedFeedbackId)
+    if (!row) return
+    const analysis = await analyzeFeedback(row)
+    await UserFeedback.markAnalysis(normalizedFeedbackId, analysis, {
+      operatorUserId: options?.operatorUserId,
+    })
+  } catch (error) {
+    console.error('后台反馈 AI 分析失败:', {
+      feedbackId: normalizedFeedbackId || null,
+      message: error?.message || error,
+    })
+  } finally {
+    runningFeedbackAnalysisIds.delete(normalizedFeedbackId)
+  }
+}
+
+async function startSingleFeedbackAnalysis(feedbackId, options = {}) {
+  const row = await UserFeedback.getById(feedbackId)
+  if (!row) {
+    const error = new Error('反馈不存在')
+    error.code = 'NOT_FOUND'
+    throw error
+  }
+
+  const normalizedFeedbackId = Number(row.id || feedbackId || 0)
+  if (runningFeedbackAnalysisIds.has(normalizedFeedbackId)) {
+    return {
+      success: true,
+      message: 'AI 分析正在进行中',
+      async: true,
+      data: {
+        id: normalizedFeedbackId,
+        status: 'PROCESSING',
+      },
+    }
+  }
+
+  await UserFeedback.markAnalysisPending(normalizedFeedbackId, {
+    operatorUserId: options?.operatorUserId,
+  })
+
+  runningFeedbackAnalysisIds.add(normalizedFeedbackId)
+  setImmediate(() => {
+    runSingleFeedbackAnalysis(normalizedFeedbackId, {
+      operatorUserId: options?.operatorUserId,
+    })
+  })
+
+  return {
+    success: true,
+    message: 'AI 分析已开始',
+    async: true,
+    data: {
+      id: normalizedFeedbackId,
+      status: 'PROCESSING',
+    },
+  }
+}
+
 async function analyzeUnprocessedFeedback(limit = 10, options = {}) {
   const list = await UserFeedback.listUnprocessed(limit)
   if (!list.length) {
@@ -950,6 +1013,7 @@ async function analyzeUnprocessedFeedback(limit = 10, options = {}) {
 
 module.exports = {
   analyzeSingleFeedback,
+  startSingleFeedbackAnalysis,
   analyzeUnprocessedFeedback,
   translateFeedbackReplyToEnglish,
   clearConfigCache,
