@@ -672,6 +672,8 @@ const DemandValueReview = {
     const orderSql =
       normalizedSortBy === 'overall_score'
         ? `ORDER BY (r.overall_score IS NULL) ASC, r.overall_score ${normalizedSortOrder}, r.updated_at DESC, r.id DESC`
+        : normalizedSortBy === 'demand_expected_release_date'
+          ? `ORDER BY (d.expected_release_date IS NULL) ASC, d.expected_release_date ${normalizedSortOrder}, r.updated_at DESC, r.id DESC`
         : 'ORDER BY r.updated_at DESC, r.id DESC'
     const [rows] = await pool.query(
       `SELECT
