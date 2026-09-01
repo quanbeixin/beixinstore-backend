@@ -8,6 +8,7 @@ const RELEASE_STATUS_META = {
   REJECTED: { name: '被拒审', color: 'red' },
   CANCELLED: { name: '取消', color: 'default' },
 }
+const RELEASE_STATUS_CODES = Object.keys(RELEASE_STATUS_META)
 
 const DEMAND_STATUS_META = {
   TODO: { name: '待处理', color: 'default' },
@@ -21,6 +22,7 @@ const COVERAGE_STATUS_META = {
   COVERED: { name: '已覆盖', color: 'green' },
   IN_REVIEW: { name: '审核中', color: 'gold' },
   APPLICATION_SUBMITTED: { name: '已申请', color: 'cyan' },
+  RELEASE_ONLY: { name: '仅发版', color: 'purple' },
   INCLUDED_NOT_RELEASED: { name: '已包含未发版', color: 'blue' },
   NOT_INCLUDED: { name: '未包含', color: 'default' },
 }
@@ -109,17 +111,49 @@ function buildReleaseSummary(releases = []) {
   }
 }
 
-function getCoverageStatus({ matchedVersions, releases }) {
-  if (matchedVersions.length === 0) return COVERAGE_STATUS_META.NOT_INCLUDED
+function buildReleasePackageSummary(releases = []) {
+  const latestByPackageId = new Map()
+  releases.forEach((release) => {
+    const packageId = Number(release.matrix_package_id || 0)
+    if (!packageId) return
+    const current = latestByPackageId.get(packageId)
+    if (!current || Number(release.id || 0) > Number(current.id || 0)) latestByPackageId.set(packageId, release)
+  })
+  const packageRows = Array.from(latestByPackageId.values())
+  const historyByPackageId = new Map()
+  releases.forEach((release) => {
+    const packageId = Number(release.matrix_package_id || 0)
+    const latest = latestByPackageId.get(packageId)
+    if (!latest || Number(release.id || 0) >= Number(latest.id || 0)) return
+    if (!String(release.last_operation_summary || '').startsWith('同步发版申请至')) return
+    if (!historyByPackageId.has(packageId)) historyByPackageId.set(packageId, [])
+    historyByPackageId.get(packageId).push(release)
+  })
+  const counts = RELEASE_STATUS_CODES.reduce((result, code) => {
+    result[code.toLowerCase()] = 0
+    return result
+  }, { total: packageRows.length })
+  packageRows.forEach((release) => {
+    const key = String(release.release_status || '').toLowerCase()
+    if (Object.prototype.hasOwnProperty.call(counts, key)) counts[key] += 1
+  })
+  return { counts, packageRows, historyByPackageId }
+}
+
+function getCoverageStatus({ matchedVersions, releases, relatedReleases = [] }) {
+  if (matchedVersions.length === 0) {
+    return relatedReleases.length > 0 ? COVERAGE_STATUS_META.RELEASE_ONLY : COVERAGE_STATUS_META.NOT_INCLUDED
+  }
   if (releases.some((release) => release.release_status === 'LISTED')) return COVERAGE_STATUS_META.COVERED
   if (releases.some((release) => release.release_status === 'IN_REVIEW')) return COVERAGE_STATUS_META.IN_REVIEW
   if (releases.some((release) => ['PENDING_PLAN', 'QUEUED'].includes(release.release_status))) {
     return COVERAGE_STATUS_META.APPLICATION_SUBMITTED
   }
+  if (relatedReleases.length > 0) return COVERAGE_STATUS_META.RELEASE_ONLY
   return COVERAGE_STATUS_META.INCLUDED_NOT_RELEASED
 }
 
-function mapPackageCoverage(packageRow, versionRows, releaseRows, demandName) {
+function mapPackageCoverage(packageRow, versionRows, releaseRows, demandName, relatedReleaseRows = []) {
   const packageId = Number(packageRow.id)
   const matchedVersions = versionRows
     .filter((version) => parseFeatures(version.version_info).some((feature) => normalizeMatchText(feature) === normalizeMatchText(demandName)))
@@ -127,7 +161,7 @@ function mapPackageCoverage(packageRow, versionRows, releaseRows, demandName) {
   const releases = releaseRows.filter((release) =>
     matchedVersions.some((version) => normalizeMatchText(version.version_number) === normalizeMatchText(release.app_version)),
   )
-  const coverageStatus = getCoverageStatus({ matchedVersions, releases })
+  const coverageStatus = getCoverageStatus({ matchedVersions, releases, relatedReleases: relatedReleaseRows })
   const latestVersion = matchedVersions[0] || null
   const releaseSummary = buildReleaseSummary(releases)
 
@@ -148,12 +182,14 @@ function mapPackageCoverage(packageRow, versionRows, releaseRows, demandName) {
   }
 }
 
-function mapDemandRow(row, packages, versionsByPackageId, releasesByPackageVersion) {
+function mapDemandRow(row, packages, versionsByPackageId, releasesByPackageVersion, releasesByDemandId) {
   const demandName = row.name || ''
   const packageCoverage = packages.map((packageRow) => {
     const packageId = Number(packageRow.id)
     const releaseMap = releasesByPackageVersion.get(packageId) || []
-    return mapPackageCoverage(packageRow, versionsByPackageId.get(packageId) || [], releaseMap, demandName)
+    const relatedReleaseRows = (releasesByDemandId.get(String(row.id)) || [])
+      .filter((release) => Number(release.matrix_package_id) === packageId)
+    return mapPackageCoverage(packageRow, versionsByPackageId.get(packageId) || [], releaseMap, demandName, relatedReleaseRows)
   })
   const counts = packageCoverage.reduce((result, item) => {
     result.total += 1
@@ -161,9 +197,35 @@ function mapDemandRow(row, packages, versionsByPackageId, releasesByPackageVersi
     if (item.coverage_status === 'IN_REVIEW') result.in_review += 1
     if (item.coverage_status === 'APPLICATION_SUBMITTED') result.application_submitted += 1
     if (item.coverage_status === 'INCLUDED_NOT_RELEASED') result.included_not_released += 1
+    if (item.coverage_status === 'RELEASE_ONLY') result.release_only += 1
     if (item.coverage_status === 'NOT_INCLUDED') result.not_included += 1
     return result
-  }, { total: 0, covered: 0, in_review: 0, application_submitted: 0, included_not_released: 0, not_included: 0 })
+  }, { total: 0, covered: 0, in_review: 0, application_submitted: 0, release_only: 0, included_not_released: 0, not_included: 0 })
+  const releasePackageSummary = buildReleasePackageSummary(releasesByDemandId.get(String(row.id)) || [])
+  const releasePackageCoverage = releasePackageSummary.packageRows.map((release) => {
+    const packageRow = packages.find((item) => Number(item.id) === Number(release.matrix_package_id))
+    const status = String(release.release_status || '').toUpperCase()
+    return {
+      matrix_package_id: Number(release.matrix_package_id),
+      release_id: Number(release.id),
+      package_name: packageRow?.package_name || '',
+      app_id: packageRow?.app_id || '',
+      app_version: release.app_version || '',
+      release_request_no: release.release_request_no || '',
+      release_status: status,
+      release_status_name: RELEASE_STATUS_META[status]?.name || status || '',
+      release_status_color: RELEASE_STATUS_META[status]?.color || 'default',
+      application_versions: (releasePackageSummary.historyByPackageId.get(Number(release.matrix_package_id)) || [])
+        .sort((left, right) => Number(right.id || 0) - Number(left.id || 0))
+        .map((item) => ({
+          release_id: Number(item.id),
+          app_version: item.app_version || '',
+          release_request_no: item.release_request_no || '',
+          release_status: String(item.release_status || '').toUpperCase(),
+          release_status_name: RELEASE_STATUS_META[String(item.release_status || '').toUpperCase()]?.name || item.release_status || '',
+        })),
+    }
+  })
 
   return {
     id: row.id,
@@ -176,6 +238,8 @@ function mapDemandRow(row, packages, versionsByPackageId, releasesByPackageVersi
     expected_release_date: row.expected_release_date || null,
     coverage_summary: counts,
     package_coverage: packageCoverage,
+    release_package_summary: releasePackageSummary.counts,
+    release_package_coverage: releasePackageCoverage,
   }
 }
 
@@ -235,7 +299,7 @@ const AppReleaseDemandCoverage = {
          ORDER BY updated_at DESC, id DESC`,
       ),
       pool.query(
-        `SELECT id, matrix_package_id, release_request_no, app_version, release_status
+         `SELECT id, matrix_package_id, release_request_no, app_version, release_status, related_demand_id, last_operation_summary
          FROM app_version_releases
          WHERE deleted_at IS NULL`,
       ),
@@ -248,14 +312,20 @@ const AppReleaseDemandCoverage = {
       versionsByPackageId.get(packageId).push(version)
     })
     const releasesByPackageVersion = new Map()
+    const releasesByDemandId = new Map()
     releaseRows.forEach((release) => {
       const packageId = Number(release.matrix_package_id)
       if (!releasesByPackageVersion.has(packageId)) releasesByPackageVersion.set(packageId, [])
       releasesByPackageVersion.get(packageId).push(release)
+      const demandId = String(release.related_demand_id || '').trim()
+      if (demandId) {
+        if (!releasesByDemandId.has(demandId)) releasesByDemandId.set(demandId, [])
+        releasesByDemandId.get(demandId).push(release)
+      }
     })
 
     return {
-      list: demandRows.map((row) => mapDemandRow(row, packageRows, versionsByPackageId, releasesByPackageVersion)),
+      list: demandRows.map((row) => mapDemandRow(row, packageRows, versionsByPackageId, releasesByPackageVersion, releasesByDemandId)),
       page,
       pageSize,
       total: Number(countRows[0]?.total || 0),

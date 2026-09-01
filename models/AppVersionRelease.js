@@ -857,6 +857,9 @@ const AppVersionRelease = {
     const owner = Object.prototype.hasOwnProperty.call(payload, 'owner_user_id')
       ? await resolveUserInfo(payload.owner_user_id)
       : { id: existing.owner_user_id || null, name: existing.owner_name || '' }
+    const relatedDemand = Object.prototype.hasOwnProperty.call(payload, 'related_demand_id')
+      ? await resolveDemandInfo(payload.related_demand_id)
+      : { id: existing.related_demand_id || '', name: existing.related_demand_name || '' }
     const previousReleaseInfo = Object.prototype.hasOwnProperty.call(payload, 'previous_release_info')
       ? normalizeText(payload.previous_release_info, 255)
       : existing.previous_release_info
@@ -886,6 +889,8 @@ const AppVersionRelease = {
            listed_at = ?,
            owner_user_id = ?,
            owner_name = ?,
+           related_demand_id = ?,
+           related_demand_name = ?,
            previous_release_info = ?,
            remark = ?,
            last_operation_summary = ?,
@@ -903,6 +908,8 @@ const AppVersionRelease = {
         listedAt || null,
         owner.id || null,
         owner.name || null,
+        relatedDemand.id || null,
+        relatedDemand.name || null,
         previousReleaseInfo || null,
         remark || null,
         operationSummary || null,
